@@ -1837,16 +1837,18 @@ function buildCapacityData(ent) {
     const periodUsage = filtMs.reduce((s, m) => s + (m.usage || 0), 0);
     const consPrice   = periodUsage > 0 ? periodNet / periodUsage : UNIT_PRICE_TARGET;
 
-    // ── 확정월 집계 ──────────────────────────────────────────────
+    // ── 확정월 집계 ─────────────────────────────────────────────
+    // ★ 설계 Capacity(rawCap) 기준 — 심층 분석·손실 추정 모두 설계 기준 사용
+    //    (보정 Capacity monthCap은 호환 필드로만 보존)
     const confirmedUsage = confirmedMs.reduce((s, m) => s + (m.usage || 0), 0);
-    const confirmedCap   = monthCap * confirmedMs.length;
+    const confirmedCap   = rawCap * confirmedMs.length;      // 설계 기준
     const confirmedIdle  = Math.max(0, confirmedCap - confirmedUsage);
     const confirmedUtil  = confirmedCap  > 0 ? confirmedUsage / confirmedCap  * 100 : 0;
     const confirmedLoss  = confirmedIdle * consPrice;
 
     // ── 당월 MTD ─────────────────────────────────────────────────
     const mtdDaysIn  = daysInMonth(mtdM ? mtdM.monthNum : TODAY_MONTH);
-    const mtdCap     = mtdM ? Math.round(monthCap * TODAY_DAY / mtdDaysIn) : 0;
+    const mtdCap     = mtdM ? Math.round(rawCap * TODAY_DAY / mtdDaysIn) : 0;  // 설계 기준
     const mtdUsage   = mtdM ? (mtdM.usage || 0) : 0;
     const mtdIdle    = mtdM ? Math.max(0, mtdCap - mtdUsage) : 0;
     const mtdUtil    = mtdCap   > 0 ? mtdUsage  / mtdCap   * 100 : 0;
@@ -1854,8 +1856,8 @@ function buildCapacityData(ent) {
 
     // ── 당월 예상 (MTD → 월말 환산) ─────────────────────────────
     const projUsage  = (mtdM && TODAY_DAY > 0) ? Math.round(mtdUsage / TODAY_DAY * mtdDaysIn) : 0;
-    const projIdle   = mtdM ? Math.max(0, monthCap - projUsage) : 0;
-    const projUtil   = (monthCap > 0 && mtdM) ? projUsage / monthCap * 100 : 0;
+    const projIdle   = mtdM ? Math.max(0, rawCap - projUsage) : 0;  // 설계 기준
+    const projUtil   = (rawCap > 0 && mtdM) ? projUsage / rawCap * 100 : 0;  // 설계 기준
     const projLoss   = projIdle * consPrice;
 
     // ── 계절 지수 (확정월만 = 공식 계절지수) ──────────────────────
@@ -2057,8 +2059,23 @@ function renderCapacityPanel(ent) {
     const dispUsage  = s.hasMTD ? s.mtdUsage  : s.confirmedUsage;
     const dispCap    = s.hasMTD ? s.mtdCap    : s.confirmedCap;
     const dispStatus = s.hasMTD ? 'mtd' : 'confirmed';
-    const bColor     = utilColor(dispUtil);
-    const barW       = Math.min(100, dispUtil).toFixed(1);
+
+    // ★ 설계기준 가동률 — barW·라벨 모두 설계 Capacity(rawCap) 기준
+    //    (buildCapacityData가 rawCap 기준으로 바뀌었으므로 dispUtil = 설계 기준)
+    //    별도 rawCapacity 계산은 label용 역할만 수행
+    const rawCapacity = STORE_CAPACITY_RAW[s.name] || 0;
+    const designUtil  = rawCapacity > 0 && dispUsage > 0
+      ? (dispUsage / rawCapacity * 100) : dispUtil;
+    // 설계기준%(보정기준%) 표시 — 설계 먼저, 보정을 괄호 안에
+    const adjUtil     = s.monthCap > 0 && dispUsage > 0
+      ? (dispUsage / s.monthCap * 100) : 0;
+    const utilDualLabel = rawCapacity > 0
+      ? `${fmtP(designUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(adjUtil)})</span>`
+      : fmtP(designUtil);
+
+    const bColor = utilColor(designUtil);
+    // ★ 바 폭: 설계 Capacity 기준 가동률
+    const barW   = Math.min(100, designUtil).toFixed(1);
 
     // 이상값 배지 (카드 단위)
     let cardBadge = '';
@@ -2066,15 +2083,6 @@ function renderCapacityPanel(ent) {
       cardBadge += `<span class="status-badge anomaly" style="margin-left:0;margin-bottom:5px;display:inline-block">Capacity 검토 필요</span> `;
     if ((s.anomalies||[]).some(a=>a.includes('usage')))
       cardBadge += `<span class="status-badge anomaly" style="margin-left:0;margin-bottom:5px;display:inline-block">데이터 점검 필요</span>`;
-
-    // ★ Change 1: 설계기준 가동률 = usage / STORE_CAPACITY_RAW
-    const rawCapacity = STORE_CAPACITY_RAW[s.name] || 0;
-    const designUtil  = (rawCapacity > 0 && dispUsage > 0)
-      ? (dispUsage / rawCapacity * 100) : 0;
-    // 설계기준%(보정기준%) 표시 형식
-    const utilDualLabel = rawCapacity > 0
-      ? `${fmtP(designUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(dispUtil)})</span>`
-      : fmtP(dispUtil);
 
     html += `<div class="cap-store-card">
       <div class="cap-store-head">
@@ -2104,7 +2112,7 @@ function renderCapacityPanel(ent) {
   html += `<div class="cap-basis-note">
     <strong>📌 산정 기준</strong> ·
     적용 단가: <strong>보수적 단가 (순매출 ÷ 총사용)</strong>, 기간 평균 약 ${fmtS(Math.round(avgPrice))}/대 ·
-    미가동 = 보정 Capacity(설계 × 0.70) − 실제 세차 대수 ·
+    미가동 = 설계 Capacity(rawCap) − 실제 세차 대수 · 보정 Capacity(×0.85) 병기 표시 ·
     <strong>확정월</strong>: 풀 월 Capacity 기준 ·
     <strong>당월(MTD)</strong>: MTD Capacity = 월 Capacity × (경과일 ${TODAY_DAY}일 ÷ 월일수) 적용 ·
     <strong>시간대·요일 변동 미반영 추정치</strong> — 실제 손실과 상이할 수 있음
