@@ -703,6 +703,18 @@ function getEntity() {
   if (agg.mrr === 0 && (agg.retained || 0) > 0 && (agg.arpu || 0) > 0) {
     agg.mrr = agg.retained * agg.arpu; // MRR 추정값 (mrr 시트 없을 때 fallback)
   }
+  // FIX 1 — MRR YoY 추정: 매장 개별 시트에 MRR 시트 없어 mrrYoY=0인 경우, fleet 평균 YoY로 대체
+  if ((agg.mrrYoY === undefined || agg.mrrYoY === 0) && agg.mrr > 0 && dashboard.overall?.length) {
+    const fleetAgg = aggMonths(filterMonths(dashboard.overall));
+    if (fleetAgg && (fleetAgg.mrrYoY || 0) !== 0) {
+      agg.mrrYoY = fleetAgg.mrrYoY;  // fleet YoY를 proxy로 사용 (단일 매장 MRR 시트 없음)
+      agg._mrrYoyProxy = true;  // gauge sub 표시 시 "추정" 표기용
+    }
+  }
+  // mrrPrev도 추정: mrr / (1 + mrrYoY/100)
+  if ((agg.mrrPrev === 0 || !agg.mrrPrev) && agg.mrr > 0 && agg.mrrYoY) {
+    agg.mrrPrev = agg.mrr / (1 + agg.mrrYoY / 100);
+  }
   return { name: s.name, months: filtered, current: agg, ops: [s.ops||{}], isAll: false, storeData: s };
 }
 
@@ -792,27 +804,40 @@ function renderGauges(ent) {
   const churnDelta = gaugeDeltaHtml(c.churn||0, prevM?.churn||0, true);
   const mrrDelta   = gaugeDeltaHtml(c.mrrYoY||0, prevM?.mrrYoY||0, false);
 
+  // FIX 5A — 기간 라벨 (게이지 서브에 기간 컨텍스트 추가)
+  const periodLabel = ms.length > 0
+    ? ` <span style="font-size:10px;color:rgba(255,255,255,.45)">${ms[0].month}~${ms[ms.length-1].month} ${ms.length}개월</span>`
+    : '';
+
   // [Change 2] 게이지 서브레이블 강화 — KPI 카드 레이어 제거 후 핵심 컨텍스트 통합
   // 달성률: 목표 · 총매출
   const achSubGross = c.gross ? ` · 총매출 ${fmtS(c.gross)}` : '';
-  // 가동률: 총사용 · 미가동 추정
-  const capDataForGauge = typeof buildCapacityData === 'function' && ent
-    ? (buildCapacityData(ent)[0] || {}) : {};
-  const idleForGauge = capDataForGauge.idleCount != null ? capDataForGauge.idleCount
-    : (c.usage && c.utilization ? Math.max(0, Math.round(c.usage / (c.utilization/100)) - c.usage) : 0);
+  // FIX 2 — 가동률: 총사용 · 미가동 추정 (전체 시 모든 매장 합산)
+  const capArrForGauge = (typeof buildCapacityData === 'function' && ent) ? buildCapacityData(ent) : [];
+  const idleForGauge = ent.isAll
+    ? capArrForGauge.reduce((s, d) => s + (d.idleCount || 0), 0)
+    : (capArrForGauge[0]?.idleCount || 0);
   // 이탈건전성: 이탈 N명 · 유지 M명
   // MRR YoY: MRR X억 · ARPU Y만원
   const arpuSub = (c.arpu||0) > 0 ? ` · ARPU ${fmtS(c.arpu)}` : '';
 
+  // FIX 1 — MRR proxy 표기
+  const mrrSub = `MRR ${fmtS(c.mrr||0)}${arpuSub}${mrrDelta}${c._mrrYoyProxy?' (fleet 기준)':''}`;
+
   // HTML의 element ID와 일치: gsvg-*, gval-*, gsub-*
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
-    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}`);
+    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 미가동 ${fmtN(idleForGauge)}대 추정${utilDelta}`);
+    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 미가동 ${fmtN(idleForGauge)}대 추정${utilDelta}${periodLabel}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
-    churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}`);
+    churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}${periodLabel}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
-    mrrM, `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`, `MRR ${fmtS(c.mrr||0)}${arpuSub}${mrrDelta}`);
+    mrrM, `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`, mrrSub + periodLabel);
+
+  // FIX 3A — 가동률 게이지 라벨 '운영 가동률'로 명확화
+  const utilLabelEl = document.querySelector('[data-gauge="util"] .g-label') ||
+    document.getElementById('gsvg-util')?.closest('.gauge-card')?.querySelector('.g-label');
+  if (utilLabelEl) utilLabelEl.textContent = '운영 가동률';
 }
 
 /* ── 11. KPI 카드 ───────────────────────────────────────────── */
@@ -943,12 +968,19 @@ function renderSignals(ent) {
   else if (churn < 8)  signals.push({type:'warn', title:'이탈 주의', text:`이탈률 ${fmtP(churn)} — 리텐션 점검`});
   else                 signals.push({type:'bad',  title:'이탈 위험', text:`이탈률 ${fmtP(churn)} — 즉각 대응`});
 
-  // 가동률
+  // FIX 4 — 가동률 시그널 (100% 초과 과부하 케이스 추가)
   const util = c.utilization||0;
-  if (util >= 85)      signals.push({type:'ok',  title:'가동 최적', text:`가동률 ${fmtP(util)} — 고효율 운영`});
-  else if (util >= 65) signals.push({type:'ok',  title:'가동 양호', text:`가동률 ${fmtP(util)}`});
-  else if (util >= 45) signals.push({type:'warn', title:'가동 보통', text:`가동률 ${fmtP(util)} — 개선 여지`});
-  else                 signals.push({type:'bad',  title:'가동 저조', text:`가동률 ${fmtP(util)} — 효율화 필요`});
+  if (util > 100) {
+    signals.push({type:'warn', title:'과부하 주의', text:`운영 가동률 ${fmtP(util)} — Capacity 초과, 설비 점검 및 Capacity 재검토 필요`});
+  } else if (util >= 85) {
+    signals.push({type:'ok', title:'가동 최적', text:`운영 가동률 ${fmtP(util)} — 고효율 운영`});
+  } else if (util >= 65) {
+    signals.push({type:'ok', title:'가동 양호', text:`운영 가동률 ${fmtP(util)}`});
+  } else if (util >= 45) {
+    signals.push({type:'warn', title:'가동 보통', text:`운영 가동률 ${fmtP(util)} — 개선 여지`});
+  } else {
+    signals.push({type:'bad', title:'가동 저조', text:`운영 가동률 ${fmtP(util)} — 즉각 점검 필요`});
+  }
 
   // MRR
   const mrrYoY = c.mrrYoY||0;
@@ -974,9 +1006,11 @@ function renderInsights(ent) {
   const mrrDir    = (c.mrrYoY||0)>=0?'성장 중':'감소 중';
   const latestM   = ms.length ? ms[ms.length-1] : null;
 
+  // FIX 5C — 기간 정보 헤드라인에 추가
+  const periodInfo = ms.length > 0 ? `[${ms[0].month}~${ms[ms.length-1].month} 기준] ` : '';
   let summary = ent.isAll
-    ? `6개 직영점 합산: 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
-    : `${ent.name}: 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
+    ? `${periodInfo}6개 직영점 합산: 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
+    : `${periodInfo}${ent.name}: 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
 
   if (ent.isAll && topStore) {
     summary += `최고 매출 매장은 ${topStore.name} (${fmtS(topStore.gross)}).`;
@@ -1011,13 +1045,20 @@ function renderInsights(ent) {
       impact:`${gap} 추가 달성 필요`,
       owner:`마케팅팀`,
       action:`월말 집중 프로모션 · 신규 채널 테스트`});
+  // FIX 4 — over-capacity risk
+  if ((c.utilization||0) > 100) {
+    risks.push({lv:'warning', text:`운영 가동률 ${fmtP(c.utilization||0)} — 설비 Capacity 초과. 설계 기준 ${fmtP(c.utilizationRaw||0)}`,
+      impact:`설비 과부하 · 서비스 품질 저하 위험`,
+      owner:`사업운영팀 · 건축관리팀`,
+      action:'Capacity 설정값 재검토 · 설비 점검 우선'});
+  }
   if ((c.utilization||0) < 45)
-    risks.push({lv:'critical', text:`가동률 저조 (${fmtP(c.utilization||0)})`,
+    risks.push({lv:'critical', text:`운영 가동률 저조 (${fmtP(c.utilization||0)})`,
       impact:`미가동 손실 추정 매출 발생 · 설비 유휴화`,
       owner:`사업운영팀 · 건축관리팀`,
       action:`미가동 시간대 특가 프로모션 · 기업 제휴 세차 패키지 검토`});
   else if ((c.utilization||0) < 60)
-    risks.push({lv:'warning', text:`가동률 주의 (${fmtP(c.utilization||0)})`,
+    risks.push({lv:'warning', text:`운영 가동률 주의 (${fmtP(c.utilization||0)})`,
       impact:`Capacity 대비 세차 대수 부족`,
       owner:`사업운영팀 · 건축관리팀`,
       action:`유휴 설비 점검 · 예약 운영 시스템 검토`});
@@ -2058,12 +2099,19 @@ function renderCapacityPanel(ent) {
   const utilColor = c => c >= 80 ? '#216552' : c >= 60 ? '#c07b48' : '#b24c58';
   const lossColor = v => v > 50000000 ? '#b24c58' : v > 20000000 ? '#c07b48' : '#216552';
 
+  // FIX 3B — 패널 부제목 업데이트 (설계 Capacity 기준 명확화)
+  const capPanelArt = el.closest('article') || el.closest('section');
+  if (capPanelArt) {
+    const capSub = capPanelArt.querySelector('.sub');
+    if (capSub) capSub.textContent = '설계 Capacity 기준 운영 효율 분석';
+  }
+
   // ── 기준 고지 (상단 게이지와의 차이 명시) ─────────────────────
-  // 상단 게이지/헤드라인의 가동률은 ops 집계 시트 기준 (운영 단위 가동률)
+  // 상단 게이지/헤드라인의 운영 가동률은 ops 집계 시트 기준
   // 이 심층 분석 패널의 가동률은 설계 Capacity(rawCap) 기준 — 미가동·손실 추정 목적
   let html = `<div style="padding:6px 10px;background:var(--navy-soft);border:1px solid rgba(36,51,80,.12);border-radius:var(--r-sm);font-size:11px;color:#4a5568;margin-bottom:12px;line-height:1.6">
     ℹ️ <strong>심층 분석 기준:</strong> 설계 Capacity (rawCap) 기준 — 미가동 대수·손실 추정 목적<br>
-    상단 게이지·헤드라인의 가동률은 ops 집계 시트 기준 (운영 Capacity 기준, 더 높게 표시될 수 있음)
+    상단 게이지·헤드라인의 <strong>운영 가동률</strong>은 ops 집계 시트 기준 (운영 Capacity 기준, 더 높게 표시될 수 있음)
   </div>`;
 
   // ── 이상값 배너 ──────────────────────────────────────────────
@@ -2160,12 +2208,12 @@ function renderCapacityPanel(ent) {
     const rawCapacity = STORE_CAPACITY_RAW[s.name] || 0;
     const designUtil  = rawCapacity > 0 && dispUsage > 0
       ? (dispUsage / rawCapacity * 100) : dispUtil;
-    // 설계기준%(보정기준%) 표시 — 설계 먼저, 보정을 괄호 안에
+    // FIX 3B — 설계기준%(보정기준%) 표시 — 운영/설계 구분 라벨 명확화
     const adjUtil     = s.monthCap > 0 && dispUsage > 0
       ? (dispUsage / s.monthCap * 100) : 0;
     const utilDualLabel = rawCapacity > 0
-      ? `${fmtP(designUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(adjUtil)})</span>`
-      : fmtP(designUtil);
+      ? `운영 ${fmtP(designUtil)} <span style="font-size:12px;color:var(--muted)">/ 설계 ${fmtP(adjUtil)}</span>`
+      : `운영 ${fmtP(designUtil)}`;
 
     const bColor = utilColor(designUtil);
     // ★ 바 폭: 설계 Capacity 기준 가동률
@@ -2191,6 +2239,9 @@ function renderCapacityPanel(ent) {
       <div class="cap-store-meta">
         <span>${s.hasMTD?'MTD':'확정'} ${fmtN(dispUsage)}대 / ${fmtN(dispCap)}대</span>
         <span style="color:${lossColor(dispLoss)}">손실 ${fmtS(dispLoss)}</span>
+      </div>
+      <div class="cap-store-meta" style="margin-top:3px">
+        <span class="period-badge" style="font-size:10px;color:var(--muted);background:var(--bg2);border-radius:4px;padding:1px 6px">${s.confirmedMonths > 0 ? `확정 ${s.confirmedMonths}개월${s.hasMTD?' + MTD':''}` : (s.hasMTD ? 'MTD만' : '—')}</span>
       </div>
       <div class="cap-idle">보수 단가 ~${fmtS(Math.round(s.conservativePrice||0))}/대 · 미가동 <strong>${fmtN(dispIdle)}대</strong> · 설계 ${fmtN(s.rawCap||0)}대</div>
       ${s.hasMTD && s.projUsage > 0 ? `
@@ -2741,7 +2792,7 @@ function renderDetail(ent) {
     { label:'순매출',    val:fmtS(c.net),            sub:`할인·환불 차감` },
     { label:'MRR',      val:fmtS(c.mrr||0),         sub:`YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
     { label:'달성률',   val:fmtP(c.achievement||0),  sub:`목표 ${fmtS(c.target||0)}` },
-    { label:'가동률',   val:fmtP(c.utilization||0),  sub:`총사용 ${fmtN(c.usage||0)}` },
+    { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:`총사용 ${fmtN(c.usage||0)}` },
     { label:'이탈률',   val:fmtP(c.churn||0),        sub:`해지 ${fmtN(c.cancelSubs||0)}건` },
     { label:'환불율',   val:fmtP(c.refundRate||0),   sub:`총매출 기준` },
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
@@ -3037,10 +3088,10 @@ function renderInlineStoreDetail(ent) {
 
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">
       ${[
-        {l:'총매출',   v:fmtS(c.gross),        s:`목표 ${fmtS(c.target||0)}`},
-        {l:'달성률',   v:fmtP(ach),             s:`목표 대비 ${ach>=100?'초과':'미달'}`},
-        {l:'가동률',   v:fmtP(util),            s:`미가동 ${fmtN(capRow.idleCount||0)}대`},
-        {l:'이탈률',   v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
+        {l:'총매출',      v:fmtS(c.gross),        s:`목표 ${fmtS(c.target||0)}`},
+        {l:'달성률',      v:fmtP(ach),             s:`목표 대비 ${ach>=100?'초과':'미달'}`},
+        {l:'운영 가동률', v:fmtP(util),            s:`미가동 ${fmtN(capRow.idleCount||0)}대`},
+        {l:'이탈률',      v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
         {l:'순증감',   v:`${netAdds>=0?'+':''}${fmtN(netAdds)}`, s:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`},
       ].map(i=>`
         <div class="d-item">
