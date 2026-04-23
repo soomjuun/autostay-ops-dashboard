@@ -248,6 +248,11 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
     mrr:          mv(mrrM,  'MRR',        spec.cur),
     mrrPrev:      mv(mrrM,  'MRR',        spec.prev),
     mrrYoY:       mv(mrrM,  'MRR',        spec.yoy, pct),
+    arr:          mv(mrrM,  'ARR',        spec.cur),
+    arrPrev:      mv(mrrM,  'ARR',        spec.prev),
+    arrYoY:       mv(mrrM,  'ARR',        spec.yoy, pct),
+    ltv:          mv(mrrM,  'LTV(추정)',   spec.cur),
+    ltvPrev:      mv(mrrM,  'LTV(추정)',   spec.prev),
     // ★ 월 상태 (confirmed/mtd/projected) — Capacity·계절지수 계산 정합성 기준
     monthNum: spec.num || 0,
     status:   spec.num ? monthStatus(spec.num) : 'confirmed',
@@ -391,9 +396,13 @@ function aggMonths(months) {
     //   → aggMonths()의 utilization = t.usage/t.cap*100 은 보정 Capacity 기반 집계 가동률임
     //   ★ NOTE: 이 cap은 설계 rawCap이 아닌 보정값 역산 — 단일 소스 충족을 위해 getEntity()에서
     //            ops 시트 utilization으로 최종 보완됨 (getEntity() 참조)
-    cap:           a.cap+(m.utilization>0?m.usage/(m.utilization/100):0)
+    cap:           a.cap+(m.utilization>0?m.usage/(m.utilization/100):0),
+    arr:           a.arr+m.arr,
+    ltvSum:        a.ltvSum+(m.ltv>0?m.ltv:0),
+    ltvCount:      a.ltvCount+(m.ltv>0?1:0)
   }), {target:0,gross:0,grossPrev:0,net:0,netPrev:0,usage:0,retained:0,retainedPrev:0,
-       newSubs:0,cancelSubs:0,netAdds:0,mrr:0,mrrPrev:0,discountAmount:0,refundVal:0,cap:0});
+       newSubs:0,cancelSubs:0,netAdds:0,mrr:0,mrrPrev:0,discountAmount:0,refundVal:0,cap:0,
+       arr:0,ltvSum:0,ltvCount:0});
   // 최신 월(마지막 요소) 기준 스냅샷 값
   const last = months[months.length-1];
   return {
@@ -413,7 +422,11 @@ function aggMonths(months) {
     retainedYoY: t.retainedPrev?(t.retained-t.retainedPrev)/t.retainedPrev*100:0,
     // ARPU: MRR / 유지 구독자 (가장 최근 달 기준, 없으면 순매출/사용건수로 추산)
     arpu: last.retained>0 && last.mrr>0 ? last.mrr/last.retained
-         : t.usage>0 ? t.net/t.usage : 0
+         : t.usage>0 ? t.net/t.usage : 0,
+    // ARR: 연간 기준값이므로 최신 달 값 사용 (누적 합산 아님)
+    arr:    last.arr    || 0,
+    ltv:    last.ltv    || 0,
+    arrYoY: last.arrYoY || 0
   };
 }
 
@@ -847,7 +860,9 @@ const KPI_TOOLTIPS = {
   'MRR':    { formula:'월 정기 구독 매출 합계', benchmark:'YoY +10% 이상 = 성장 안정' },
   '가동률':  { formula:'ops 집계 시트 기준 (실제 세차 대수 ÷ 운영 Capacity)\n설계 Capacity 기준 병기: ops테이블 설계(보정) 형식으로 표시\n심층 분석 미가동·손실은 설계 Capacity 기준', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
   '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
-  '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' }
+  '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' },
+  'ARR':    { formula:'MRR × 12 (연간 반복 매출)', benchmark:'YoY +20% 이상 = 고성장' },
+  'LTV':    { formula:'ARPU ÷ 월 이탈률 (고객 생애 가치 추정)', benchmark:'LTV ÷ CAC ≥ 3 = 건전' }
 };
 
 function kpiTooltipIcon(label) {
@@ -2566,6 +2581,8 @@ function renderPaymentPanel(ent) {
   const net   = c.net   || 0;
   const mrr   = c.mrr   || 0;
   const retained = c.retained || 0;
+  const arr   = c.arr   || 0;
+  const ltv   = c.ltv   || 0;
 
   // 단가 추정 (available data)
   const revenuePerWash  = usage > 0 ? gross / usage : 0;    // 총매출 / 총사용 = 건당 매출
@@ -2588,7 +2605,19 @@ function renderPaymentPanel(ent) {
       <div class="pay-label">${it.label}</div>
       <div class="pay-val">${it.val}</div>
       <div class="pay-note">${it.note}</div>
-    </div>`).join('');
+    </div>`).join('') + `
+  <div class="pay-row" style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:2px">
+    <div class="pay-item accent">
+      <div class="pay-label">ARR${kpiTooltipIcon('ARR')}</div>
+      <div class="pay-val">${arr > 0 ? fmtS(arr) : '—'}</div>
+      <div class="pay-note">${c.arrYoY ? `YoY ${c.arrYoY > 0 ? '+' : ''}${fmtP(c.arrYoY)}` : 'MRR × 12'}</div>
+    </div>
+    <div class="pay-item navy">
+      <div class="pay-label">LTV (추정)${kpiTooltipIcon('LTV')}</div>
+      <div class="pay-val">${ltv > 0 ? fmtW(ltv) : '—'}</div>
+      <div class="pay-note">ARPU ÷ 월 이탈률 추정</div>
+    </div>
+  </div>`;
 }
 
 /* ── 16. 히트맵 ─────────────────────────────────────────────── */
@@ -2797,7 +2826,9 @@ function renderDetail(ent) {
     { label:'환불율',   val:fmtP(c.refundRate||0),   sub:`총매출 기준` },
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
     { label:'할인비중', val:fmtP(c.discountShare||0), sub:fmtS(c.discountAmount||0) },
-    { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:`MRR ÷ 유지 구독자` }
+    { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:`MRR ÷ 유지 구독자` },
+    { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`MRR×12 · YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'}` },
+    { label:'LTV(추정)', val: (c.ltv||0) > 0 ? fmtW(c.ltv) : '—', sub:`ARPU ÷ 이탈률 추정` }
   ];
   $('detailGrid').innerHTML = items.map(i=>
     `<div class="d-item">
@@ -3093,6 +3124,19 @@ function renderInlineStoreDetail(ent) {
         {l:'운영 가동률', v:fmtP(util),            s:`미가동 ${fmtN(capRow.idleCount||0)}대`},
         {l:'이탈률',      v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
         {l:'순증감',   v:`${netAdds>=0?'+':''}${fmtN(netAdds)}`, s:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`},
+      ].map(i=>`
+        <div class="d-item">
+          <div class="d-label">${i.l}</div>
+          <div class="d-val">${i.v}</div>
+          <div class="d-sub">${i.s}</div>
+        </div>`).join('')}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+      ${[
+        {l:'MRR',         v:fmtS(c.mrr||0),      s:`YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`},
+        {l:'ARPU',        v:(c.arpu||0)>0?fmtS(c.arpu):'—', s:`MRR ÷ 유지 구독자`},
+        {l:'ARR',         v:(c.arr||0)>0?fmtS(c.arr):'—', s:`YoY ${c.arrYoY?(c.arrYoY>0?'+':'')+fmtP(c.arrYoY):'—'}`},
+        {l:'LTV(추정)',    v:(c.ltv||0)>0?fmtW(c.ltv):'—', s:`ARPU ÷ 이탈률 추정`},
       ].map(i=>`
         <div class="d-item">
           <div class="d-label">${i.l}</div>

@@ -719,78 +719,128 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
 .ach-cell-warn{background:var(--amber-soft);color:var(--amber);font-weight:800;padding:3px 7px;border-radius:6px;display:inline-block}
 .ach-cell-bad {background:var(--rose-soft);color:var(--rose);font-weight:900;padding:3px 7px;border-radius:6px;display:inline-block}
 
-/* ══ Change 5: 모바일 반응형 (max-width: 767px) ════════════════ */
+/* ══ 모바일 최적화 (max-width: 767px) — PC 레이아웃 무변경 ══════════════════ */
 @media(max-width:767px){
-  /* 레이아웃 */
-  .wrap{padding:12px 12px 40px}
+  /* 기본 레이아웃 */
+  .wrap{padding:10px 10px 40px}
 
-  /* 헤더 sticky */
-  .hero{
-    position:sticky;top:0;z-index:100;
-    border-radius:0;margin-bottom:10px;
-    padding:18px 16px 14px;
-  }
-  .toolbar{
-    position:sticky;top:0;z-index:99;
-    border-radius:0;margin-bottom:10px;
-  }
+  /* 헤더 */
+  .hero{padding:14px 12px 10px;border-radius:0 0 var(--r-lg) var(--r-lg)}
+  .hero-top{flex-direction:column;gap:10px}
+  .hero-copy p{font-size:11px;line-height:1.5}
+  .hero-copy h1{font-size:16px}
+  .hero h1{font-size:16px}
+  .hero-focus{width:100%;display:flex;flex-direction:row;align-items:center;gap:10px;padding:10px 12px}
+  .focus-value{font-size:16px}
+  .focus-score{margin-top:0}
+  .hero-meta{flex-wrap:wrap;gap:4px;padding:6px 0 0}
+  .meta-pill{font-size:10px;padding:2px 7px}
+
+  /* 툴바 */
+  .toolbar{flex-wrap:wrap;gap:6px;padding:8px 10px}
+  .toolbar select,.toolbar button,.toggle{font-size:12px}
+  .toggle button{padding:5px 10px;font-size:12px}
+
+  /* 액션 센터 */
+  .action-center{grid-template-columns:1fr!important;gap:10px}
+  .ac-card{padding:14px 14px}
+  .ac-title{font-size:12px}
+  .ac-loss-total{font-size:26px}
 
   /* 게이지 그리드 → 2열 */
-  .gauge-grid{grid-template-columns:repeat(2,1fr)!important}
+  .gauge-grid{grid-template-columns:repeat(2,1fr)!important;gap:10px}
+  .gauge-panel{padding:14px 10px}
+  .gauge-value{font-size:20px!important}
+  .gauge-sub{font-size:10px!important;line-height:1.4}
+  .gauge-meta-label{font-size:11px}
 
-  /* KPI 그리드 → 1열 */
-  .kpis{grid-template-columns:1fr!important}
+  /* 패널 패딩 */
+  .panel{padding:14px 12px}
+  .panel h2{font-size:13px}
 
-  /* 시그널 → 1열 */
-  .signal-grid{grid-template-columns:1fr!important}
-
-  /* 인사이트 → 1열 */
-  .insights{grid-template-columns:1fr!important}
-
-  /* 12열 마스터 그리드 → 1열 */
+  /* 마스터 차트 그리드 */
   .chart-master-grid{grid-template-columns:1fr!important}
   .chart-master-grid [class*="col-"]{grid-column:span 1!important}
 
-  /* 액션 커맨드 센터 → 1열 */
-  .action-center{grid-template-columns:1fr!important}
+  /* 차트 높이 */
+  .chart.xl canvas{height:200px!important}
+  .chart.lg canvas{height:180px!important}
+  .chart-master-grid .chart.xl canvas{height:200px!important}
+  .chart-master-grid .chart.lg canvas{height:180px!important}
 
-  /* 테이블 수평 스크롤 */
-  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-
-  /* 히트맵 수평 스크롤 */
-  .heatmap-section{overflow-x:auto;-webkit-overflow-scrolling:touch}
-
-  /* equal-grid → 1열 */
+  /* 2열 그리드들 → 1열 */
+  .kpis{grid-template-columns:1fr!important}
+  .signal-grid{grid-template-columns:1fr!important}
+  .insights{grid-template-columns:1fr!important}
   .equal-grid{grid-template-columns:1fr!important}
 
-  /* capacity store grid → 1열 */
+  /* 구독/품질 패널 옆 나란히 → 세로 */
+  .chart-master-grid .col-6{grid-column:span 1!important}
+
+  /* 테이블 */
+  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:var(--r-md)}
+  #storeTableBody td,#storeTableBody th{white-space:nowrap;font-size:11px;padding:6px 6px}
+  thead th{padding:6px 6px;font-size:10px}
+
+  /* Capacity 분석 */
   .cap-store-grid{grid-template-columns:1fr!important}
-
-  /* cap-summary → 2열 */
   .cap-summary{grid-template-columns:repeat(2,1fr)!important}
+  .cap-store-card{padding:12px 12px}
 
-  /* detail-grid → 2열 */
+  /* 디테일 그리드 */
   .detail-grid{grid-template-columns:repeat(2,1fr)!important}
 
-  /* hero 폰트 축소 */
-  .hero h1{font-size:18px}
-  .hero-copy p{font-size:11.5px}
-  .focus-value{font-size:17px}
+  /* 히트맵 */
+  .heatmap-section{overflow-x:auto;-webkit-overflow-scrolling:touch}
 
-  /* 차트 높이 유지 (aspect ratio 보존) */
-  .chart.xl canvas{height:220px!important}
-  .chart.lg canvas{height:200px!important}
-  .chart-master-grid .chart.xl canvas{height:220px!important}
-  .chart-master-grid .chart.lg canvas{height:200px!important}
+  /* 파이프라인 */
+  .pipe-grid{grid-template-columns:1fr!important}
 
-  /* KPI 카드 폰트 */
-  .kpi-value{font-size:20px}
+  /* 베치마크/랭킹 */
+  .rank-row{flex-wrap:wrap}
+
+  /* 인라인 드릴다운 */
+  #inlineStoreDetail .detail-grid{grid-template-columns:repeat(2,1fr)!important}
+
+  /* 스냅샷 / 시즌 등 col-6 패널들 */
+  article.panel.col-6{grid-column:span 1!important}
+
+  /* 알림 스트립 */
+  #alertStrip{margin-bottom:8px}
+  .alert-item{font-size:11.5px;padding:6px 10px}
+
+  /* 폰트 전반 축소 */
+  .kpi-value{font-size:18px!important}
   .kpi-label{font-size:10px}
+  .kpi-delta{font-size:10px}
 
-  /* 게이지 */
-  .gauge-value{font-size:22px}
+  /* 게이지 SVG 줄이기 */
+  .gauge-svg-wrap svg{max-width:120px!important}
 
-  /* panel 패딩 축소 */
-  .panel{padding:14px 14px}
+  /* 스크롤바 숨김 (iOS) */
+  .table-wrap::-webkit-scrollbar{height:3px}
+  .table-wrap::-webkit-scrollbar-thumb{background:var(--border-md);border-radius:3px}
+
+  /* 텍스트 오버플로우 */
+  .ac-danger-name{font-size:12px}
+  .ac-danger-issues{font-size:10px}
+  .verdict-chip{font-size:9.5px;padding:2px 6px}
+
+  /* 버튼들 */
+  #refreshBtn{padding:6px 10px;font-size:12px}
+
+  /* 로딩 오버레이 */
+  .load-inner{padding:28px 24px;min-width:280px}
+  .load-label{font-size:13px}
+}
+
+/* 태블릿 중간 단계 (768px~1024px) */
+@media(min-width:768px) and (max-width:1024px){
+  .wrap{padding:16px 16px 48px}
+  .gauge-grid{grid-template-columns:repeat(4,1fr)}
+  .action-center{grid-template-columns:repeat(2,1fr)}
+  .chart-master-grid{grid-template-columns:repeat(2,1fr)}
+  .chart-master-grid [class*="col-"]{grid-column:span 1}
+  .chart-master-grid .col-6,.chart-master-grid .col-8,.chart-master-grid .col-12{grid-column:span 2}
 }
 
