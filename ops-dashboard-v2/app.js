@@ -364,12 +364,15 @@ function parseStore(name, rows) {
   const q1 = mRows(rows, q1Idx);
   const q2 = mRows(rows, q2Idx);
   const curSpec = { cur:1, prev:2, yoy:3, mom:0 };
+  // ★ mrrM에 src(동일 섹션 맵) 전달 — 매장 개별 시트의 MRR 행을 직접 파싱
+  //   gviz 확인: Q1 row35 'MRR' 컬럼 레이아웃이 MONTH_SPECS cur/prev/yoy와 완전 일치
+  //   수정 전: em=new Map() 전달 → mrr/mrrPrev/mrrYoY 모두 0 (빈 맵)
+  //   수정 후: src 전달 → 실제 MRR 데이터 파싱 (53,196,260원 등)
   const months = MONTH_SPECS.map(sp => {
     const src = sp.quarter==='Q1'?q1:q2;
-    const em = new Map();
-    return buildMonth(sp.month, sp.quarter, src, src, em, sp);
+    return buildMonth(sp.month, sp.quarter, src, src, src, sp);
   });
-  return { name, current: buildMonth('4월','Q2',snap,snap,new Map(),curSpec), months };
+  return { name, current: buildMonth('4월','Q2',snap,snap,snap,curSpec), months };
 }
 
 function aggMonths(months) {
@@ -699,22 +702,13 @@ function getEntity() {
   // utilizationRaw(설계기준)도 함께 전달 — 심층 분석 패널 병기 표시용
   if (s.ops?.utilizationRaw > 0) agg.utilizationRaw = s.ops.utilizationRaw;
   if (!agg.refundRate && s.ops?.refundRate > 0) agg.refundRate = s.ops.refundRate;
-  // [통일] MRR: mrr 시트 기반. mrr=0이고 유지 구독자가 있으면 arpu로 추정
+  // MRR: parseStore() 수정으로 이제 매장 개별 시트에서 직접 파싱됨
+  // mrr=0인 경우만 arpu×retained로 fallback (시트에 MRR 행 없는 경우 대비)
   if (agg.mrr === 0 && (agg.retained || 0) > 0 && (agg.arpu || 0) > 0) {
-    agg.mrr = agg.retained * agg.arpu; // MRR 추정값 (mrr 시트 없을 때 fallback)
+    agg.mrr = agg.retained * agg.arpu; // MRR 추정값 fallback
   }
-  // FIX 1 — MRR YoY 추정: 매장 개별 시트에 MRR 시트 없어 mrrYoY=0인 경우, fleet 평균 YoY로 대체
-  if ((agg.mrrYoY === undefined || agg.mrrYoY === 0) && agg.mrr > 0 && dashboard.overall?.length) {
-    const fleetAgg = aggMonths(filterMonths(dashboard.overall));
-    if (fleetAgg && (fleetAgg.mrrYoY || 0) !== 0) {
-      agg.mrrYoY = fleetAgg.mrrYoY;  // fleet YoY를 proxy로 사용 (단일 매장 MRR 시트 없음)
-      agg._mrrYoyProxy = true;  // gauge sub 표시 시 "추정" 표기용
-    }
-  }
-  // mrrPrev도 추정: mrr / (1 + mrrYoY/100)
-  if ((agg.mrrPrev === 0 || !agg.mrrPrev) && agg.mrr > 0 && agg.mrrYoY) {
-    agg.mrrPrev = agg.mrr / (1 + agg.mrrYoY / 100);
-  }
+  // _mrrNoSheet: mrr과 mrrPrev 모두 0이면 시트 미연결 상태 — 게이지에 "—" 표시
+  agg._mrrNoSheet = (agg.mrrYoY === 0 && agg.mrrPrev === 0 && agg.mrr === 0);
   return { name: s.name, months: filtered, current: agg, ops: [s.ops||{}], isAll: false, storeData: s };
 }
 
@@ -821,18 +815,23 @@ function renderGauges(ent) {
   // MRR YoY: MRR X억 · ARPU Y만원
   const arpuSub = (c.arpu||0) > 0 ? ` · ARPU ${fmtS(c.arpu)}` : '';
 
-  // FIX 1 — MRR proxy 표기
-  const mrrSub = `MRR ${fmtS(c.mrr||0)}${arpuSub}${mrrDelta}${c._mrrYoyProxy?' (fleet 기준)':''}`;
+  // MRR 게이지: 개별 매장 MRR 시트 미연결 시 YoY = 0 → 값 대신 "—" 표시 (fleet proxy 오해 방지)
+  const mrrValText = c._mrrNoSheet
+    ? '—'
+    : `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`;
+  const mrrSubText = c._mrrNoSheet
+    ? `MRR ${fmtS(c.mrr||0)}${arpuSub} · YoY 시트 미연결${periodLabel}`
+    : `MRR ${fmtS(c.mrr||0)}${arpuSub}${mrrDelta}${periodLabel}`;
 
   // HTML의 element ID와 일치: gsvg-*, gval-*, gsub-*
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
     ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 미가동 ${fmtN(idleForGauge)}대 추정${utilDelta}${periodLabel}`);
+    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 설계기준 미가동 ${fmtN(idleForGauge)}대${utilDelta}${periodLabel}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}${periodLabel}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
-    mrrM, `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`, mrrSub + periodLabel);
+    mrrM, mrrValText, mrrSubText);
 
   // FIX 3A — 가동률 게이지 라벨 '운영 가동률'로 명확화
   const utilLabelEl = document.querySelector('[data-gauge="util"] .g-label') ||
@@ -2208,12 +2207,13 @@ function renderCapacityPanel(ent) {
     const rawCapacity = STORE_CAPACITY_RAW[s.name] || 0;
     const designUtil  = rawCapacity > 0 && dispUsage > 0
       ? (dispUsage / rawCapacity * 100) : dispUtil;
-    // FIX 3B — 설계기준%(보정기준%) 표시 — 운영/설계 구분 라벨 명확화
-    const adjUtil     = s.monthCap > 0 && dispUsage > 0
+    // 설계기준(rawCap) vs 보정기준(rawCap×0.85) 병기
+    // ★ "운영 가동률"(ops시트 col13)과 혼동 방지: 이 카드는 Capacity 계산값만 다룸
+    const adjUtil = s.monthCap > 0 && dispUsage > 0
       ? (dispUsage / s.monthCap * 100) : 0;
     const utilDualLabel = rawCapacity > 0
-      ? `운영 ${fmtP(designUtil)} <span style="font-size:12px;color:var(--muted)">/ 설계 ${fmtP(adjUtil)}</span>`
-      : `운영 ${fmtP(designUtil)}`;
+      ? `설계 기준 ${fmtP(designUtil)} <span style="font-size:11.5px;color:var(--muted);font-weight:500">/ 보정 기준 ${fmtP(adjUtil)}</span>`
+      : `설계 기준 ${fmtP(designUtil)}`;
 
     const bColor = utilColor(designUtil);
     // ★ 바 폭: 설계 Capacity 기준 가동률
