@@ -630,10 +630,15 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
 
 /* ══ CAPACITY BASIS NOTE ════════════════════════════════════════ */
 .cap-basis-note{
-  margin-top:14px;padding:10px 14px;
+  margin-top:14px;padding:8px 14px;
   background:var(--amber-soft);border:1px solid rgba(192,123,72,.2);
-  border-radius:var(--r-sm);font-size:11px;color:var(--muted);line-height:1.65
+  border-radius:var(--r-sm);font-size:11px;color:var(--muted);
+  white-space:nowrap;overflow-x:auto;line-height:1.8;
+  /* 스크롤바 최소화 */
+  scrollbar-width:thin;scrollbar-color:rgba(192,123,72,.3) transparent;
 }
+.cap-basis-note::-webkit-scrollbar{height:3px}
+.cap-basis-note::-webkit-scrollbar-thumb{background:rgba(192,123,72,.3);border-radius:3px}
 .cap-basis-note strong{color:var(--amber);font-weight:700}
 
 /* ══ COLLAPSIBLE CHART SECTIONS ════════════════════════════════ */

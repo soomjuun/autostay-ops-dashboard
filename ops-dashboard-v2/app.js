@@ -2994,53 +2994,80 @@ function renderActionCenter(ent) {
       <span>${a.text}</span>
     </div>`).join('');
 
-  // ② 문제 매장 TOP3 (운영 레버 스코어 하위) ─────────────────
-  const storeScores = dashboard.stores.map(s => {
-    const filtMs = filterMonths(s.months);
-    const agg    = aggMonths(filtMs) || {};
-    const ops    = s.ops || {};
-    // ops 시트 단점 값으로 보완
-    if (ops.arpu   > 0) agg.arpu        = ops.arpu;
-    if (!agg.churn        && ops.churn        > 0) agg.churn        = ops.churn;
-    if (!agg.achievement  && ops.achievement  > 0) agg.achievement  = ops.achievement;
-    if (!agg.utilization  && ops.utilization  > 0) agg.utilization  = ops.utilization;
-    if (!agg.refundRate   && ops.refundRate   > 0) agg.refundRate   = ops.refundRate;
-    const score = computeScore(agg);
-    // 문제 지표 목록
-    const issues = [];
-    if ((agg.achievement||0) < 80)  issues.push(`달성률 ${fmtP(agg.achievement||0)}`);
-    if ((agg.churn||0)       > 8)   issues.push(`이탈 ${fmtP(agg.churn||0)}`);
-    if ((agg.utilization||0) < 60)  issues.push(`가동 ${fmtP(agg.utilization||0)}`);
-    if ((agg.refundRate||0)  > 10)  issues.push(`환불 ${fmtP(agg.refundRate||0)}`);
-    if (!issues.length && score < 65) issues.push('복합 지표 저조');
-    return { name: s.name, score, issues };
-  }).sort((a,b) => a.score - b.score).slice(0, 3);
+  // ② 문제 매장 / 매장 현황 ────────────────────────────────────
+  // 전체 뷰: TOP3 랭킹 | 단일 매장: 해당 매장 이슈 집중 표시
+  const dangerTitleEl = document.querySelector('.ac-danger .ac-title');
+  if (!ent.isAll) {
+    // ── 단일 매장: 해당 매장 이슈 표시 ──
+    if (dangerTitleEl) dangerTitleEl.textContent = `${ent.name} 운영 현황`;
+    const score  = computeScore(c);
+    const sIssues = [];
+    if ((c.achievement||0) < 80)  sIssues.push(`달성률 ${fmtP(c.achievement||0)}`);
+    if ((c.churn||0)       > 8)   sIssues.push(`이탈 ${fmtP(c.churn||0)}`);
+    if ((c.utilization||0) < 60)  sIssues.push(`가동 ${fmtP(c.utilization||0)}`);
+    if ((c.refundRate||0)  > 10)  sIssues.push(`환불 ${fmtP(c.refundRate||0)}`);
+    if ((c.netAdds||0)     < 0)   sIssues.push(`순증감 ${c.netAdds||0}건`);
+    const scoreColor = score >= 75 ? '#216552' : score >= 60 ? '#c07b48' : '#b24c58';
+    $('acDangerCount').textContent = sIssues.length || '✓';
+    $('acDangerList').innerHTML = `
+      <div class="ac-danger-store">
+        <span class="ac-danger-rank" style="font-size:14px">📍</span>
+        <div style="flex:1;min-width:0">
+          <div class="ac-danger-name">${ent.name}</div>
+          <div class="ac-danger-issues">${sIssues.length ? sIssues.join(' · ') : '주요 이슈 없음 — 정상 운영 중'}</div>
+        </div>
+        <span class="ac-danger-score" style="color:${scoreColor}">${score}점</span>
+      </div>`;
+  } else {
+    // ── 전체 뷰: TOP3 랭킹 ──
+    if (dangerTitleEl) dangerTitleEl.textContent = '문제 매장 TOP 3';
+    const storeScores = dashboard.stores.map(s => {
+      const filtMs = filterMonths(s.months);
+      const agg    = aggMonths(filtMs) || {};
+      const ops    = s.ops || {};
+      if (ops.arpu        > 0) agg.arpu        = ops.arpu;
+      if (!agg.churn        && ops.churn        > 0) agg.churn        = ops.churn;
+      if (!agg.achievement  && ops.achievement  > 0) agg.achievement  = ops.achievement;
+      if (!agg.utilization  && ops.utilization  > 0) agg.utilization  = ops.utilization;
+      if (!agg.refundRate   && ops.refundRate   > 0) agg.refundRate   = ops.refundRate;
+      const score = computeScore(agg);
+      const issues = [];
+      if ((agg.achievement||0) < 80)  issues.push(`달성률 ${fmtP(agg.achievement||0)}`);
+      if ((agg.churn||0)       > 8)   issues.push(`이탈 ${fmtP(agg.churn||0)}`);
+      if ((agg.utilization||0) < 60)  issues.push(`가동 ${fmtP(agg.utilization||0)}`);
+      if ((agg.refundRate||0)  > 10)  issues.push(`환불 ${fmtP(agg.refundRate||0)}`);
+      if (!issues.length && score < 65) issues.push('복합 지표 저조');
+      return { name: s.name, score, issues };
+    }).sort((a,b) => a.score - b.score).slice(0, 3);
 
-  // ★ 배지는 항상 실제 표시 목록 수(slice 결과)와 일치시킴
-  $('acDangerCount').textContent = storeScores.length;
-  $('acDangerList').innerHTML = storeScores.map((s, i) => {
-    const scoreColor = s.score >= 65 ? '#c07b48' : '#b24c58';
-    return `<div class="ac-danger-store">
-      <span class="ac-danger-rank">${i+1}</span>
-      <div style="flex:1;min-width:0">
-        <div class="ac-danger-name">${s.name}</div>
-        <div class="ac-danger-issues">${s.issues.length ? s.issues.join(' · ') : '집계 중'}</div>
-      </div>
-      <span class="ac-danger-score" style="color:${scoreColor}">${s.score}점</span>
-    </div>`;
-  }).join('');
+    $('acDangerCount').textContent = storeScores.length;
+    $('acDangerList').innerHTML = storeScores.map((s, i) => {
+      const scoreColor = s.score >= 65 ? '#c07b48' : '#b24c58';
+      return `<div class="ac-danger-store">
+        <span class="ac-danger-rank">${i+1}</span>
+        <div style="flex:1;min-width:0">
+          <div class="ac-danger-name">${s.name}</div>
+          <div class="ac-danger-issues">${s.issues.length ? s.issues.join(' · ') : '집계 중'}</div>
+        </div>
+        <span class="ac-danger-score" style="color:${scoreColor}">${s.score}점</span>
+      </div>`;
+    }).join('');
+  }
 
-  // ③ 손실 추정 금액 (전체 기준) ─────────────────────────────
-  // [Change 3] 액션 센터의 손실 추정은 항상 전체 포트폴리오 기준 — 매장 필터 무관하게 전체 표시
-  const allCapData  = buildCapacityData({ isAll: true, months: [] });
-  const totalLossAll = allCapData.reduce((s,d) => s + (d.lossEstimate||0), 0);
-  const totalIdleAll = allCapData.reduce((s,d) => s + (d.idleCount||0), 0);
-  const sorted = [...allCapData].sort((a,b) => b.lossEstimate - a.lossEstimate);
-  const worstStore = sorted[0];
+  // ③ 손실 추정 금액 ─────────────────────────────────────────
+  // 전체 뷰: 포트폴리오 합산 | 단일 매장: 해당 매장 기준
+  const lossTitleEl = document.querySelector('.ac-loss .ac-title');
+  const capForLoss = ent.isAll
+    ? buildCapacityData({ isAll: true, months: [] })
+    : buildCapacityData(ent);
+  const totalLossAll  = capForLoss.reduce((s,d) => s+(d.lossEstimate||0), 0);
+  const totalIdleAll  = capForLoss.reduce((s,d) => s+(d.idleCount||0),    0);
+  const sorted = [...capForLoss].sort((a,b) => b.lossEstimate - a.lossEstimate);
+  if (lossTitleEl) lossTitleEl.textContent = ent.isAll ? '손실 추정 금액' : `${ent.name} 손실 추정`;
 
   $('acLossBody').innerHTML = `
     <div class="ac-loss-total">${fmtS(totalLossAll)}</div>
-    <div class="ac-loss-sub">미가동 ${fmtN(totalIdleAll)}대 × ${fmtN(UNIT_PRICE_TARGET)}원/대</div>
+    <div class="ac-loss-sub">${ent.isAll ? '전체 매장 합산 · ' : ''}설계기준 미가동 ${fmtN(totalIdleAll)}대 × ${fmtN(UNIT_PRICE_TARGET)}원/대</div>
     <div class="ac-loss-breakdown">
       ${sorted.filter(d => d.lossEstimate > 0).map(d => {
         const pct = totalLossAll > 0 ? (d.lossEstimate / totalLossAll * 100).toFixed(0) : 0;
