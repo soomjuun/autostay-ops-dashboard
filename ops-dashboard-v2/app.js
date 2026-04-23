@@ -692,8 +692,12 @@ function getEntity() {
   if (s.ops?.arpu > 0) agg.arpu = s.ops.arpu;
   if (!agg.churn && s.ops?.churn > 0) agg.churn = s.ops.churn;
   if (!agg.achievement && s.ops?.achievement > 0) agg.achievement = s.ops.achievement;
-  // [통일] 가동률 단일 소스: ops시트 col13 — 단일 매장 뷰에서도 ops 시트 값 우선
-  if (!agg.utilization && s.ops?.utilization > 0) agg.utilization = s.ops.utilization;
+  // ★ [가동률 단일화] ops시트 col13 값을 조건 없이 항상 우선 적용
+  //   - aggMonths()의 보정 Capacity 역산값(≈보정 기준)을 ops 시트 실측값으로 덮어씀
+  //   - 이로써 게이지·헤드라인·알림·드릴다운·심층 분석이 모두 동일 기준으로 통일됨
+  if (s.ops?.utilization > 0) agg.utilization = s.ops.utilization;
+  // utilizationRaw(설계기준)도 함께 전달 — 심층 분석 패널 병기 표시용
+  if (s.ops?.utilizationRaw > 0) agg.utilizationRaw = s.ops.utilizationRaw;
   if (!agg.refundRate && s.ops?.refundRate > 0) agg.refundRate = s.ops.refundRate;
   // [통일] MRR: mrr 시트 기반. mrr=0이고 유지 구독자가 있으면 arpu로 추정
   if (agg.mrr === 0 && (agg.retained || 0) > 0 && (agg.arpu || 0) > 0) {
@@ -804,7 +808,7 @@ function renderGauges(ent) {
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
     ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}건 · 미가동 ${fmtN(idleForGauge)}건 추정${utilDelta}`);
+    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 미가동 ${fmtN(idleForGauge)}대 추정${utilDelta}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
@@ -817,7 +821,7 @@ const KPI_TOOLTIPS = {
   '총매출':  { formula:'목표매출 대비 총 수취 매출', benchmark:'달성률 ≥ 100% 목표' },
   '순매출':  { formula:'총매출 − 할인금액 − 환불금액', benchmark:'할인비중 < 15%, 환불율 < 5%' },
   'MRR':    { formula:'월 정기 구독 매출 합계', benchmark:'YoY +10% 이상 = 성장 안정' },
-  '가동률':  { formula:'실제 세차 대수 ÷ 보정 Capacity × 100\n보정 Capacity = 설계 × 0.85', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
+  '가동률':  { formula:'ops 집계 시트 기준 (실제 세차 대수 ÷ 운영 Capacity)\n설계 Capacity 기준 병기: ops테이블 설계(보정) 형식으로 표시\n심층 분석 미가동·손실은 설계 Capacity 기준', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
   '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
   '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' }
 };
@@ -878,7 +882,7 @@ function renderKpis(ent) {
       projection: projMrr ? `월말 예상 ${fmtS(projMrr)}` : null },
     { label:'가동률',  val:fmtP(c.utilization||0),
       delta:momUtil!==null?momUtil:null, deltaSuffix:'%p',
-      sub:`총사용 ${fmtN(c.usage||0)}건`,
+      sub:`총사용 ${fmtN(c.usage||0)}대`,
       color:'amber', spark:utilTrend, sparkColor:'#c07b48',
       projection: (c.achievement||0)>0 && (c.achievement||0)<100
         ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(c.utilization||0) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
@@ -1783,7 +1787,7 @@ function renderHeroKpis(ent) {
   const items = [
     { label:'총매출', val: fmtS(c.gross), note: `목표대비 ${fmtP(c.achievement||0)}`, good: (c.achievement||0)>=100 },
     { label:'MRR',   val: fmtS(c.mrr||0), note: `YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`, good: (c.mrrYoY||0)>=0 },
-    { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}건 사용`, good: (c.utilization||0)>=70 },
+    { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}대 사용`, good: (c.utilization||0)>=70 },
     { label:'이탈률', val: fmtP(c.churn||0), note: `해지 ${fmtN(c.cancelSubs||0)}건`, good: (c.churn||0)<8, invert:true },
     { label:'순증감', val: `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, note: `신규 ${fmtN(c.newSubs||0)} − 해지 ${fmtN(c.cancelSubs||0)}`, good: (c.netAdds||0)>=0 },
     { label:'달성률', val: fmtP(c.achievement||0), note: `목표 ${fmtS(c.target||0)}`, good: (c.achievement||0)>=100 }
@@ -2054,15 +2058,22 @@ function renderCapacityPanel(ent) {
   const utilColor = c => c >= 80 ? '#216552' : c >= 60 ? '#c07b48' : '#b24c58';
   const lossColor = v => v > 50000000 ? '#b24c58' : v > 20000000 ? '#c07b48' : '#216552';
 
+  // ── 기준 고지 (상단 게이지와의 차이 명시) ─────────────────────
+  // 상단 게이지/헤드라인의 가동률은 ops 집계 시트 기준 (운영 단위 가동률)
+  // 이 심층 분석 패널의 가동률은 설계 Capacity(rawCap) 기준 — 미가동·손실 추정 목적
+  let html = `<div style="padding:6px 10px;background:var(--navy-soft);border:1px solid rgba(36,51,80,.12);border-radius:var(--r-sm);font-size:11px;color:#4a5568;margin-bottom:12px;line-height:1.6">
+    ℹ️ <strong>심층 분석 기준:</strong> 설계 Capacity (rawCap) 기준 — 미가동 대수·손실 추정 목적<br>
+    상단 게이지·헤드라인의 가동률은 ops 집계 시트 기준 (운영 Capacity 기준, 더 높게 표시될 수 있음)
+  </div>`;
+
   // ── 이상값 배너 ──────────────────────────────────────────────
   const anomalySet = new Set(stores.flatMap(s => s.anomalies||[]));
-  let html = '';
   if (anomalySet.has('over_capacity'))
     html += `<div class="cap-anomaly-banner">⚠ Capacity 검토 필요 — 가동률 100% 초과 매장 존재. 설계 Capacity 값 재확인 필요</div>`;
   if (anomalySet.has('usage_zero_revenue_nonzero'))
-    html += `<div class="cap-anomaly-banner">⚠ 데이터 점검 필요 — 총사용 0건인데 매출이 존재하는 월/매장 있음</div>`;
+    html += `<div class="cap-anomaly-banner">⚠ 데이터 점검 필요 — 총사용 0대인데 매출이 존재하는 월/매장 있음</div>`;
   if (anomalySet.has('usage_nonzero_revenue_zero'))
-    html += `<div class="cap-anomaly-banner">⚠ 데이터 점검 필요 — 총사용이 있는데 매출이 0원인 월/매장 있음</div>`;
+    html += `<div class="cap-anomaly-banner">⚠ 데이터 점검 필요 — 총사용 대수가 있는데 매출이 0원인 월/매장 있음</div>`;
 
   // ── 확정월 요약 ──────────────────────────────────────────────
   html += `<div class="cap-section-divider">확정 구간 ${sBadge('confirmed')} <span style="font-size:10px;color:#9e8c7e;font-weight:400">${avgConfMonths}개월 마감 완료</span></div>
@@ -2512,7 +2523,7 @@ function renderPaymentPanel(ent) {
 
   const items = [
     { label:'건당 매출', val:fmtS(revenuePerWash),
-      note:`총매출 ÷ ${fmtN(usage)}건`, color:'navy' },
+      note:`총매출 ÷ ${fmtN(usage)}대`, color:'navy' },
     { label:'건당 순매출', val:fmtS(netPerWash),
       note:`할인·환불 차감 후`, color:'green' },
     { label:'구독 ARPU', val:arpu>0?fmtS(arpu):(mrrPerSub>0?fmtS(mrrPerSub):'—'),
@@ -2914,7 +2925,8 @@ function renderActionCenter(ent) {
     return { name: s.name, score, issues };
   }).sort((a,b) => a.score - b.score).slice(0, 3);
 
-  $('acDangerCount').textContent = storeScores.filter(s => s.score < 60).length || storeScores.length;
+  // ★ 배지는 항상 실제 표시 목록 수(slice 결과)와 일치시킴
+  $('acDangerCount').textContent = storeScores.length;
   $('acDangerList').innerHTML = storeScores.map((s, i) => {
     const scoreColor = s.score >= 65 ? '#c07b48' : '#b24c58';
     return `<div class="ac-danger-store">
@@ -2937,7 +2949,7 @@ function renderActionCenter(ent) {
 
   $('acLossBody').innerHTML = `
     <div class="ac-loss-total">${fmtS(totalLossAll)}</div>
-    <div class="ac-loss-sub">미가동 ${fmtN(totalIdleAll)}대 × ${fmtN(UNIT_PRICE_TARGET)}원/건</div>
+    <div class="ac-loss-sub">미가동 ${fmtN(totalIdleAll)}대 × ${fmtN(UNIT_PRICE_TARGET)}원/대</div>
     <div class="ac-loss-breakdown">
       ${sorted.filter(d => d.lossEstimate > 0).map(d => {
         const pct = totalLossAll > 0 ? (d.lossEstimate / totalLossAll * 100).toFixed(0) : 0;
