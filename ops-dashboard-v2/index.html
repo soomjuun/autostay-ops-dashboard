@@ -129,7 +129,13 @@
     </article>
   </section>
 
-  <section class="kpis" id="kpiGrid"></section>
+  <!-- ★ [Change 2] KPI 카드 레이어 — 기본 접힘 (게이지에 핵심 정보 통합됨) -->
+  <details style="margin-bottom:14px">
+    <summary style="cursor:pointer;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);font-size:12.5px;font-weight:700;color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px">
+      <span>▶</span> 상세 KPI 카드 (총매출·순매출·MRR·가동률·이탈률·순증감 월별 스파크라인)
+    </summary>
+    <section class="kpis" id="kpiGrid" style="margin-top:8px"></section>
+  </details>
   <section class="signal-grid" id="signalGrid"></section>
 
   <section class="insights">

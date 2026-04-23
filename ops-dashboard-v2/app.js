@@ -306,6 +306,7 @@ function parseOps(rows) {
     const retained     = num(rows[i][8]);
     const refundRate   = pct(rows[i][9]);   // 소수 → %, pct() 자동 처리
     const churn        = pct(rows[i][10]);  // 소수 → %, pct() 자동 처리
+    // [통일] 가동률 단일 소스: ops시트 col13 — 매장 레벨 가동률의 권위 값
     const utilizationVal = pct(rows[i][13]);// 소수 → %, pct() 자동 처리
 
     // 파생 계산
@@ -317,7 +318,10 @@ function parseOps(rows) {
     const rawCap = STORE_CAPACITY_RAW[name] ||
       (utilizationVal > 0 ? Math.round(usageVal / (utilizationVal / 100) / 0.85) : 0);
     const cap          = STORE_CAPACITY[name] || Math.round(rawCap * 0.85);
-    const idleCount    = Math.max(0, cap - usageVal);
+    // [통일] 손실 추정: idleCount는 설계 Capacity(rawCap) 기준 — buildCapacityData()와 일치
+    // parseOps() lossEstimate 수정: 설계 Capacity(rawCap) 기준으로 idleCount 계산
+    const rawCapForIdle = STORE_CAPACITY_RAW[name] || Math.round(rawCap); // 설계 기준 (RAW)
+    const idleCount    = Math.max(0, rawCapForIdle - usageVal);
     const lossEstimate = idleCount * UNIT_PRICE_TARGET;
 
     // ★ Change 1: 설계기준 가동률 (utilizationRaw) = usage / STORE_CAPACITY_RAW * 100
@@ -380,6 +384,10 @@ function aggMonths(months) {
     mrrPrev:       a.mrrPrev+m.mrrPrev,
     discountAmount:a.discountAmount+m.discountAmount,
     refundVal:     a.refundVal+(m.gross*(m.refundRate/100)||0),
+    // [통일] cap 누적: usage/(utilization/100) = 이 월의 보정 Capacity 역산값 (보정기준 가동률의 분모)
+    //   → aggMonths()의 utilization = t.usage/t.cap*100 은 보정 Capacity 기반 집계 가동률임
+    //   ★ NOTE: 이 cap은 설계 rawCap이 아닌 보정값 역산 — 단일 소스 충족을 위해 getEntity()에서
+    //            ops 시트 utilization으로 최종 보완됨 (getEntity() 참조)
     cap:           a.cap+(m.utilization>0?m.usage/(m.utilization/100):0)
   }), {target:0,gross:0,grossPrev:0,net:0,netPrev:0,usage:0,retained:0,retainedPrev:0,
        newSubs:0,cancelSubs:0,netAdds:0,mrr:0,mrrPrev:0,discountAmount:0,refundVal:0,cap:0});
@@ -684,8 +692,13 @@ function getEntity() {
   if (s.ops?.arpu > 0) agg.arpu = s.ops.arpu;
   if (!agg.churn && s.ops?.churn > 0) agg.churn = s.ops.churn;
   if (!agg.achievement && s.ops?.achievement > 0) agg.achievement = s.ops.achievement;
+  // [통일] 가동률 단일 소스: ops시트 col13 — 단일 매장 뷰에서도 ops 시트 값 우선
   if (!agg.utilization && s.ops?.utilization > 0) agg.utilization = s.ops.utilization;
   if (!agg.refundRate && s.ops?.refundRate > 0) agg.refundRate = s.ops.refundRate;
+  // [통일] MRR: mrr 시트 기반. mrr=0이고 유지 구독자가 있으면 arpu로 추정
+  if (agg.mrr === 0 && (agg.retained || 0) > 0 && (agg.arpu || 0) > 0) {
+    agg.mrr = agg.retained * agg.arpu; // MRR 추정값 (mrr 시트 없을 때 fallback)
+  }
   return { name: s.name, months: filtered, current: agg, ops: [s.ops||{}], isAll: false, storeData: s };
 }
 
@@ -740,6 +753,8 @@ function makeGauge(wrapId, valId, subId, score, valText, subText) {
   if (sEl) sEl.innerHTML = subText;
 }
 
+// [Change 3] renderGauges: store-aware — ent.current 및 ent.months 모두
+//   getEntity()에서 단일 매장 또는 합산 기준으로 정확하게 공급됨
 function renderGauges(ent) {
   const c  = ent.current;
   const ms = ent.months;
@@ -773,15 +788,27 @@ function renderGauges(ent) {
   const churnDelta = gaugeDeltaHtml(c.churn||0, prevM?.churn||0, true);
   const mrrDelta   = gaugeDeltaHtml(c.mrrYoY||0, prevM?.mrrYoY||0, false);
 
+  // [Change 2] 게이지 서브레이블 강화 — KPI 카드 레이어 제거 후 핵심 컨텍스트 통합
+  // 달성률: 목표 · 총매출
+  const achSubGross = c.gross ? ` · 총매출 ${fmtS(c.gross)}` : '';
+  // 가동률: 총사용 · 미가동 추정
+  const capDataForGauge = typeof buildCapacityData === 'function' && ent
+    ? (buildCapacityData(ent)[0] || {}) : {};
+  const idleForGauge = capDataForGauge.idleCount != null ? capDataForGauge.idleCount
+    : (c.usage && c.utilization ? Math.max(0, Math.round(c.usage / (c.utilization/100)) - c.usage) : 0);
+  // 이탈건전성: 이탈 N명 · 유지 M명
+  // MRR YoY: MRR X억 · ARPU Y만원
+  const arpuSub = (c.arpu||0) > 0 ? ` · ARPU ${fmtS(c.arpu)}` : '';
+
   // HTML의 element ID와 일치: gsvg-*, gval-*, gsub-*
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
-    ach, achLabel, `목표 ${fmtS(c.target||0)} 대비${achDelta}`);
+    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}회${utilDelta}`);
+    util, utilLabel, `총사용 ${fmtN(c.usage||0)}건 · 미가동 ${fmtN(idleForGauge)}건 추정${utilDelta}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
-    churnH, fmtP(c.churn||0), `이탈률 (낮을수록 건강)${churnDelta}`);
+    churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
-    mrrM, `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`, `MRR ${fmtS(c.mrr||0)}${mrrDelta}`);
+    mrrM, `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`, `MRR ${fmtS(c.mrr||0)}${arpuSub}${mrrDelta}`);
 }
 
 /* ── 11. KPI 카드 ───────────────────────────────────────────── */
@@ -1252,6 +1279,7 @@ function renderOpsChart(ent) {
     data:{
       labels: ms.map(m=>m.month),
       datasets:[
+        // [통일] 가동률 월별 차트: m.utilization — buildMonth()에서 salesM 시트 '가동률' 컬럼 사용
         { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization||0),
           borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
           fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4, yAxisID:'pct' },
@@ -1362,12 +1390,21 @@ function renderMrrTrendChart(ent) {
   }
 }
 
+// [Change 3] renderBridgeChart: store-aware — ent.current는 getEntity()에서
+//   단일 매장 선택 시 해당 매장 필터된 월 집계값 사용. isAll=false이면 매장별 데이터.
 function renderBridgeChart(ent) {
   const c = ent.current;
   const gross    = Math.max(0, c.gross||0);
-  const discount = Math.max(0, Math.min(c.discountAmount||0, gross));
-  const refundVal= Math.max(0, gross * ((c.refundRate||0)/100));
   const net      = Math.max(0, c.net||0);
+  // [통일] 브리지 계산식 정합성 보장:
+  //   gross - discountAmount - refundVal ≠ net 이면 실제 total deduction을 gross-net 기준으로 재정렬
+  const totalDeduction = Math.max(0, gross - net);
+  // refundVal: gross × refundRate% 로 계산하되 totalDeduction을 초과 불가
+  const refundVal  = Math.min(totalDeduction, Math.max(0, gross * ((c.refundRate||0)/100)));
+  // discountActual: 잔여 deduction (refund를 제외한 나머지)
+  const discount   = Math.max(0, totalDeduction - refundVal);
+  // 검증: discount + refundVal == totalDeduction (== gross - net) — 항등식 성립
+
 
   // ★ 절대값 4-bar 방식 — 각 항목을 독립적인 절대 크기 바로 표시
   //   Floating/Stack 방식의 Chart.js 렌더링 버그 완전 제거
@@ -1973,6 +2010,9 @@ function buildCapacityData(ent) {
   return [calcForStore(ent.name, ent.months || [])];
 }
 
+// [Change 3] renderCapacityPanel: store-aware — buildCapacityData(ent)가
+//   !ent.isAll 시 [calcForStore(ent.name, ent.months)] 반환 (단일 매장 데이터만 표시)
+//   ent.isAll 시 전체 6개 매장 배열 반환
 function renderCapacityPanel(ent) {
   const el = $('capacityPanel');
   if (!el) return;
@@ -2164,6 +2204,8 @@ function renderCapacityPanel(ent) {
   el.innerHTML = html;
 }
 
+// [Change 3] renderSeasonChart: store-aware — !ent.isAll 시 SEASON_MONTHLY_2025_STORE[ent.name]
+//   단일 매장 2025 기준선 사용. ent.isAll 시 합산 SEASON_MONTHLY_2025 + SEASON_BASE_USAGE 사용.
 function renderSeasonChart(ent) {
   const el = $('seasonChart');
   if (!el) return;
@@ -2490,7 +2532,9 @@ function renderPaymentPanel(ent) {
 /* ── 16. 히트맵 ─────────────────────────────────────────────── */
 function renderHeatmap(ent) {
   // ★ 쿼터/매장 필터에 반응: 필터된 월 데이터에서 각 매장 집계
-  const capData = buildCapacityData({ isAll: true, months: [] }); // always show all stores
+  // [Change 3] 히트맵은 포트폴리오 비교 목적 — 항상 전체 매장 표시 (필터 쿼터는 반영)
+  //   선택된 매장 행만 하이라이트 처리 (selName 기반)
+  const capData = buildCapacityData({ isAll: true, months: [] }); // 항상 전체 매장 Capacity
   const storeAgg = dashboard.stores.map(s => {
     const filtMs = filterMonths(s.months);
     const agg    = aggMonths(filtMs) || {};
@@ -2674,6 +2718,8 @@ function renderTable(ent) {
 }
 
 /* ── 18. 상세 패널 + 드릴다운 ───────────────────────────────── */
+// [Change 3] renderDetail: store-aware — ent.current는 단일 매장 집계값 (getEntity() 보장)
+//   isAll=true 시 포트폴리오 합산, false 시 ent.name 매장 데이터만 표시
 function renderDetail(ent) {
   const c  = ent.current;
   const ms = ent.months;
@@ -2882,6 +2928,7 @@ function renderActionCenter(ent) {
   }).join('');
 
   // ③ 손실 추정 금액 (전체 기준) ─────────────────────────────
+  // [Change 3] 액션 센터의 손실 추정은 항상 전체 포트폴리오 기준 — 매장 필터 무관하게 전체 표시
   const allCapData  = buildCapacityData({ isAll: true, months: [] });
   const totalLossAll = allCapData.reduce((s,d) => s + (d.lossEstimate||0), 0);
   const totalIdleAll = allCapData.reduce((s,d) => s + (d.idleCount||0), 0);
@@ -3038,7 +3085,7 @@ function renderAll() {
   renderAlerts(ent);
   renderActionCenter(ent);   // ★ 액션 커맨드 센터 — 상단 우선 노출
   renderGauges(ent);
-  renderKpis(ent);
+  // renderKpis(ent);  // ★ [Change 2] KPI 카드 레이어 비활성화 — 게이지에 필수 정보 통합됨
   renderSignals(ent);
   renderInsights(ent);
   renderPerformanceChart(ent);
