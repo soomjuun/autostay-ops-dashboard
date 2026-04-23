@@ -708,12 +708,22 @@ function getEntity() {
   if (s.ops?.arpu > 0) agg.arpu = s.ops.arpu;
   if (!agg.churn && s.ops?.churn > 0) agg.churn = s.ops.churn;
   if (!agg.achievement && s.ops?.achievement > 0) agg.achievement = s.ops.achievement;
-  // ★ [가동률 단일화] ops시트 col13 값을 조건 없이 항상 우선 적용
-  //   - aggMonths()의 보정 Capacity 역산값(≈보정 기준)을 ops 시트 실측값으로 덮어씀
-  //   - 이로써 게이지·헤드라인·알림·드릴다운·심층 분석이 모두 동일 기준으로 통일됨
-  if (s.ops?.utilization > 0) agg.utilization = s.ops.utilization;
-  // utilizationRaw(설계기준)도 함께 전달 — 심층 분석 패널 병기 표시용
-  if (s.ops?.utilizationRaw > 0) agg.utilizationRaw = s.ops.utilizationRaw;
+  // ★ [가동률] ops시트 col13은 전체 기간 스냅샷 — 분기 필터 시에는 월별 집계값 사용
+  //   - 전체(all) 뷰: ops시트 실측값으로 덮어써서 게이지·헤드라인 통일
+  //   - Q1/Q2 필터 뷰: 해당 분기 월별 aggMonths() 값 사용 (ops시트는 전체 기간값이므로 부적합)
+  if (state.quarter === 'all' && s.ops?.utilization > 0) agg.utilization = s.ops.utilization;
+  if (state.quarter === 'all' && s.ops?.utilizationRaw > 0) agg.utilizationRaw = s.ops.utilizationRaw;
+  // 분기 필터 시에도 utilizationRaw가 0이면 aggMonths 값으로 역산
+  if (!agg.utilizationRaw && agg.utilization > 0 && s.name && STORE_CAPACITY_RAW[s.name]) {
+    // aggMonths utilization은 보정기준 → 설계기준 역산: util_corr × (cap_raw / (cap_raw×0.85)) = util_corr / 0.85
+    // 단, 직접 usage/rawCap 이 더 정확 — 여기서는 usage는 이미 집계됨
+    const rawCap = STORE_CAPACITY_RAW[s.name];
+    if (agg.usage > 0 && rawCap > 0 && filtered.length > 0) {
+      // 기간 총 사용 / (rawCap × 개월 수) — 하지만 usage가 이미 합계이므로 월수로 나누지 않음
+      // 가동률은 % 이므로: usage_total / (rawCap × months) × 100
+      agg.utilizationRaw = agg.usage / (rawCap * filtered.length) * 100;
+    }
+  }
   if (!agg.refundRate && s.ops?.refundRate > 0) agg.refundRate = s.ops.refundRate;
   // MRR: parseStore() 수정으로 이제 매장 개별 시트에서 직접 파싱됨
   // mrr=0인 경우만 arpu×retained로 fallback (시트에 MRR 행 없는 경우 대비)
@@ -2276,7 +2286,7 @@ function renderCapacityPanel(ent) {
   // ── 산정 기준 고지 ─────────────────────────────────────────
   const avgPrice = stores.length ? stores.reduce((s,st)=>s+(st.conservativePrice||0),0)/stores.length : UNIT_PRICE_TARGET;
   html += `<div class="cap-basis-note">
-    <strong>📌 산정 기준</strong> ·
+    <strong>산정 기준</strong> ·
     적용 단가: <strong>보수적 단가 (순매출 ÷ 총사용)</strong>, 기간 평균 약 ${fmtS(Math.round(avgPrice))}/대 ·
     미가동 = 설계 Capacity(rawCap) − 실제 세차 대수 · 보정 Capacity(×0.85) 병기 표시 ·
     <strong>확정월</strong>: 풀 월 Capacity 기준 ·
