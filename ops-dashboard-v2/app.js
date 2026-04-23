@@ -809,7 +809,13 @@ function renderGauges(ent) {
   const achDelta   = gaugeDeltaHtml(achRaw, prevM?.achievement||0, false);
   const utilDelta  = gaugeDeltaHtml(utilRaw, prevM?.utilization||0, false);
   const churnDelta = gaugeDeltaHtml(c.churn||0, prevM?.churn||0, true);
-  const mrrDelta   = gaugeDeltaHtml(c.mrrYoY||0, prevM?.mrrYoY||0, false);
+  // ★ MRR 게이지 delta: YoY율의 전월 변화(▲53.9%p)는 사용자에게 불투명 → 실제 MRR MoM 변화율로 교체
+  //   게이지 face는 MRR YoY%, sub에는 "MoM MRR ▲X%" 형태로 기준 명시
+  const mrrMoMPct = (lastM && prevM && prevM.mrr > 0)
+    ? ((lastM.mrr - prevM.mrr) / prevM.mrr * 100) : null;
+  const mrrDelta = mrrMoMPct !== null
+    ? ` <span style="font-size:11px;font-weight:700;color:${mrrMoMPct>=0?'#6ce8b0':'#ff8fa0'}">${mrrMoMPct>=0?'▲':'▼'}${Math.abs(mrrMoMPct).toFixed(1)}% MoM</span>`
+    : '';
 
   // FIX 5A — 기간 라벨 (게이지 서브에 기간 컨텍스트 추가)
   const periodLabel = ms.length > 0
@@ -916,7 +922,7 @@ function renderKpis(ent) {
       delta:c.netYoY,     sub:`할인 ${fmtS(c.discountAmount||0)} · 환불 ${fmtP(c.refundRate||0)}`,
       color:'navy',  spark:netTrend, sparkColor:'#24344f' },
     { label:'MRR',    val:fmtS(c.mrr||0),
-      delta:c.mrrYoY,     sub:`전월 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`,
+      delta:c.mrrYoY,     sub:`MRR YoY · 전월 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`,
       color:'green', spark:mrrTrend, sparkColor:'#216552',
       projection: projMrr ? `월말 예상 ${fmtS(projMrr)}` : null },
     { label:'가동률',  val:fmtP(c.utilization||0),
@@ -1841,7 +1847,7 @@ function renderHeroKpis(ent) {
   if (!el) return;
   const items = [
     { label:'총매출', val: fmtS(c.gross), note: `목표대비 ${fmtP(c.achievement||0)}`, good: (c.achievement||0)>=100 },
-    { label:'MRR',   val: fmtS(c.mrr||0), note: `YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`, good: (c.mrrYoY||0)>=0 },
+    { label:'MRR',   val: fmtS(c.mrr||0), note: `MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`, good: (c.mrrYoY||0)>=0 },
     { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}대 사용`, good: (c.utilization||0)>=70 },
     { label:'이탈률', val: fmtP(c.churn||0), note: `해지 ${fmtN(c.cancelSubs||0)}건`, good: (c.churn||0)<8, invert:true },
     { label:'순증감', val: `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, note: `신규 ${fmtN(c.newSubs||0)} − 해지 ${fmtN(c.cancelSubs||0)}`, good: (c.netAdds||0)>=0 },
@@ -2819,15 +2825,18 @@ function renderDetail(ent) {
   const items = [
     { label:'총매출',    val:fmtS(c.gross),         sub:`목표 ${fmtS(c.target||0)}` },
     { label:'순매출',    val:fmtS(c.net),            sub:`할인·환불 차감` },
-    { label:'MRR',      val:fmtS(c.mrr||0),         sub:`YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
+    { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
     { label:'달성률',   val:fmtP(c.achievement||0),  sub:`목표 ${fmtS(c.target||0)}` },
-    { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:`총사용 ${fmtN(c.usage||0)}` },
+    { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
+        const cr = buildCapacityData(ent)[0]||{};
+        return `총사용 ${fmtN(c.usage||0)}대 · 설계기준 미가동 ${fmtN(cr.idleCount||0)}대`;
+      })() },
     { label:'이탈률',   val:fmtP(c.churn||0),        sub:`해지 ${fmtN(c.cancelSubs||0)}건` },
     { label:'환불율',   val:fmtP(c.refundRate||0),   sub:`총매출 기준` },
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
     { label:'할인비중', val:fmtP(c.discountShare||0), sub:fmtS(c.discountAmount||0) },
     { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:`MRR ÷ 유지 구독자` },
-    { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`MRR×12 · YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'}` },
+    { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`ARR YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'} (연간 반복매출)` },
     { label:'LTV(추정)', val: (c.ltv||0) > 0 ? fmtW(c.ltv) : '—', sub:`ARPU ÷ 이탈률 추정` }
   ];
   $('detailGrid').innerHTML = items.map(i=>
@@ -3121,7 +3130,7 @@ function renderInlineStoreDetail(ent) {
       ${[
         {l:'총매출',      v:fmtS(c.gross),        s:`목표 ${fmtS(c.target||0)}`},
         {l:'달성률',      v:fmtP(ach),             s:`목표 대비 ${ach>=100?'초과':'미달'}`},
-        {l:'운영 가동률', v:fmtP(util),            s:`미가동 ${fmtN(capRow.idleCount||0)}대`},
+        {l:'운영 가동률', v:fmtP(util),            s:`설계기준 미가동 ${fmtN(capRow.idleCount||0)}대`},
         {l:'이탈률',      v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
         {l:'순증감',   v:`${netAdds>=0?'+':''}${fmtN(netAdds)}`, s:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`},
       ].map(i=>`
@@ -3133,9 +3142,9 @@ function renderInlineStoreDetail(ent) {
     </div>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
       ${[
-        {l:'MRR',         v:fmtS(c.mrr||0),      s:`YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`},
+        {l:'MRR',         v:fmtS(c.mrr||0),      s:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`},
         {l:'ARPU',        v:(c.arpu||0)>0?fmtS(c.arpu):'—', s:`MRR ÷ 유지 구독자`},
-        {l:'ARR',         v:(c.arr||0)>0?fmtS(c.arr):'—', s:`YoY ${c.arrYoY?(c.arrYoY>0?'+':'')+fmtP(c.arrYoY):'—'}`},
+        {l:'ARR',         v:(c.arr||0)>0?fmtS(c.arr):'—', s:`ARR YoY ${c.arrYoY?(c.arrYoY>0?'+':'')+fmtP(c.arrYoY):'—'}`},
         {l:'LTV(추정)',    v:(c.ltv||0)>0?fmtW(c.ltv):'—', s:`ARPU ÷ 이탈률 추정`},
       ].map(i=>`
         <div class="d-item">
