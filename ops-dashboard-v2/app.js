@@ -790,7 +790,7 @@ const KPI_TOOLTIPS = {
   '총매출':  { formula:'목표매출 대비 총 수취 매출', benchmark:'달성률 ≥ 100% 목표' },
   '순매출':  { formula:'총매출 − 할인금액 − 환불금액', benchmark:'할인비중 < 15%, 환불율 < 5%' },
   'MRR':    { formula:'월 정기 구독 매출 합계', benchmark:'YoY +10% 이상 = 성장 안정' },
-  '가동률':  { formula:'실제 세차 대수 ÷ 보정 Capacity × 100\n보정 Capacity = 설계 × 0.70', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
+  '가동률':  { formula:'실제 세차 대수 ÷ 보정 Capacity × 100\n보정 Capacity = 설계 × 0.85', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
   '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
   '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' }
 };
@@ -1263,7 +1263,11 @@ function renderOpsChart(ent) {
           borderDash:[4,3], fill:false, tension:0.4, yAxisID:'pct' },
         { type:'line', label:'할인비중 %', data:ms.map(m=>m.discountShare||0),
           borderColor:PALETTE.navy, borderWidth:2, pointRadius:3,
-          borderDash:[2,4], fill:false, tension:0.4, yAxisID:'pct' }
+          borderDash:[2,4], fill:false, tension:0.4, yAxisID:'pct' },
+        { type:'line', label:'ARPU (만원)',
+          data: ms.map(m => (m.arpu||0) / 10000),
+          borderColor: PALETTE.violet, borderWidth:1.5, pointRadius:2,
+          borderDash:[3,3], fill:false, tension:0.4, yAxisID:'arpu' }
       ]
     },
     options:{
@@ -1273,10 +1277,49 @@ function renderOpsChart(ent) {
         // ★ suggestedMax 의도적 제거: 가동률이 100% 초과 가능 (예: 118.2%)
         // suggestedMax:100 설정 시 초과 값이 잘려 y=0 근처에 표시되는 버그 방지
         pct:{ position:'left', ticks:{callback:v=>`${v.toFixed(1)}%`}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
+        arpu:{ display:false },   // tooltip에서만 확인 (축 혼잡 방지)
         x:{ grid:{display:false} }
       }
     }
   });
+}
+
+function renderOpsQualityStats(ent) {
+  const el = $('opsQualStats');
+  if (!el) return;
+  const ms = ent.months;
+  if (!ms || ms.length === 0) { el.innerHTML = ''; return; }
+
+  el.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">월별 상세</div>
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+      <thead>
+        <tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:3px 0;font-weight:700;color:var(--muted);font-size:10.5px">월</th>
+          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--green);font-size:10.5px">가동률</th>
+          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--rose);font-size:10.5px">이탈률</th>
+          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--amber);font-size:10.5px">환불율</th>
+          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--muted);font-size:10.5px">할인비중</th>
+        </tr>
+      </thead>
+      <tbody style="font-size:11.5px">
+        ${ms.map(m => {
+          const util = (m.utilization||0).toFixed(1);
+          const churn = (m.churn||0).toFixed(1);
+          const refund = (m.refundRate||0).toFixed(1);
+          const disc = (m.discountShare||0).toFixed(1);
+          const utilColor = m.utilization >= 70 ? 'var(--green)' : m.utilization >= 50 ? 'var(--amber)' : 'var(--rose)';
+          const churnColor = m.churn < 6 ? 'var(--green)' : m.churn < 12 ? 'var(--amber)' : 'var(--rose)';
+          return `<tr style="border-bottom:1px solid var(--bg2)">
+            <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
+            <td style="padding:4px 4px;text-align:right;color:${utilColor};font-weight:600">${util}%</td>
+            <td style="padding:4px 4px;text-align:right;color:${churnColor}">${churn}%</td>
+            <td style="padding:4px 4px;text-align:right;color:var(--amber)">${refund}%</td>
+            <td style="padding:4px 4px;text-align:right;color:var(--muted)">${disc}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -1826,7 +1869,7 @@ function capTip(html) {
 function buildCapacityData(ent) {
   // 단일 매장 계산 핵심 로직 — store key(name)로만 Capacity 조회
   function calcForStore(storeName, filtMs) {
-    const monthCap = STORE_CAPACITY[storeName]     || 0;  // 보정 Capacity (raw×0.70)
+    const monthCap = STORE_CAPACITY[storeName]     || 0;  // 보정 Capacity (raw×0.85)
     const rawCap   = STORE_CAPACITY_RAW[storeName] || 0;  // 설계 Capacity
 
     const confirmedMs = filtMs.filter(m => m.status === 'confirmed');
@@ -2609,7 +2652,7 @@ function renderTable(ent) {
       <td>${utilCell}</td>
       <td>${fmtP(s.refundRate||0)}${refundDelta}</td>
       <td>${(s.netAdds||0)>=0?'+':''}${fmtN(s.netAdds||0)}</td>
-      <td>${fmtS(s.arpu)}</td>
+      <td style="white-space:nowrap">${fmtW(s.arpu||0)}</td>
       <td><span class="verdict-chip ${ach>=100?'good':ach>=80?'warn':'bad'}">${s.status}</span></td>
     </tr>`;
   }).join('');
@@ -3002,6 +3045,7 @@ function renderAll() {
   renderScoreChart(ent);
   renderSubscriptionChart(ent);
   renderOpsChart(ent);
+  renderOpsQualityStats(ent);
   renderMrrTrendChart(ent);
   renderBridgeChart(ent);
   renderBenchmarkChart(ent);
