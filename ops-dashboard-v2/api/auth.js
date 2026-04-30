@@ -29,8 +29,9 @@ module.exports = async function handler(req, res) {
       setCookieAndRedirect(res, VALID_TOKEN);
       return;
     }
+    const cookieKey = process.env.COOKIE_KEY || 'ds_auth';
     const cookie = parseCookie(req.headers.cookie || '');
-    if (cookie.ds_auth === VALID_TOKEN) {
+    if (cookie[cookieKey] === VALID_TOKEN) {
       res.writeHead(302, { Location: '/' });
       return res.end();
     }
@@ -42,7 +43,8 @@ module.exports = async function handler(req, res) {
 
 function setCookieAndRedirect(res, token) {
   const maxAge = 60 * 60 * 24 * 7;
-  res.setHeader('Set-Cookie', `ds_auth=${token}; Path=/; HttpOnly; Max-Age=${maxAge}; SameSite=Lax`);
+  const cookieKey = process.env.COOKIE_KEY || 'ds_auth';
+  res.setHeader('Set-Cookie', `${cookieKey}=${token}; Path=/; HttpOnly; Secure; Max-Age=${maxAge}; SameSite=Lax`);
   res.writeHead(302, { Location: '/' });
   res.end();
 }

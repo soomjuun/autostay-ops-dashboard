@@ -17,8 +17,9 @@ module.exports = function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
+  const cookieKey = process.env.COOKIE_KEY || 'ds_auth';
   const cookie = parseCookie(req.headers.cookie);
-  if (cookie.ds_auth === DASHBOARD_TOKEN) {
+  if (cookie[cookieKey] === DASHBOARD_TOKEN) {
     return res.status(200).json({ ok: true });
   }
 
