@@ -3166,7 +3166,7 @@ function renderTable(ent) {
       net:         agg.net          || ops.net          || 0,
       usage:       agg.usage        || ops.usage        || 0,
       utilization: agg.utilization  || ops.utilization  || 0,
-      utilizationRaw: ops.utilizationRaw || 0,
+      utilizationRaw: agg.utilizationRaw || ops.utilizationRaw || 0,
       refundRate:  agg.refundRate   || ops.refundRate   || 0,
       churn:       agg.churn        || ops.churn        || 0,
       netAdds:     agg.netAdds !== undefined ? agg.netAdds : (ops.netAdds || 0),
@@ -3180,42 +3180,44 @@ function renderTable(ent) {
   });
 
   // ★ v3: 파생 상태 계산 함수 — 실데이터 기반 다중 조건
+  // TOP3 리스크 로직과 동일 기준 사용
   function deriveStoreStatus(s) {
     if (s.opsStatus === '오픈 전') return { text:'오픈 전', cls:'open' };
-    const ach    = s.achievement  || 0;
-    const util   = s.utilization  || 0;
-    const refund = s.refundRate   || 0;
-    const churn  = s.churn        || 0;
-    const rawCap = STORE_CAPACITY_RAW[s.name] || 0;
-    const overCap = rawCap > 0 && (s.usage||0) > rawCap;
+    const ach      = s.achievement    || 0;
+    const util     = s.utilization    || 0;      // 보정 기준 가동률
+    const utilRaw  = s.utilizationRaw || util;   // 설계 기준 가동률
+    const refund   = s.refundRate     || 0;
+    const churn    = s.churn          || 0;
 
     // ── 리스크 유형별로 단 하나의 태그만 선택 (중복 방지) ──
-    // 같은 차원(이탈·환불·달성·가동)에서 가장 심각한 단계 하나만 등록
+    // 각 차원에서 해당하는 단 하나의 가장 심각한 단계만 등록
+
     const risks = [];
 
-    // [최우선] Capacity 초과 — 설계 기준 초과 시 데이터 신뢰성 문제
-    if (overCap)                                risks.push({ score:150, tag:'Capacity 검토' });
+    // [Capacity 차원] 설계 또는 보정 가동률 100% 초과일 때만 표시
+    // usage > rawCap 비교는 다월 누적 시 항상 초과되므로 % 기반 판정 사용
+    if (utilRaw > 100 || util > 100)            risks.push({ score:150, tag:'Capacity 검토' });
 
-    // [이탈 차원] 심각(>12%) vs 경고(>8%) vs 주의(>6%) — 가장 높은 단계 하나만
+    // [이탈 차원] 심각 / 경고 / 주의 — 가장 높은 단계 하나만
     if      (churn > 12)                        risks.push({ score:130, tag:'이탈 위험 심각' });
     else if (churn > 8)                         risks.push({ score:90,  tag:'이탈 위험' });
     else if (churn > 6)                         risks.push({ score:50,  tag:'이탈 주의' });
 
-    // [환불 차원] 심각(>15%) vs 경고(>8%) — 가장 높은 단계 하나만
+    // [환불 차원] 심각 / 경고 — 가장 높은 단계 하나만
     if      (refund > 15)                       risks.push({ score:120, tag:'환불 위험 심각' });
     else if (refund > 8)                        risks.push({ score:80,  tag:'환불 위험' });
 
-    // [달성률 차원] 심각(<70%) vs 경고(<80%) — 가장 높은 단계 하나만
+    // [달성률 차원] 심각 / 경고 — 가장 높은 단계 하나만
     if      (ach < 70)                          risks.push({ score:110, tag:'목표 미달 심각' });
     else if (ach < 80)                          risks.push({ score:70,  tag:'목표 미달' });
 
-    // [가동률 차원] 저가동(<60%) — 달성률과 독립적 차원
-    if (util < 60)                              risks.push({ score:65,  tag:'저가동' });
+    // [가동률 차원] 저가동 — 달성률과 독립적 차원 (Capacity 검토와 중복 방지)
+    if (util < 60 && utilRaw <= 100)            risks.push({ score:65,  tag:'저가동' });
 
     // 정상 매장 (리스크 없음)
     if (!risks.length) return { text:'정상', cls:'good' };
 
-    // 점수 내림차순 정렬 후 상위 2개만 표시 (이미 유형별 중복 제거됨)
+    // 점수 내림차순 정렬 후 상위 2개만 표시 (유형별 중복 이미 제거됨)
     risks.sort((a,b) => b.score - a.score);
     const topTags = risks.slice(0, 2).map(r => r.tag);
 
@@ -3312,12 +3314,18 @@ function renderDetail(ent) {
     })(),
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
     (()=>{
-      // 할인비중 ≈ 환불율 동일값이면 "확인 필요" 뱃지 표시
       const dDiscount = c.discountShare||0;
       const dRefund   = c.refundRate||0;
       const sameVal   = dDiscount > 0 && dRefund > 0 && Math.abs(dDiscount - dRefund) < 0.01;
-      const badge     = sameVal ? ' <span style="font-size:9px;background:#ffe082;color:#7a5900;padding:1px 4px;border-radius:3px;font-weight:700">⚠ 원천 확인</span>' : '';
-      return { label:`할인비중${badge}`, val:fmtP(dDiscount), sub: sameVal ? `환불율과 동일값 — 컬럼 매핑 재확인 필요` : fmtS(c.discountAmount||0) };
+      const noData    = dDiscount === 0 && (c.discountAmount||0) === 0;
+      const badge     = sameVal ? ' <span style="font-size:9px;background:#ffe082;color:#7a5900;padding:1px 4px;border-radius:3px;font-weight:700">⚠ 원천 확인</span>'
+                      : noData  ? ' <span style="font-size:9px;background:#f0ebe3;color:#7a6a50;padding:1px 4px;border-radius:3px;font-weight:700">미연결</span>'
+                      : '';
+      const dispVal   = noData  ? '—' : fmtP(dDiscount);
+      const dispSub   = sameVal ? `환불율과 동일값 — 컬럼 매핑 재확인 필요`
+                      : noData  ? `할인 데이터 미연결 (0원)`
+                      : fmtS(c.discountAmount||0);
+      return { label:`할인비중${badge}`, val:dispVal, sub:dispSub };
     })(),
     { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:`MRR ÷ 유지 구독자` },
     { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`ARR YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'} (연간 반복매출)` },
@@ -3595,32 +3603,32 @@ function renderActionCenter(ent) {
       if ((agg.refundRate||0)  > 10)  issues.push(`환불 ${fmtP(agg.refundRate||0)}`);
       if (!issues.length && score < 65) issues.push('복합 지표 저조');
 
-      // ★ Priority 7: 1차 원인 + 우선 액션 도출
-      const ach  = agg.achievement  || 0;
-      const util = agg.utilization  || 0;
-      const churn = agg.churn       || 0;
-      const refund = agg.refundRate || 0;
+      // ★ Priority 7: 1차 원인 + 우선 액션 도출 (deriveStoreStatus와 동일 차원 우선순위)
+      const ach     = agg.achievement  || 0;
+      const util    = agg.utilization  || 0;
+      const utilRaw = agg.utilizationRaw || ops.utilizationRaw || util;
+      const churn   = agg.churn        || 0;
+      const refund  = agg.refundRate   || 0;
       let rootCause = '', priorityAction = '', dri = '';
-      if (churn > 12 || refund > 15) {
-        rootCause = `고이탈(${fmtP(churn)}) + 환불(${fmtP(refund)})`;
-        priorityAction = 'CS 이슈 긴급 점검 · 해지 사유 분류';
-        dri = 'BizOps 리텐션 담당';
-      } else if (util < 50) {
-        rootCause = `가동률 저조(${fmtP(util)})`;
-        priorityAction = '설비 가용 여부 확인 · 예약 채널 점검';
-        dri = 'Field Ops 담당';
-      } else if (ach < 70) {
-        rootCause = `매출 목표 미달(달성률 ${fmtP(ach)})`;
-        priorityAction = '가격·프로모션 검토 · 채널별 전환율 분석';
-        dri = 'BizOps 영업 담당';
-      } else if (churn > 8) {
-        rootCause = `이탈률 주의(${fmtP(churn)})`;
-        priorityAction = '해지 고객 설문 집계 · 리텐션 혜택 설계';
-        dri = 'BizOps 리텐션 담당';
-      } else if (util < 65) {
-        rootCause = `가동률 부족(${fmtP(util)})`;
-        priorityAction = '피크 시간대 예약 패턴 분석 · 마케팅 집행';
-        dri = 'Field Ops 담당';
+
+      // 각 차원에서 가장 심각한 단계 하나씩만, 복합 표시 시 최대 2가지
+      const rc = [];
+      if (utilRaw > 100 || util > 100)    rc.push({ score:150, cause:`Capacity 초과(${fmtP(utilRaw||util)})`, action:'설계 기준 재검토 · 예약 제한 운영', dri_:'Field Ops 담당' });
+      if (churn > 12)                     rc.push({ score:130, cause:`고이탈(${fmtP(churn)})`, action:'CS 이슈 긴급 점검 · 해지 사유 분류', dri_:'BizOps 리텐션 담당' });
+      else if (churn > 8)                 rc.push({ score:90,  cause:`이탈 위험(${fmtP(churn)})`, action:'리텐션 캠페인 집행 · 해지 사유 수집', dri_:'BizOps 리텐션 담당' });
+      else if (churn > 6)                 rc.push({ score:50,  cause:`이탈 주의(${fmtP(churn)})`, action:'해지 고객 설문 집계', dri_:'BizOps 리텐션 담당' });
+      if (refund > 15)                    rc.push({ score:120, cause:`환불 심각(${fmtP(refund)})`, action:'CS 티켓 유형별 분류 · 환불 방어 프로세스 점검', dri_:'CS 담당' });
+      else if (refund > 8)                rc.push({ score:80,  cause:`환불 위험(${fmtP(refund)})`, action:'환불 사유 태깅 · 서비스 품질 점검', dri_:'CS 담당' });
+      if (ach < 70)                       rc.push({ score:110, cause:`목표 미달 심각(달성률 ${fmtP(ach)})`, action:'가격·프로모션 긴급 검토', dri_:'BizOps 영업 담당' });
+      else if (ach < 80)                  rc.push({ score:70,  cause:`목표 미달(달성률 ${fmtP(ach)})`, action:'채널별 전환율 분석', dri_:'BizOps 영업 담당' });
+      if (util < 60 && utilRaw <= 100)    rc.push({ score:65,  cause:`저가동(${fmtP(util)})`, action:'예약 채널 점검 · 피크 마케팅 집행', dri_:'Field Ops 담당' });
+
+      if (rc.length) {
+        rc.sort((a,b) => b.score - a.score);
+        const top2 = rc.slice(0, 2);
+        rootCause = top2.map(r => r.cause).join(' + ');
+        priorityAction = top2[0].action;
+        dri = top2[0].dri_;
       } else {
         rootCause = '복합 지표 저조';
         priorityAction = '주간 현장 점검 실시';
