@@ -27,7 +27,8 @@ const GID = {
     goyang:      { gid: 1437587407, name: "고양"  },
     jayuro:      { gid: 650976822,  name: "자유로" },
     gwangmyeong: { gid: 2128707766, name: "광명"  },
-    seongsu:     { gid: 387245119,  name: "성수"  }
+    seongsu:     { gid: 387245119,  name: "성수"  },
+    anseong:     { gid: 1905150076, name: "안성"  }  // ★ 2026-05-15 오픈
   }
 };
 // ★ 현재 달까지만 포함 — 아직 시작하지 않은 달은 제외 (예: 4월 기준 → 5·6월 제외)
@@ -52,7 +53,8 @@ const SEASON_BASE_USAGE  = 45741;   // 2025 기준 연평균 월 세차 대수 (
 // 실제 운영 보정: raw × 0.85 (가동률 계산 기준 — 2025 실적 기반 보정치)
 const STORE_CAPACITY_RAW = {
   '광명': 16800, '하남': 14400, '자유로': 14400,
-  '일산':  9600, '성수':  9600, '고양':   5760
+  '일산':  9600, '성수':  9600, '고양':   5760,
+  '안성': 16800   // ★ 2026-05-15 오픈
 };
 // 보정 Capacity (= raw × 0.85) — 미가동/이탈 계산 기준
 // 0.85 근거: 2025 실적 기준 연평균 raw 가동률 64.8% (45,741/70,560)
@@ -82,11 +84,13 @@ const SEASON_MONTHLY_2025_STORE = {
   '하남':   { 1:12594, 2:13520, 3:13331, 4:12246, 5:12434, 6:11224, 7:9416,  8:9745,  9:8041,  10:7960,  11:9185,  12:11597 },
   '성수':   { 1:7496,  2:9665,  3:9460,  4:9171,  5:7399,  6:8031,  7:7950,  8:7530,  9:6574,  10:6411,  11:8363,  12:10046 },
   '광명':   { 1:9725,  2:11727, 3:12450, 4:11259, 5:11281, 6:10110, 7:9424,  8:9384,  9:8122,  10:8023,  11:9737,  12:11164 },
-  '자유로': { 1:7352,  2:9089,  3:9611,  4:8728,  5:8595,  6:7751,  7:7229,  8:6505,  9:5561,  10:5097,  11:6156,  12:7536  }
+  '자유로': { 1:7352,  2:9089,  3:9611,  4:8728,  5:8595,  6:7751,  7:7229,  8:6505,  9:5561,  10:5097,  11:6156,  12:7536  },
+  '안성':   { 1:0,     2:0,     3:0,     4:0,     5:0,     6:0,     7:0,     8:0,     9:0,     10:0,     11:0,     12:0     }  // ★ 2026-05-15 오픈
 };
 // 매장별 2025 연간 세차대수 (월 평균 산출 기준)
 const STORE_ANNUAL_2025 = {
-  '일산':74286, '고양':33602, '하남':131293, '성수':98096, '광명':122406, '자유로':89210
+  '일산':74286, '고양':33602, '하남':131293, '성수':98096, '광명':122406, '자유로':89210,
+  '안성': 0   // ★ 2026-05-15 오픈
 };
 
 // ★ MTD 계산용 상수 / 헬퍼 ────────────────────────────────────────
@@ -681,7 +685,7 @@ async function loadData() {
 
 function buildStoreSelect() {
   const sel = $('storeSelect');
-  sel.innerHTML = '<option value="all">전체 (6개 매장 합산)</option>';
+  sel.innerHTML = '<option value="all">전체 (7개 매장 합산)</option>';
   Object.entries(GID.stores).forEach(([k,v]) => {
     const opt = document.createElement('option');
     opt.value = k; opt.textContent = v.name;
@@ -2649,6 +2653,7 @@ function renderHeatmap(ent) {
     const cap    = capData.find(c => c.name === s.name) || {};
     return {
       name:        s.name,
+      status:      ops.status || '',
       achievement: agg.achievement  || ops.achievement  || 0,
       utilization: agg.utilization  || ops.utilization  || 0,
       churn:       agg.churn        || ops.churn        || 0,
@@ -2660,6 +2665,8 @@ function renderHeatmap(ent) {
     };
   });
   const stores = storeAgg;
+  // "오픈 전" 매장은 정규화에서 제외 (0값이 다른 매장 색상 왜곡 방지)
+  const activeStores = stores.filter(s => s.status !== '오픈 전');
   const metrics = [
     { key:'achievement',   label:'달성률',    fmt:fmtP,  inv:false },
     { key:'utilization',   label:'가동률',    fmt:fmtP,  inv:false },
@@ -2671,9 +2678,9 @@ function renderHeatmap(ent) {
     { key:'lossEstimate',  label:'손실추정',  fmt:fmtS,  inv:true  }   // ★ 손실 추정 매출 (낮을수록 좋음)
   ];
 
-  // 열별 min/max
+  // 열별 min/max — "오픈 전" 매장 제외하여 정규화 왜곡 방지
   const cols = metrics.map(m=>{
-    const vals = stores.map(s=>s[m.key]||0);
+    const vals = activeStores.map(s=>s[m.key]||0);
     return { min:Math.min(...vals), max:Math.max(...vals) };
   });
 
@@ -2694,14 +2701,21 @@ function renderHeatmap(ent) {
 
   stores.forEach(s => {
     const isSelected = s.name === selName;
+    const isOpening  = s.status === '오픈 전';
     html += `<div class="hm-data-row${isSelected?' selected':''}" data-store="${s.name}">
-      <div class="hm-label-cell">${s.name}</div>
+      <div class="hm-label-cell">${s.name}${isOpening?'<span class="hm-open-badge">오픈예정</span>':''}</div>
       ${metrics.map((m,i)=>{
+        if (isOpening) {
+          return `<div class="hm-cell hm-cell-opening">
+            <span class="hm-cell-top">—</span>
+            <span class="hm-cell-rank">5/15↑</span>
+          </div>`;
+        }
         const v = s[m.key]||0;
         const {min,max} = cols[i];
         const norm = max>min?(v-min)/(max-min):0.5;
         const {bg,text} = cellColor(norm, m.inv);
-        const rank = [...stores].sort((a,b)=>m.inv?(a[m.key]||0)-(b[m.key]||0):(b[m.key]||0)-(a[m.key]||0)).findIndex(st=>st.name===s.name)+1;
+        const rank = [...activeStores].sort((a,b)=>m.inv?(a[m.key]||0)-(b[m.key]||0):(b[m.key]||0)-(a[m.key]||0)).findIndex(st=>st.name===s.name)+1;
         return `<div class="hm-cell" style="background:${bg};color:${text}">
           <span class="hm-cell-top">${m.fmt(v)}</span>
           <span class="hm-cell-rank">${rank}위</span>
@@ -2804,7 +2818,7 @@ function renderTable(ent) {
       <td>${fmtP(s.refundRate||0)}${refundDelta}</td>
       <td>${(s.netAdds||0)>=0?'+':''}${fmtN(s.netAdds||0)}</td>
       <td style="white-space:nowrap">${fmtW(s.arpu||0)}</td>
-      <td><span class="verdict-chip ${ach>=100?'good':ach>=80?'warn':'bad'}">${s.status}</span></td>
+      <td><span class="verdict-chip ${s.status==='오픈 전'?'open':ach>=100?'good':ach>=80?'warn':'bad'}">${s.status}</span></td>
     </tr>`;
   }).join('');
   $('storeTableBody').innerHTML = rows;

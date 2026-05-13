@@ -295,6 +295,11 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
 .verdict-chip.good{color:var(--green);background:var(--green-soft)}
 .verdict-chip.warn{color:var(--amber);background:var(--amber-soft)}
 .verdict-chip.bad{color:var(--rose);background:var(--rose-soft)}
+.verdict-chip.open{color:var(--teal);background:rgba(29,122,138,.12)}
+
+/* ══ HEATMAP OPENING STORE ═══════════════════════════════════ */
+.hm-open-badge{display:inline-block;margin-left:5px;font-size:9px;font-weight:700;padding:1px 6px;border-radius:8px;color:var(--teal);background:rgba(29,122,138,.12);vertical-align:middle}
+.hm-cell-opening{background:rgba(29,122,138,.06)!important;color:var(--teal)!important;border:1px dashed rgba(29,122,138,.3)}
 
 /* ══ DETAIL ════════════════════════════════════════════════════ */
 .detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
