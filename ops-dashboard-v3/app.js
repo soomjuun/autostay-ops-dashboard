@@ -1164,11 +1164,14 @@ function renderInsights(ent) {
     const latestIsMTD = monthStatus(latestM.num) === 'mtd';
     if (Math.abs(momGross)>0.5) {
       if (latestIsMTD) {
-        // MTD월은 확정월과 직접 비교 부적절 → 참고용 표기
-        summary += ` 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% (MTD 경과일 기준, 직접비교 주의).`;
-      } else {
-        summary += ` 직전 확정월 대비 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM.`;
+        // MTD월은 확정월과 직접 비교 부적절 → 비교 기준을 명시적으로 표기
+        const prevLabel = prev.month || '전월';
+        summary += ` (최근월 ${latestM.month} MTD vs ${prevLabel} 확정 기준 ${momGross>=0?'+':''}${momGross.toFixed(1)}% — 경과일 차이 있음).`;
+      } else if (ms.length === 2) {
+        // 2개월 비교일 때만 MoM 표기 (명확한 맥락)
+        summary += ` ${prev.month} 대비 ${latestM.month} 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM.`;
       }
+      // 3개월+ 누적 화면에서는 MoM 숫자 생략 — 월별 카드에서 확인
     }
   }
   $('headline').textContent = summary;
@@ -3184,28 +3187,35 @@ function renderTable(ent) {
     const refund = s.refundRate   || 0;
     const churn  = s.churn        || 0;
     const rawCap = STORE_CAPACITY_RAW[s.name] || 0;
+    const overCap = rawCap > 0 && (s.usage||0) > rawCap;
 
-    // ── 리스크 항목을 심각도 점수로 정렬 (높을수록 먼저 표시) ──
+    // ── 리스크 유형별로 단 하나의 태그만 선택 (중복 방지) ──
+    // 같은 차원(이탈·환불·달성·가동)에서 가장 심각한 단계 하나만 등록
     const risks = [];
 
-    // Critical tier (점수 100+)
-    if (churn > 12)                             risks.push({ score:130, tag:'이탈 위험 심각' });
-    if (refund > 15)                            risks.push({ score:120, tag:'환불 위험 심각' });
-    if (ach < 70)                               risks.push({ score:110, tag:'목표 미달 심각' });
+    // [최우선] Capacity 초과 — 설계 기준 초과 시 데이터 신뢰성 문제
+    if (overCap)                                risks.push({ score:150, tag:'Capacity 검토' });
 
-    // Warning tier (점수 50~99)
-    if (churn > 8)                              risks.push({ score:90,  tag:'이탈 위험' });
-    if (refund > 8)                             risks.push({ score:80,  tag:'환불 위험' });
-    if (ach < 80)                               risks.push({ score:70,  tag:'목표 미달' });
+    // [이탈 차원] 심각(>12%) vs 경고(>8%) vs 주의(>6%) — 가장 높은 단계 하나만
+    if      (churn > 12)                        risks.push({ score:130, tag:'이탈 위험 심각' });
+    else if (churn > 8)                         risks.push({ score:90,  tag:'이탈 위험' });
+    else if (churn > 6)                         risks.push({ score:50,  tag:'이탈 주의' });
+
+    // [환불 차원] 심각(>15%) vs 경고(>8%) — 가장 높은 단계 하나만
+    if      (refund > 15)                       risks.push({ score:120, tag:'환불 위험 심각' });
+    else if (refund > 8)                        risks.push({ score:80,  tag:'환불 위험' });
+
+    // [달성률 차원] 심각(<70%) vs 경고(<80%) — 가장 높은 단계 하나만
+    if      (ach < 70)                          risks.push({ score:110, tag:'목표 미달 심각' });
+    else if (ach < 80)                          risks.push({ score:70,  tag:'목표 미달' });
+
+    // [가동률 차원] 저가동(<60%) — 달성률과 독립적 차원
     if (util < 60)                              risks.push({ score:65,  tag:'저가동' });
-
-    // Info tier (점수 10~49) — 고성과 매장에서도 발생 가능하나 낮은 우선순위
-    if (rawCap > 0 && (s.usage||0) > rawCap)   risks.push({ score:40,  tag:'Capacity 검토' });
 
     // 정상 매장 (리스크 없음)
     if (!risks.length) return { text:'정상', cls:'good' };
 
-    // 점수 내림차순 정렬 후 상위 2개만 표시
+    // 점수 내림차순 정렬 후 상위 2개만 표시 (이미 유형별 중복 제거됨)
     risks.sort((a,b) => b.score - a.score);
     const topTags = risks.slice(0, 2).map(r => r.tag);
 
@@ -3293,9 +3303,22 @@ function renderDetail(ent) {
         return `총사용 ${fmtN(c.usage||0)}대 · 설계기준 미가동 ${fmtN(cr.idleCount||0)}대`;
       })() },
     { label:'이탈률',   val:fmtP(c.churn||0),        sub:`해지 ${fmtN(c.cancelSubs||0)}건` },
-    { label:'환불율',   val:fmtP(c.refundRate||0),   sub:`총매출 기준` },
+    (()=>{
+      const dDiscount = c.discountShare||0;
+      const dRefund   = c.refundRate||0;
+      const sameVal   = dDiscount > 0 && dRefund > 0 && Math.abs(dDiscount - dRefund) < 0.01;
+      const badge     = sameVal ? ' <span style="font-size:9px;background:#ffe082;color:#7a5900;padding:1px 4px;border-radius:3px;font-weight:700">⚠ 원천 확인</span>' : '';
+      return { label:`환불율${badge}`, val:fmtP(dRefund), sub: sameVal ? `할인비중과 동일값 — 원천 컬럼 재확인 필요` : `총매출 기준` };
+    })(),
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
-    { label:'할인비중', val:fmtP(c.discountShare||0), sub:fmtS(c.discountAmount||0) },
+    (()=>{
+      // 할인비중 ≈ 환불율 동일값이면 "확인 필요" 뱃지 표시
+      const dDiscount = c.discountShare||0;
+      const dRefund   = c.refundRate||0;
+      const sameVal   = dDiscount > 0 && dRefund > 0 && Math.abs(dDiscount - dRefund) < 0.01;
+      const badge     = sameVal ? ' <span style="font-size:9px;background:#ffe082;color:#7a5900;padding:1px 4px;border-radius:3px;font-weight:700">⚠ 원천 확인</span>' : '';
+      return { label:`할인비중${badge}`, val:fmtP(dDiscount), sub: sameVal ? `환불율과 동일값 — 컬럼 매핑 재확인 필요` : fmtS(c.discountAmount||0) };
+    })(),
     { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:`MRR ÷ 유지 구독자` },
     { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`ARR YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'} (연간 반복매출)` },
     { label:'LTV(추정)', val: (c.ltv||0) > 0 ? fmtW(c.ltv) : '—', sub:`ARPU ÷ 이탈률 추정` }
@@ -3648,7 +3671,7 @@ function renderActionCenter(ent) {
   const totalLossAll  = capForLoss.reduce((s,d) => s+(d.lossEstimate||0), 0);
   const totalIdleAll  = capForLoss.reduce((s,d) => s+(d.idleCount||0),    0);
   const sorted = [...capForLoss].sort((a,b) => b.lossEstimate - a.lossEstimate);
-  if (lossTitleEl) lossTitleEl.textContent = ent.isAll ? '손실 추정 금액' : `${ent.name} 손실 추정`;
+  if (lossTitleEl) lossTitleEl.textContent = ent.isAll ? '누적 손실 추정' : `${ent.name} 누적 손실 추정`;
 
   // ★ v3: 손실 기준 명확화 — 확정월 합산 + 당월 MTD 합산 구분
   const totConfLoss_ = capForLoss.reduce((s,d)=>s+(d.confirmedLoss||0),0);
