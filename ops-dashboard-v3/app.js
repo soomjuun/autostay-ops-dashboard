@@ -1161,7 +1161,15 @@ function renderInsights(ent) {
   if (latestM && ms.length >= 2) {
     const prev = ms[ms.length-2];
     const momGross = prev.gross>0?(latestM.gross-prev.gross)/prev.gross*100:0;
-    if (Math.abs(momGross)>0.5) summary += ` 직전 월 대비 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}%.`;
+    const latestIsMTD = monthStatus(latestM.num) === 'mtd';
+    if (Math.abs(momGross)>0.5) {
+      if (latestIsMTD) {
+        // MTD월은 확정월과 직접 비교 부적절 → 참고용 표기
+        summary += ` 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% (MTD 경과일 기준, 직접비교 주의).`;
+      } else {
+        summary += ` 직전 확정월 대비 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM.`;
+      }
+    }
   }
   $('headline').textContent = summary;
 
@@ -1554,6 +1562,17 @@ function renderOpsUtilStats(ent) {
           </tr>`;
         }).join('')}
       </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="4" style="padding:6px 0 2px;font-size:10px;color:var(--muted);border-top:1px solid var(--border)">
+            판정 기준&nbsp;:&nbsp;
+            <span style="color:var(--rose);font-weight:600">🔴 저가동 &lt;75%</span>&nbsp;|&nbsp;
+            <span style="color:var(--amber);font-weight:600">🔶 관리 75~85%</span>&nbsp;|&nbsp;
+            <span style="color:var(--green);font-weight:600">✅ 양호 ≥85%</span>
+            &nbsp;&nbsp;(목표 기준 75%)
+          </td>
+        </tr>
+      </tfoot>
     </table>`;
 }
 
@@ -3165,21 +3184,34 @@ function renderTable(ent) {
     const refund = s.refundRate   || 0;
     const churn  = s.churn        || 0;
     const rawCap = STORE_CAPACITY_RAW[s.name] || 0;
-    const tags   = [];
-    // Capacity 검토: 설계기준 초과 (usage > rawCap)
-    if (rawCap > 0 && (s.usage||0) > rawCap)  tags.push('Capacity 검토');
-    // 저가동: 보정기준 가동률 < 60
-    else if (util < 60)                         tags.push('저가동');
-    // 목표 미달: 달성률 < 80%
-    if (ach < 80)                               tags.push('목표 미달');
-    // 이탈 위험: 이탈률 > 8%
-    if (churn > 8)                              tags.push('이탈 위험');
-    // 환불 위험: 환불율 > 8%
-    if (refund > 8)                             tags.push('환불 위험');
-    if (!tags.length) return { text:'정상', cls:'good' };
-    // ★ 최대 2개 태그만 표시 — 가장 심각한 2개 우선
-    const topTags = tags.slice(0, 2);
-    const cls = tags.length > 1 ? 'warn' : (ach < 70 || churn > 12 || refund > 15 ? 'bad' : 'warn');
+
+    // ── 리스크 항목을 심각도 점수로 정렬 (높을수록 먼저 표시) ──
+    const risks = [];
+
+    // Critical tier (점수 100+)
+    if (churn > 12)                             risks.push({ score:130, tag:'이탈 위험 심각' });
+    if (refund > 15)                            risks.push({ score:120, tag:'환불 위험 심각' });
+    if (ach < 70)                               risks.push({ score:110, tag:'목표 미달 심각' });
+
+    // Warning tier (점수 50~99)
+    if (churn > 8)                              risks.push({ score:90,  tag:'이탈 위험' });
+    if (refund > 8)                             risks.push({ score:80,  tag:'환불 위험' });
+    if (ach < 80)                               risks.push({ score:70,  tag:'목표 미달' });
+    if (util < 60)                              risks.push({ score:65,  tag:'저가동' });
+
+    // Info tier (점수 10~49) — 고성과 매장에서도 발생 가능하나 낮은 우선순위
+    if (rawCap > 0 && (s.usage||0) > rawCap)   risks.push({ score:40,  tag:'Capacity 검토' });
+
+    // 정상 매장 (리스크 없음)
+    if (!risks.length) return { text:'정상', cls:'good' };
+
+    // 점수 내림차순 정렬 후 상위 2개만 표시
+    risks.sort((a,b) => b.score - a.score);
+    const topTags = risks.slice(0, 2).map(r => r.tag);
+
+    // 최상위 리스크 기준으로 cls 결정
+    const topScore = risks[0].score;
+    const cls = topScore >= 100 ? 'bad' : 'warn';
     return { text: topTags.join(' + '), cls };
   }
 
@@ -3254,7 +3286,10 @@ function renderDetail(ent) {
     { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
     { label:'달성률',   val:fmtP(c.achievement||0),  sub:`목표 ${fmtS(c.target||0)}` },
     { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
-        const cr = buildCapacityData(ent)[0]||{};
+        const capAll = buildCapacityData(ent);
+        const cr = ent.isAll
+          ? { idleCount: capAll.reduce((s,d)=>s+(d.idleCount||0),0) }
+          : (capAll[0]||{});
         return `총사용 ${fmtN(c.usage||0)}대 · 설계기준 미가동 ${fmtN(cr.idleCount||0)}대`;
       })() },
     { label:'이탈률',   val:fmtP(c.churn||0),        sub:`해지 ${fmtN(c.cancelSubs||0)}건` },
@@ -3414,7 +3449,7 @@ function renderActionCenter(ent) {
   if (churn > 10)     actions.push({ level:'critical', text:`이탈률 ${fmtP(churn)} — 해지 방어 캠페인 즉각 실행`,
     dri:'사업운영팀', deadline:deadline3d,
     kpi:'이탈률 10% 이하',
-    confirm:`3일 내 해지 건수 일평균 ${Math.max(1,Math.round((c.cancelSubs||0)*0.7))}건 이하` });
+    confirm:`7일 내 재결제 전환율 8% 이상 또는 해지 사유 태깅 완료 80건 이상` });
   else if (churn > 6) actions.push({ level:'warning',  text:`이탈률 ${fmtP(churn)} — 리텐션 점검 및 구독 혜택 재검토`,
     dri:'사업운영팀', deadline:deadlineWk,
     kpi:'이탈률 6% 이하',
