@@ -109,6 +109,13 @@ const STATUS_TIP   = {
   mtd       : '현재일까지 누적 데이터 (Month-to-Date)',
   projected : '현재 추세를 월말까지 환산한 값'
 };
+// ★ 차트 x축 레이블: "4월 CLOSED" / "5월 MTD" 구분 표시
+function chartMonthLabel(m) {
+  const st = monthStatus(m.num);
+  if (st === 'confirmed') return `${m.month} ✓`;
+  if (st === 'mtd')       return `${m.month} MTD`;
+  return m.month;
+}
 
 /* ── 2. 상태 ─────────────────────────────────────────────────── */
 let state = { quarter:"all", store:"all" };
@@ -241,7 +248,14 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
       const g = mv(salesM,'총매출',spec.cur), n = mv(salesM,'순매출',spec.cur);
       return g > 0 && n > 0 ? Math.max(0, g - n) : 0;
     })(),
-    discountShare: mvAlias(salesM,['할인비중','할인율','할인비율','환불율','환불률'], spec.cur, pct),
+    // ★ 할인비중: 환불율 컬럼 절대 혼용 금지 (동일값 오류 방지)
+    //   전용 컬럼 없으면 (총매출-순매출)/총매출 역산 — 환불율 alias 제거
+    discountShare: (()=>{
+      const d = mvAlias(salesM,['할인비중','할인율','할인비율'], spec.cur, pct);
+      if (d > 0) return d;
+      const g = mv(salesM,'총매출',spec.cur), n = mv(salesM,'순매출',spec.cur);
+      return (g > 0 && n > 0) ? Math.max(0, (g - n) / g * 100) : 0;
+    })(),
     refundRate:   mvAlias(salesM,['환불율','환불률','환불비율'],           spec.cur, pct),
     utilization:  mvAlias(salesM,['가동률','가동율','이용률'],             spec.cur, pct),
     retained, retainedPrev: mv(subM, '유지', spec.prev),
@@ -464,6 +478,11 @@ function runAudit(months, opsStores) {
     // 극단적 이상치
     if (m.utilization > 130)
       opIssues.push(`${m.month}: 가동률 ${fmtP(m.utilization)} — Capacity 원천 데이터 확인 필요`);
+    // ★ v3: 할인비중 ≈ 환불율 동일값 감지 — 컬럼 혼용 가능성
+    if (m.discountShare > 0 && m.refundRate > 0) {
+      const diff = Math.abs(m.discountShare - m.refundRate);
+      if (diff < 0.01) opIssues.push(`${m.month}: 할인비중·환불율 동일값(${fmtP(m.refundRate)}) — 컬럼 매핑 확인 필요`);
+    }
   });
 
   // ★ v3: 매출 합산 정합성 체크 (전체 합산 vs 개별 매장 합산 ±0.5%)
@@ -510,6 +529,18 @@ function runAudit(months, opsStores) {
     if (s.mrr > 0 && s.retained > 0 && s.arpu === 0)
       opIssues.push(`${s.name}: ARPU 계산 불가 (MRR 데이터 점검)`);
   });
+
+  // ★ v3: 매장 수 정합성 체크
+  if (dashboard?.opsStores) {
+    const opsCount    = getActiveOpsStores().length;
+    const storeCount  = (dashboard.stores||[]).filter(s => !isOpeningStore(s.name)).length;
+    if (opsCount !== storeCount && storeCount > 0)
+      opIssues.push(`매장 수 불일치: ops시트 운영매장 ${opsCount}개 vs 개별시트 ${storeCount}개 — 데이터 범위 확인 필요`);
+  }
+
+  // ★ v3: 정합성 카드 "정상" 판정 기준 강화
+  //   아래 조건 중 하나라도 해당하면 "정상" 아님:
+  //   ① 가동률 >100% ② 할인비중=환불율 동일값 ③ 매출 불일치 ④ 매장 수 불일치 ⑤ 오픈 전 실데이터
 
   // 운영 리스크 먼저, 시트 형식 확인 사항은 별도 prefix로 뒤에 추가
   return [
@@ -860,6 +891,9 @@ function renderGauges(ent) {
   // ★ Change 3: MoM 델타 계산 (최신 달 vs 직전 달)
   const lastM = ms.length ? ms[ms.length-1] : null;
   const prevM = ms.length >= 2 ? ms[ms.length-2] : null;
+  // ★ Priority 4: 최신 달이 MTD이면 "MTD 기준" 라벨 부착
+  const lastIsMTD = lastM && monthStatus(lastM.num) === 'mtd';
+  const momCtxLabel = lastIsMTD ? ' MTD기준' : ' MoM';
   function gaugeDeltaHtml(cur, prev, invert=false) {
     if (!prevM || prev == null) return '';
     const d = cur - prev;
@@ -867,7 +901,7 @@ function renderGauges(ent) {
     const isGood = invert ? d < 0 : d > 0;
     const arrow = d > 0 ? '▲' : '▼';
     const color = isGood ? '#6ce8b0' : '#ff8fa0';
-    return ` <span style="font-size:11px;font-weight:700;color:${color}">${arrow}${Math.abs(d).toFixed(1)}%p</span>`;
+    return ` <span style="font-size:11px;font-weight:700;color:${color}">${arrow}${Math.abs(d).toFixed(1)}%p${momCtxLabel}</span>`;
   }
   const achDelta   = gaugeDeltaHtml(achRaw, prevM?.achievement||0, false);
   const utilDelta  = gaugeDeltaHtml(utilRaw, prevM?.utilization||0, false);
@@ -877,7 +911,7 @@ function renderGauges(ent) {
   const mrrMoMPct = (lastM && prevM && prevM.mrr > 0)
     ? ((lastM.mrr - prevM.mrr) / prevM.mrr * 100) : null;
   const mrrDelta = mrrMoMPct !== null
-    ? ` <span style="font-size:11px;font-weight:700;color:${mrrMoMPct>=0?'#6ce8b0':'#ff8fa0'}">${mrrMoMPct>=0?'▲':'▼'}${Math.abs(mrrMoMPct).toFixed(1)}% MoM</span>`
+    ? ` <span style="font-size:11px;font-weight:700;color:${mrrMoMPct>=0?'#6ce8b0':'#ff8fa0'}">${mrrMoMPct>=0?'▲':'▼'}${Math.abs(mrrMoMPct).toFixed(1)}%${momCtxLabel}</span>`
     : '';
 
   // FIX 5A — 기간 라벨 (게이지 서브에 기간 컨텍스트 추가)
@@ -1006,13 +1040,16 @@ function renderKpis(ent) {
       projection: (c.netAdds||0) < 0
         ? `현 추세 유지 시 월 구독 ${c.netAdds||0}건 감소` : null }
   ];
+  // ★ Priority 4: 최신 달 MTD 여부로 MoM 라벨 분기
+  const _kpiLastM = ms.length ? ms[ms.length-1] : null;
+  const _kpiMomCtx = (_kpiLastM && monthStatus(_kpiLastM.num) === 'mtd') ? 'MTD기준' : 'MoM';
   $('kpiGrid').innerHTML = kpis.map(k => {
     const hasDelta = k.delta != null && !isNaN(k.delta);
     const deltaClass = hasDelta ? (k.invert ? (k.delta<=0?'up':'down') : (k.delta>=0?'up':'down')) : 'neutral';
     const suffix = k.deltaSuffix || '%';
     const absD   = Math.abs(k.delta||0);
     const deltaText = hasDelta
-      ? `${(k.delta||0)>=0?'▲':'▼'} ${k.isRaw ? fmtN(absD) : absD.toFixed(1)}${suffix} MoM`
+      ? `${(k.delta||0)>=0?'▲':'▼'} ${k.isRaw ? fmtN(absD) : absD.toFixed(1)}${suffix} ${_kpiMomCtx}`
       : '';
     const prog = k.prog != null ? `<div class="kpi-progress"><div class="kpi-bar ${k.color}" style="width:${Math.min(100,k.prog||0)}%"></div></div>` : '';
     const spark = k.spark && k.spark.some(v=>v>0) && k.spark.length>=2 ? `<div class="kpi-spark">${sparkline(k.spark, k.sparkColor)}</div>` : '';
@@ -1083,14 +1120,21 @@ function renderInsights(ent) {
   const ms = ent.months;
 
   // ── 핵심 요약 (동적 인사이트) ──────────────────
+  // ★ v3: topStore = 필터 기간 기준 집계 (ops 스냅샷 아닌 filterMonths 기반)
   const topStore = ent.isAll
-    ? [...getActiveOpsStores()].sort((a,b)=>b.gross-a.gross)[0] : null;
+    ? [...dashboard.stores]
+        .filter(s => !isOpeningStore(s.name))
+        .map(s => { const agg = aggMonths(filterMonths(s.months)) || {}; return { name: s.name, gross: agg.gross || 0 }; })
+        .sort((a,b) => b.gross - a.gross)[0]
+    : null;
   const achStatus = (c.achievement||0)>=100?'목표 초과 달성':(c.achievement||0)>=80?'목표 근접':'목표 미달';
   const mrrDir    = (c.mrrYoY||0)>=0?'성장 중':'감소 중';
   const latestM   = ms.length ? ms[ms.length-1] : null;
+  const firstM    = ms.length ? ms[0].month : '';
+  const lastM_str = ms.length ? ms[ms.length-1].month : '';
 
   // FIX 5C — 기간 정보 헤드라인에 추가
-  const periodInfo = ms.length > 0 ? `[${ms[0].month}~${ms[ms.length-1].month} 기준] ` : '';
+  const periodInfo = ms.length > 0 ? `[${firstM}~${lastM_str} 기준] ` : '';
   // ★ v3: 운영 중 매장 수 동적 (오픈 전 제외)
   const _insActiveN = getActiveOpsStores().length;
   let summary = ent.isAll
@@ -1098,7 +1142,9 @@ function renderInsights(ent) {
     : `${periodInfo}${ent.name}: 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
 
   if (ent.isAll && topStore) {
-    summary += `최고 매출 매장은 ${topStore.name} (${fmtS(topStore.gross)}).`;
+    // ★ v3: 기간 명시 — 누적 합산 기준임을 명확히
+    const topPeriodLabel = ms.length > 1 ? `${firstM}~${lastM_str} 합산` : firstM;
+    summary += `${topPeriodLabel} 최고 매출: ${topStore.name} (${fmtS(topStore.gross)}).`;
   }
   if (latestM && ms.length >= 2) {
     const prev = ms[ms.length-2];
@@ -1209,8 +1255,10 @@ function renderInsights(ent) {
 
   // ── 포커스 패널 ──────────────────
   $('focusLabel').textContent = ent.name;
+  // ★ v3: 오픈 전 제외한 운영 중 매장 수 표시
+  const _focusActiveN = getActiveOpsStores().length;
   $('focusSub').textContent = ent.isAll
-    ? `${ms.length}개월 합산 · ${dashboard.opsStores.length}개 매장`
+    ? `${ms.length}개월 합산 · 운영 ${_focusActiveN}개 매장`
     : `${ms.length}개월 추적 중`;
 
   if (!ent.isAll) {
@@ -1265,7 +1313,7 @@ const TTdefaults = {
 
 function renderPerformanceChart(ent) {
   const ms = ent.months;
-  const labels = ms.map(m=>m.month);
+  const labels = ms.map(m=>chartMonthLabel(m));
   mkChart('performanceChart', {
     data: {
       labels,
@@ -1379,7 +1427,7 @@ function renderSubscriptionChart(ent) {
   const ms = ent.months;
   mkChart('subscriptionChart', {
     data:{
-      labels: ms.map(m=>m.month),
+      labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
         { type:'bar', label:'유지', data:ms.map(m=>m.retained),
           backgroundColor:'rgba(33,101,82,.7)', borderRadius:4, stack:'subs' },
@@ -1403,81 +1451,227 @@ function renderSubscriptionChart(ent) {
   });
 }
 
-function renderOpsChart(ent) {
+/* ── 운영 품질 추적: 3분할 차트 ─────────────────────────────────
+   ① renderOpsUtilChart  / renderOpsUtilStats   — 가동률 추이
+   ② renderOpsChurnChart / renderOpsChurnStats  — 이탈·환불 리스크
+   ③ renderOpsArpuChart  / renderOpsArpuStats   — 할인·ARPU 수익성
+   ────────────────────────────────────────────────────────────── */
+
+/* ① 가동률 추이 */
+function renderOpsUtilChart(ent) {
   const ms = ent.months;
-  mkChart('opsChart', {
+  // ★ 인라인 플러그인: 75% 기준선 — 이 차트에만 적용 (Chart.register 미사용)
+  const refLinePlugin = {
+    id: 'opsUtilRefLine',
+    afterDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales.y) return;
+      const yPx = scales.y.getPixelForValue(75);
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = '#c07b48';
+      ctx.lineWidth   = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, yPx);
+      ctx.lineTo(chartArea.right, yPx);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#c07b48';
+      ctx.font = '9px Pretendard Variable, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText('목표 75%', chartArea.right - 2, yPx - 3);
+      ctx.restore();
+    }
+  };
+  mkChart('opsUtilChart', {
+    plugins: [refLinePlugin],   // ← Chart.js 4: 인라인 플러그인 배열
     data:{
-      labels: ms.map(m=>m.month),
+      labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
-        // [통일] 가동률 월별 차트: m.utilization — buildMonth()에서 salesM 시트 '가동률' 컬럼 사용
         { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization||0),
           borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
-          fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4, yAxisID:'pct' },
-        { type:'line', label:'이탈률 %', data:ms.map(m=>m.churn||0),
-          borderColor:PALETTE.rose, borderWidth:2, pointRadius:3,
-          fill:false, tension:0.4, yAxisID:'pct' },
-        { type:'line', label:'환불율 %', data:ms.map(m=>m.refundRate||0),
-          borderColor:PALETTE.amber, borderWidth:2, pointRadius:3,
-          borderDash:[4,3], fill:false, tension:0.4, yAxisID:'pct' },
-        { type:'line', label:'할인비중 %', data:ms.map(m=>m.discountShare||0),
-          borderColor:PALETTE.navy, borderWidth:2, pointRadius:3,
-          borderDash:[2,4], fill:false, tension:0.4, yAxisID:'pct' },
-        { type:'line', label:'ARPU (만원)',
-          data: ms.map(m => (m.arpu||0) / 10000),
-          borderColor: PALETTE.violet, borderWidth:1.5, pointRadius:2,
-          borderDash:[3,3], fill:false, tension:0.4, yAxisID:'arpu' }
+          fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4 }
       ]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{position:'top',labels:{boxWidth:10,padding:12}}, tooltip:TTdefaults },
+      plugins:{ legend:{ display:false }, tooltip:TTdefaults },
       scales:{
-        // ★ suggestedMax 의도적 제거: 가동률이 100% 초과 가능 (예: 118.2%)
-        // suggestedMax:100 설정 시 초과 값이 잘려 y=0 근처에 표시되는 버그 방지
-        pct:{ position:'left', ticks:{callback:v=>`${v.toFixed(1)}%`}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
-        arpu:{ display:false },   // tooltip에서만 확인 (축 혼잡 방지)
-        x:{ grid:{display:false} }
+        y:{ ticks:{callback:v=>`${v.toFixed(0)}%`, font:{size:10}}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
+        x:{ grid:{display:false}, ticks:{font:{size:10}} }
       }
     }
   });
 }
 
-function renderOpsQualityStats(ent) {
-  const el = $('opsQualStats');
+function renderOpsUtilStats(ent) {
+  const el = $('opsUtilStats');
   if (!el) return;
   const ms = ent.months;
   if (!ms || ms.length === 0) { el.innerHTML = ''; return; }
 
+  // 색상 기준: ≥85% 녹색 / 75-85% 주황 / <75% 빨강
+  function utilColor(v) {
+    return v >= 85 ? 'var(--green)' : v >= 75 ? 'var(--amber)' : 'var(--rose)';
+  }
+  function utilBg(v) {
+    return v >= 85 ? '#e8f5f0' : v >= 75 ? '#fff3e0' : '#fce8ea';
+  }
+
   el.innerHTML = `
-    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">월별 상세</div>
     <table style="width:100%;border-collapse:collapse;font-size:11.5px">
       <thead>
         <tr style="border-bottom:1px solid var(--border)">
-          <th style="text-align:left;padding:3px 0;font-weight:700;color:var(--muted);font-size:10.5px">월</th>
-          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--green);font-size:10.5px">가동률</th>
-          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--rose);font-size:10.5px">이탈률</th>
-          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--amber);font-size:10.5px">환불율</th>
-          <th style="text-align:right;padding:3px 4px;font-weight:700;color:var(--muted);font-size:10.5px">할인비중</th>
+          <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--green);font-size:10.5px">가동률</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--muted);font-size:10.5px">vs 목표</th>
+          <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">판정</th>
         </tr>
       </thead>
-      <tbody style="font-size:11.5px">
+      <tbody>
         ${ms.map(m => {
-          const util = (m.utilization||0).toFixed(1);
-          const churn = (m.churn||0).toFixed(1);
-          const refund = (m.refundRate||0).toFixed(1);
-          const disc = (m.discountShare||0).toFixed(1);
-          const utilColor = m.utilization >= 70 ? 'var(--green)' : m.utilization >= 50 ? 'var(--amber)' : 'var(--rose)';
-          const churnColor = m.churn < 6 ? 'var(--green)' : m.churn < 12 ? 'var(--amber)' : 'var(--rose)';
+          const u    = m.utilization || 0;
+          const diff = (u - 75).toFixed(1);
+          const sign = diff >= 0 ? '+' : '';
+          const verdict = u >= 85 ? '✅ 양호' : u >= 75 ? '🔶 주의' : '🔴 저가동';
           return `<tr style="border-bottom:1px solid var(--bg2)">
             <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
-            <td style="padding:4px 4px;text-align:right;color:${utilColor};font-weight:600">${util}%</td>
-            <td style="padding:4px 4px;text-align:right;color:${churnColor}">${churn}%</td>
-            <td style="padding:4px 4px;text-align:right;color:var(--amber)">${refund}%</td>
-            <td style="padding:4px 4px;text-align:right;color:var(--muted)">${disc}%</td>
+            <td style="padding:4px 6px;text-align:right;font-weight:700;color:${utilColor(u)};background:${utilBg(u)};border-radius:4px">${u.toFixed(1)}%</td>
+            <td style="padding:4px 6px;text-align:right;color:${diff >= 0 ? 'var(--green)' : 'var(--rose)'}">${sign}${diff}%p</td>
+            <td style="padding:4px 0;text-align:right;font-size:11px">${verdict}</td>
           </tr>`;
         }).join('')}
       </tbody>
     </table>`;
+}
+
+/* ② 이탈·환불 리스크 */
+function renderOpsChurnChart(ent) {
+  const ms = ent.months;
+  mkChart('opsChurnChart', {
+    data:{
+      labels: ms.map(m=>chartMonthLabel(m)),
+      datasets:[
+        { type:'line', label:'이탈률 %', data:ms.map(m=>m.churn||0),
+          borderColor:PALETTE.rose, borderWidth:2.5, pointRadius:4,
+          fill:true, backgroundColor:makeGrad(null,178,76,88,.15,0), tension:0.4 },
+        { type:'line', label:'환불율 %', data:ms.map(m=>m.refundRate||0),
+          borderColor:PALETTE.amber, borderWidth:2, pointRadius:3,
+          borderDash:[4,3], fill:false, tension:0.4 }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'top',labels:{boxWidth:10,padding:10,font:{size:11}}}, tooltip:TTdefaults },
+      scales:{
+        y:{ ticks:{callback:v=>`${v.toFixed(1)}%`, font:{size:10}}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
+        x:{ grid:{display:false}, ticks:{font:{size:10}} }
+      }
+    }
+  });
+}
+
+function renderOpsChurnStats(ent) {
+  const el = $('opsChurnStats');
+  if (!el) return;
+  const ms = ent.months;
+  if (!ms || ms.length === 0) { el.innerHTML = ''; return; }
+
+  // 색상 기준 — 이탈: ≤6% 녹 / 6-10% 주황 / >10% 빨 / 환불: ≤3% 녹 / 3-5% 주황 / >5% 빨
+  function churnColor(v)  { return v <= 6  ? 'var(--green)' : v <= 10 ? 'var(--amber)' : 'var(--rose)'; }
+  function refundColor(v) { return v <= 3  ? 'var(--green)' : v <= 5  ? 'var(--amber)' : 'var(--rose)'; }
+  function churnBg(v)     { return v <= 6  ? '#e8f5f0' : v <= 10 ? '#fff3e0' : '#fce8ea'; }
+  function refundBg(v)    { return v <= 3  ? '#e8f5f0' : v <= 5  ? '#fff3e0' : '#fce8ea'; }
+
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+      <thead>
+        <tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--rose);font-size:10.5px">이탈률</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--amber);font-size:10.5px">환불율</th>
+          <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">위험도</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${ms.map(m => {
+          const c = m.churn     || 0;
+          const r = m.refundRate || 0;
+          const riskLevel = (c > 10 || r > 5) ? '🔴 고위험' : (c > 6 || r > 3) ? '🔶 주의' : '✅ 양호';
+          return `<tr style="border-bottom:1px solid var(--bg2)">
+            <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
+            <td style="padding:4px 6px;text-align:right;font-weight:700;color:${churnColor(c)};background:${churnBg(c)};border-radius:4px">${c.toFixed(1)}%</td>
+            <td style="padding:4px 6px;text-align:right;font-weight:700;color:${refundColor(r)};background:${refundBg(r)};border-radius:4px">${r.toFixed(1)}%</td>
+            <td style="padding:4px 0;text-align:right;font-size:11px">${riskLevel}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+/* ③ 할인·ARPU 수익성 */
+function renderOpsArpuChart(ent) {
+  const ms = ent.months;
+  mkChart('opsArpuChart', {
+    data:{
+      labels: ms.map(m=>chartMonthLabel(m)),
+      datasets:[
+        { type:'bar', label:'할인비중 %', data:ms.map(m=>m.discountShare||0),
+          backgroundColor:makeGrad(null,90,63,140,.55,.2),
+          borderColor:PALETTE.violet, borderWidth:0, borderRadius:4, yAxisID:'pct' },
+        { type:'line', label:'ARPU (원)', data:ms.map(m=>m.arpu||0),
+          borderColor:PALETTE.navy, borderWidth:2.5, pointRadius:4,
+          fill:false, tension:0.4, yAxisID:'arpu' }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'top',labels:{boxWidth:10,padding:10,font:{size:11}}}, tooltip:TTdefaults },
+      scales:{
+        pct:{ position:'left',  ticks:{callback:v=>`${v.toFixed(1)}%`, font:{size:10}}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
+        arpu:{ position:'right', ticks:{callback:v=>`${(v/10000).toFixed(1)}만`, font:{size:10}}, grid:{display:false} },
+        x:{ grid:{display:false}, ticks:{font:{size:10}} }
+      }
+    }
+  });
+}
+
+function renderOpsArpuStats(ent) {
+  const el = $('opsArpuStats');
+  if (!el) return;
+  const ms = ent.months;
+  if (!ms || ms.length === 0) { el.innerHTML = ''; return; }
+
+  const arpuList = ms.map(m=>m.arpu||0).filter(v=>v>0);
+  const arpuAvg  = arpuList.length ? arpuList.reduce((a,b)=>a+b,0)/arpuList.length : 0;
+
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+      <thead>
+        <tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--violet,#5a3f8c);font-size:10.5px">할인비중</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--navy,#24344f);font-size:10.5px">ARPU</th>
+          <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">vs 평균</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${ms.map(m => {
+          const d    = m.discountShare || 0;
+          const arpu = m.arpu || 0;
+          const diff = arpuAvg > 0 ? ((arpu - arpuAvg) / arpuAvg * 100) : 0;
+          const sign = diff >= 0 ? '+' : '';
+          const dColor = d <= 10 ? 'var(--green)' : d <= 20 ? 'var(--amber)' : 'var(--rose)';
+          return `<tr style="border-bottom:1px solid var(--bg2)">
+            <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
+            <td style="padding:4px 6px;text-align:right;color:${dColor}">${d.toFixed(1)}%</td>
+            <td style="padding:4px 6px;text-align:right;font-weight:700;color:var(--text)">${fmtS(arpu)}</td>
+            <td style="padding:4px 0;text-align:right;color:${diff >= 0 ? 'var(--green)' : 'var(--rose)'};">${sign}${diff.toFixed(1)}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 ARPU ${fmtS(Math.round(arpuAvg))} 기준</div>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -1485,7 +1679,7 @@ function renderMrrTrendChart(ent) {
   // ★ 구독 재무 특화: MRR + 유지 구독자 수 — YoY 모멘텀 차트와 역할 분리
   mkChart('mrrTrendChart', {
     data:{
-      labels: ms.map(m=>m.month),
+      labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
         { type:'bar', label:'MRR', data:ms.map(m=>m.mrr||0),
           backgroundColor:makeGrad(null,143,66,25,.65,.3),
@@ -1812,7 +2006,7 @@ function renderMomentumChart(ent) {
   // ★ 운영 건전성 3종 특화: 달성률·가동률·이탈률 — MRR 재무 차트와 역할 분리
   mkChart('momentumChart', {
     data:{
-      labels: ms.map(m=>m.month),
+      labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
         { type:'line', label:'달성률 %', data:ms.map(m=>m.achievement||0),
           borderColor:PALETTE.accent, borderWidth:2.5, pointRadius:4,
@@ -2302,7 +2496,30 @@ function renderCapacityPanel(ent) {
   }
 
   // ── 매장별 상세 카드 ─────────────────────────────────────────
-  html += `<div class="cap-section-divider">매장별 상세</div><div class="cap-store-grid">`;
+  // ★ Priority 8: Capacity > 100% 매장 경고 카드 (항상 표시)
+  const overCapStores = stores.filter(s => {
+    const u = s.hasMTD ? s.mtdUtil : s.confirmedUtil;
+    return u > 100;
+  });
+  if (overCapStores.length > 0) {
+    html += `<div class="cap-anomaly-banner" style="background:#fde8ea;border-color:#b24c58;margin-bottom:8px">
+      🚨 <strong>Capacity 100% 초과 매장:</strong> ${overCapStores.map(s=>{
+        const u = s.hasMTD ? s.mtdUtil : s.confirmedUtil;
+        return `${s.name} (${fmtP(u)})`;
+      }).join(' · ')} — 설계 Capacity 재설정 또는 증설 검토 필요
+    </div>`;
+  }
+
+  // ★ Priority 8: 매장별 상세 — 기본 접힘 (toggle 버튼으로 펼치기)
+  html += `
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+    <div class="cap-section-divider" style="margin:0;flex:1">매장별 상세</div>
+    <button class="collapse-toggle collapsed" data-target="capStoreGrid" style="font-size:10.5px;padding:2px 8px;white-space:nowrap">
+      <span class="arrow">▾</span><span class="toggle-label">펼치기</span>
+    </button>
+  </div>
+  <div id="capStoreGrid" class="collapsible-content collapsed">
+  <div class="cap-store-grid">`;
 
   [...stores].sort((a,b) => {
     const ua = a.hasMTD ? a.mtdUtil : a.confirmedUtil;
@@ -2365,7 +2582,7 @@ function renderCapacityPanel(ent) {
       </div>` : ''}
     </div>`;
   });
-  html += `</div>`;
+  html += `</div></div>`;   // close .cap-store-grid + #capStoreGrid collapsible
 
   // ── 산정 기준 고지 ─────────────────────────────────────────
   const avgPrice = stores.length ? stores.reduce((s,st)=>s+(st.conservativePrice||0),0)/stores.length : UNIT_PRICE_TARGET;
@@ -2387,7 +2604,7 @@ function renderSeasonChart(ent) {
   const el = $('seasonChart');
   if (!el) return;
   const ms = ent.months;
-  const labels = ms.map(m => m.month);
+  const labels = ms.map(m => chartMonthLabel(m));
 
   // ── 2025 기준선 데이터 선택 (매장 or 합산) ──────────────────────
   // 매장별 월평균을 SEASON_BASE_USAGE(합산 기준)로 쓰면 왜곡되므로,
@@ -2676,7 +2893,7 @@ function renderChurnClassification(ent) {
     <!-- 실데이터 연결 안내 -->
     <div style="padding:8px 12px;background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--muted);line-height:1.6">
       💡 <strong>실데이터 연결 방법:</strong> CRM 해지 사유 분류 + PG사 결제 실패 로그를 연동하면
-      이 섹션이 실제 수치로 자동 업데이트됩니다 (담당: 사업운영팀 · 개발팀).
+      이 섹션이 실제 수치로 자동 업데이트됩니다 (담당: 사업운영팀).
     </div>
   `;
 }
@@ -2734,11 +2951,12 @@ function renderPaymentPanel(ent) {
 }
 
 /* ── 16. 히트맵 ─────────────────────────────────────────────── */
+// ★ Priority 8: 기본 5개 지표 + 토글 3개 / 순위 hover 표시 / 안성 별도 행
+let _hmShowExtra = false;  // 추가 지표 토글 상태
+
 function renderHeatmap(ent) {
-  // ★ 쿼터/매장 필터에 반응: 필터된 월 데이터에서 각 매장 집계
   // [Change 3] 히트맵은 포트폴리오 비교 목적 — 항상 전체 매장 표시 (필터 쿼터는 반영)
-  //   선택된 매장 행만 하이라이트 처리 (selName 기반)
-  const capData = buildCapacityData({ isAll: true, months: [] }); // 항상 전체 매장 Capacity
+  const capData = buildCapacityData({ isAll: true, months: [] });
   const storeAgg = dashboard.stores.map(s => {
     const filtMs = filterMonths(s.months);
     const agg    = aggMonths(filtMs) || {};
@@ -2757,21 +2975,27 @@ function renderHeatmap(ent) {
       lossEstimate:cap.lossEstimate  || ops.lossEstimate || 0
     };
   });
-  const stores = storeAgg;
-  // "오픈 전" 매장은 정규화에서 제외 (0값이 다른 매장 색상 왜곡 방지)
-  const activeStores = stores.filter(s => s.status !== '오픈 전');
-  const metrics = [
-    { key:'achievement',   label:'달성률',    fmt:fmtP,  inv:false },
-    { key:'utilization',   label:'가동률',    fmt:fmtP,  inv:false },
-    { key:'churn',         label:'이탈률',    fmt:fmtP,  inv:true  },
-    { key:'refundRate',    label:'환불율',    fmt:fmtP,  inv:true  },
-    { key:'netAdds',       label:'순증감',    fmt:fmtN,  inv:false },
-    { key:'arpu',          label:'ARPU',      fmt:fmtS,  inv:false },
-    { key:'gross',         label:'총매출',    fmt:fmtS,  inv:false },
-    { key:'lossEstimate',  label:'손실추정',  fmt:fmtS,  inv:true  }   // ★ 손실 추정 매출 (낮을수록 좋음)
-  ];
 
-  // 열별 min/max — "오픈 전" 매장 제외하여 정규화 왜곡 방지
+  // ★ 오픈 전 매장 분리: 운영 매장만 히트맵 본문에, 오픈 예정은 하단 요약 행
+  const activeStores  = storeAgg.filter(s => s.status !== '오픈 전');
+  const openingStores = storeAgg.filter(s => s.status === '오픈 전');
+
+  // ★ 기본 5개 지표 + 선택적 3개
+  const metricsCore = [
+    { key:'achievement',   label:'달성률',   fmt:fmtP,  inv:false },
+    { key:'utilization',   label:'가동률',   fmt:fmtP,  inv:false },
+    { key:'churn',         label:'이탈률',   fmt:fmtP,  inv:true  },
+    { key:'refundRate',    label:'환불율',   fmt:fmtP,  inv:true  },
+    { key:'lossEstimate',  label:'손실추정', fmt:fmtS,  inv:true  }
+  ];
+  const metricsExtra = [
+    { key:'netAdds',  label:'순증감', fmt:fmtN,  inv:false },
+    { key:'arpu',     label:'ARPU',   fmt:fmtS,  inv:false },
+    { key:'gross',    label:'총매출', fmt:fmtS,  inv:false }
+  ];
+  const metrics = _hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore;
+
+  // 열별 min/max — 운영 매장 기준 정규화
   const cols = metrics.map(m=>{
     const vals = activeStores.map(s=>s[m.key]||0);
     return { min:Math.min(...vals), max:Math.max(...vals) };
@@ -2785,41 +3009,73 @@ function renderHeatmap(ent) {
   }
 
   const selName = state.store==='all' ? null : GID.stores[state.store]?.name;
+  const colCount = metrics.length + 1;  // +1 for store label
 
-  // CSS class names: hm-head-row, hm-data-row, hm-head-cell, hm-label-cell
-  let html = `<div class="hm-head-row">
+  // 토글 버튼 포함 헤더
+  let html = `
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+    <div style="font-size:11px;font-weight:600;color:var(--muted)">운영 ${activeStores.length}개 매장 · ${metrics.length}개 지표</div>
+    <button id="hmToggleExtra" style="font-size:10.5px;padding:3px 9px;border:1px solid var(--border);border-radius:12px;background:var(--bg2);color:var(--text-2);cursor:pointer">
+      ${_hmShowExtra ? '▲ 간략히' : '▼ 추가 지표'}
+    </button>
+  </div>
+  <div class="hm-head-row" style="grid-template-columns:90px ${'1fr '.repeat(metrics.length).trim()}">
     <div class="hm-head-cell" style="text-align:left">매장</div>
     ${metrics.map(m=>`<div class="hm-head-cell">${m.label}</div>`).join('')}
   </div>`;
 
-  stores.forEach(s => {
+  // 운영 매장 행 (rank는 tooltip으로 hover 시 노출)
+  activeStores.forEach(s => {
     const isSelected = s.name === selName;
-    const isOpening  = s.status === '오픈 전';
-    html += `<div class="hm-data-row${isSelected?' selected':''}" data-store="${s.name}">
-      <div class="hm-label-cell">${s.name}${isOpening?'<span class="hm-open-badge">오픈예정</span>':''}</div>
+    html += `<div class="hm-data-row${isSelected?' selected':''}" data-store="${s.name}"
+      style="grid-template-columns:90px ${'1fr '.repeat(metrics.length).trim()}">
+      <div class="hm-label-cell">${s.name}</div>
       ${metrics.map((m,i)=>{
-        if (isOpening) {
-          return `<div class="hm-cell hm-cell-opening">
-            <span class="hm-cell-top">—</span>
-            <span class="hm-cell-rank">5/15↑</span>
-          </div>`;
-        }
         const v = s[m.key]||0;
         const {min,max} = cols[i];
         const norm = max>min?(v-min)/(max-min):0.5;
         const {bg,text} = cellColor(norm, m.inv);
         const rank = [...activeStores].sort((a,b)=>m.inv?(a[m.key]||0)-(b[m.key]||0):(b[m.key]||0)-(a[m.key]||0)).findIndex(st=>st.name===s.name)+1;
-        return `<div class="hm-cell" style="background:${bg};color:${text}">
+        // ★ 순위는 title(hover tooltip)로만 노출
+        return `<div class="hm-cell" style="background:${bg};color:${text}" title="${rank}위 / ${activeStores.length}">
           <span class="hm-cell-top">${m.fmt(v)}</span>
-          <span class="hm-cell-rank">${rank}위</span>
         </div>`;
       }).join('')}
     </div>`;
   });
 
+  // ★ 오픈 예정 매장 — 하단 요약 행 (구분선 포함)
+  if (openingStores.length > 0) {
+    html += `<div style="border-top:1px dashed var(--border);margin:6px 0 4px;opacity:.6"></div>`;
+    openingStores.forEach(s => {
+      const openInfo = dashboard.opsStores?.find(o => o.name === s.name);
+      const openDateStr = openInfo?.openDate || '5/15';
+      html += `<div class="hm-data-row" data-store="${s.name}"
+        style="grid-template-columns:90px ${'1fr '.repeat(metrics.length).trim()};opacity:.7;pointer-events:none">
+        <div class="hm-label-cell" style="color:var(--teal);font-style:italic">
+          ${s.name}<span style="font-size:9px;background:var(--teal);color:#fff;border-radius:3px;padding:0 4px;margin-left:4px">예정</span>
+        </div>
+        ${metrics.map(()=>`<div class="hm-cell hm-cell-opening" style="background:rgba(29,122,138,.06)">
+          <span class="hm-cell-top" style="color:var(--teal);font-size:10px">오픈예정</span>
+        </div>`).join('')}
+      </div>`;
+    });
+    html += `<div style="font-size:10px;color:var(--teal);padding:2px 0 0 2px">▲ ${openingStores.map(s=>s.name).join(', ')} — 오픈 후 KPI 자동 집계</div>`;
+  }
+
   $('heatmapGrid').innerHTML = html;
 
-  // 클릭 이벤트 (.hm-data-row 사용) → 인라인 드릴다운 스크롤
+  // 추가 지표 토글
+  const toggleBtn = document.getElementById('hmToggleExtra');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      _hmShowExtra = !_hmShowExtra;
+      renderHeatmap(ent);
+    });
+  }
+
+  // 클릭 이벤트 (.hm-data-row) → 인라인 드릴다운
   $('heatmapGrid').querySelectorAll('.hm-data-row').forEach(row=>{
     row.addEventListener('click', ()=>{
       const name = row.dataset.store;
@@ -2867,15 +3123,40 @@ function renderTable(ent) {
       utilization: agg.utilization  || ops.utilization  || 0,
       utilizationRaw: ops.utilizationRaw || 0,
       refundRate:  agg.refundRate   || ops.refundRate   || 0,
+      churn:       agg.churn        || ops.churn        || 0,
       netAdds:     agg.netAdds !== undefined ? agg.netAdds : (ops.netAdds || 0),
       arpu:        ops.arpu         || agg.arpu         || 0,
-      status:      ops.status       || '—',
+      opsStatus:   ops.status       || '—',   // 시트 원본 상태 (참고용)
       // prev period for MoM arrows
       prevUtil:    prevAgg ? (prevAgg.utilization || 0) : null,
       prevRefund:  prevAgg ? (prevAgg.refundRate  || 0) : null,
       prevAch:     prevAgg ? (prevAgg.achievement || 0) : null,
     };
   });
+
+  // ★ v3: 파생 상태 계산 함수 — 실데이터 기반 다중 조건
+  function deriveStoreStatus(s) {
+    if (s.opsStatus === '오픈 전') return { text:'오픈 전', cls:'open' };
+    const ach    = s.achievement  || 0;
+    const util   = s.utilization  || 0;
+    const refund = s.refundRate   || 0;
+    const churn  = s.churn        || 0;
+    const rawCap = STORE_CAPACITY_RAW[s.name] || 0;
+    const tags   = [];
+    // Capacity 검토: 설계기준 초과 (usage > rawCap)
+    if (rawCap > 0 && (s.usage||0) > rawCap)  tags.push('Capacity 검토');
+    // 저가동: 보정기준 가동률 < 60
+    else if (util < 60)                         tags.push('저가동');
+    // 목표 미달: 달성률 < 80%
+    if (ach < 80)                               tags.push('목표 미달');
+    // 이탈 위험: 이탈률 > 8%
+    if (churn > 8)                              tags.push('이탈 위험');
+    // 환불 위험: 환불율 > 8%
+    if (refund > 8)                             tags.push('환불 위험');
+    if (!tags.length) return { text:'정상', cls:'good' };
+    const cls = tags.length > 1 ? 'warn' : (ach < 70 || churn > 12 || refund > 15 ? 'bad' : 'warn');
+    return { text: tags.join(' + '), cls };
+  }
 
   const rows = tableStores.map(s=>{
     const ach = s.achievement||0;
@@ -2900,6 +3181,9 @@ function renderTable(ent) {
     // ★ Change 3: 환불율 MoM (낮을수록 좋음 → invert)
     const refundDelta = momDelta(s.refundRate||0, s.prevRefund, '%p', true);
 
+    // ★ v3: 파생 상태 표시 (시트 판정 대신 실데이터 기반)
+    const derivedSt = deriveStoreStatus(s);
+
     const selected = s.name===selName?'selected':'';
     return `<tr class="${selected}" data-store="${s.name}">
       <td>${s.name}</td>
@@ -2911,7 +3195,7 @@ function renderTable(ent) {
       <td>${fmtP(s.refundRate||0)}${refundDelta}</td>
       <td>${(s.netAdds||0)>=0?'+':''}${fmtN(s.netAdds||0)}</td>
       <td style="white-space:nowrap">${fmtW(s.arpu||0)}</td>
-      <td><span class="verdict-chip ${s.status==='오픈 전'?'open':ach>=100?'good':ach>=80?'warn':'bad'}">${s.status}</span></td>
+      <td><span class="verdict-chip ${derivedSt.cls}" title="시트 판정: ${s.opsStatus||'—'}">${derivedSt.text}</span></td>
     </tr>`;
   }).join('');
   $('storeTableBody').innerHTML = rows;
@@ -3081,9 +3365,16 @@ function renderActionCenter(ent) {
   const today      = new Date();
   const monthEnd   = new Date(today.getFullYear(), today.getMonth()+1, 0).getDate();
   const daysLeft   = monthEnd - today.getDate();
-  const deadlineEOM = `월말(D-${daysLeft})`;
-  const deadline3d  = `3일 이내`;
-  const deadlineWk  = `1주 이내`;
+  const fmt2d = (d) => {
+    const y = d.getFullYear(), mo = String(d.getMonth()+1).padStart(2,'0'), dy = String(d.getDate()).padStart(2,'0');
+    return `${y}-${mo}-${dy}`;
+  };
+  const d3   = new Date(today); d3.setDate(today.getDate()+3);
+  const dWk  = new Date(today); dWk.setDate(today.getDate()+7);
+  const dEOM = new Date(today.getFullYear(), today.getMonth()+1, 0);
+  const deadlineEOM = `${fmt2d(dEOM)} (D-${daysLeft})`;
+  const deadline3d  = fmt2d(d3);
+  const deadlineWk  = fmt2d(dWk);
 
   if (ach < 70)       actions.push({ level:'critical', text:`달성률 ${fmtP(ach)} — 매출 채널별 원인 분석 즉시 필요`,
     dri:'마케팅팀', deadline:deadline3d, kpi:`달성률 80% 이상`, confirm:'채널별 원인 보고서 제출' });
@@ -3185,7 +3476,39 @@ function renderActionCenter(ent) {
       if ((agg.utilization||0) < 60)  issues.push(`가동 ${fmtP(agg.utilization||0)}`);
       if ((agg.refundRate||0)  > 10)  issues.push(`환불 ${fmtP(agg.refundRate||0)}`);
       if (!issues.length && score < 65) issues.push('복합 지표 저조');
-      return { name: s.name, score, issues };
+
+      // ★ Priority 7: 1차 원인 + 우선 액션 도출
+      const ach  = agg.achievement  || 0;
+      const util = agg.utilization  || 0;
+      const churn = agg.churn       || 0;
+      const refund = agg.refundRate || 0;
+      let rootCause = '', priorityAction = '', dri = '';
+      if (churn > 12 || refund > 15) {
+        rootCause = `고이탈(${fmtP(churn)}) + 환불(${fmtP(refund)})`;
+        priorityAction = 'CS 이슈 긴급 점검 · 해지 사유 분류';
+        dri = 'BizOps 리텐션 담당';
+      } else if (util < 50) {
+        rootCause = `가동률 저조(${fmtP(util)})`;
+        priorityAction = '설비 가용 여부 확인 · 예약 채널 점검';
+        dri = 'Field Ops 담당';
+      } else if (ach < 70) {
+        rootCause = `매출 목표 미달(달성률 ${fmtP(ach)})`;
+        priorityAction = '가격·프로모션 검토 · 채널별 전환율 분석';
+        dri = 'BizOps 영업 담당';
+      } else if (churn > 8) {
+        rootCause = `이탈률 주의(${fmtP(churn)})`;
+        priorityAction = '해지 고객 설문 집계 · 리텐션 혜택 설계';
+        dri = 'BizOps 리텐션 담당';
+      } else if (util < 65) {
+        rootCause = `가동률 부족(${fmtP(util)})`;
+        priorityAction = '피크 시간대 예약 패턴 분석 · 마케팅 집행';
+        dri = 'Field Ops 담당';
+      } else {
+        rootCause = '복합 지표 저조';
+        priorityAction = '주간 현장 점검 실시';
+        dri = 'BizOps 리텐션 담당';
+      }
+      return { name: s.name, score, issues, rootCause, priorityAction, dri };
     }).sort((a,b) => a.score - b.score).slice(0, 3);
 
     // ★ v3: 오픈 예정 매장 안내 카드 추가
@@ -3203,13 +3526,20 @@ function renderActionCenter(ent) {
     $('acDangerCount').textContent = storeScores.length;
     $('acDangerList').innerHTML = storeScores.map((s, i) => {
       const scoreColor = s.score >= 65 ? '#c07b48' : '#b24c58';
-      return `<div class="ac-danger-store">
-        <span class="ac-danger-rank">${i+1}</span>
-        <div style="flex:1;min-width:0">
-          <div class="ac-danger-name">${s.name}</div>
-          <div class="ac-danger-issues">${s.issues.length ? s.issues.join(' · ') : '집계 중'}</div>
+      return `<div class="ac-danger-store" style="flex-direction:column;align-items:stretch;gap:4px">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="ac-danger-rank">${i+1}</span>
+          <div style="flex:1;min-width:0">
+            <div class="ac-danger-name">${s.name}</div>
+            <div class="ac-danger-issues">${s.issues.length ? s.issues.join(' · ') : '집계 중'}</div>
+          </div>
+          <span class="ac-danger-score" style="color:${scoreColor}">${s.score}점</span>
         </div>
-        <span class="ac-danger-score" style="color:${scoreColor}">${s.score}점</span>
+        <div style="font-size:10.5px;background:rgba(178,76,88,.06);border-radius:5px;padding:5px 8px;line-height:1.55;margin-left:2px">
+          <span style="color:#9e8c7e;font-weight:600">1차 원인 </span><span style="color:var(--text)">${s.rootCause}</span><br>
+          <span style="color:#9e8c7e;font-weight:600">우선 액션 </span><span style="color:var(--text)">${s.priorityAction}</span><br>
+          <span style="color:#9e8c7e;font-weight:600">DRI </span><span style="color:var(--accent)">${s.dri}</span>
+        </div>
       </div>`;
     }).join('') + openingHtml;
   }
@@ -3225,12 +3555,30 @@ function renderActionCenter(ent) {
   const sorted = [...capForLoss].sort((a,b) => b.lossEstimate - a.lossEstimate);
   if (lossTitleEl) lossTitleEl.textContent = ent.isAll ? '손실 추정 금액' : `${ent.name} 손실 추정`;
 
+  // ★ v3: 손실 기준 명확화 — 확정월 합산 + 당월 MTD 합산 구분
+  const totConfLoss_ = capForLoss.reduce((s,d)=>s+(d.confirmedLoss||0),0);
+  const totMtdLoss_  = capForLoss.reduce((s,d)=>s+(d.mtdLoss||0),0);
+  const totProjLoss_ = capForLoss.reduce((s,d)=>s+(d.projLoss||0),0);
+  const totConfIdle_ = capForLoss.reduce((s,d)=>s+(d.confirmedIdle||0),0);
+  const totMtdIdle_  = capForLoss.reduce((s,d)=>s+(d.mtdIdle||0),0);
+  const hasMTD_      = capForLoss.some(d=>d.hasMTD);
+
+  // 표시할 기본 손실값 선택: MTD 있으면 누적(확정)+MTD, 없으면 확정만
+  const displayLoss  = hasMTD_ ? totConfLoss_ + totMtdLoss_ : totalLossAll;
+  const displayIdle  = hasMTD_ ? totConfIdle_ + totMtdIdle_ : totalIdleAll;
+  const displayBasis = hasMTD_
+    ? `확정 ${fmtS(totConfLoss_)} + MTD ${fmtS(totMtdLoss_)}`
+    : '확정 기간 합산';
+
   $('acLossBody').innerHTML = `
-    <div class="ac-loss-total">${fmtS(totalLossAll)}</div>
-    <div class="ac-loss-sub">${ent.isAll ? '전체 매장 합산 · ' : ''}설계기준 미가동 ${fmtN(totalIdleAll)}대 × ${fmtN(UNIT_PRICE_TARGET)}원/대</div>
+    <div class="ac-loss-total">${fmtS(displayLoss)}</div>
+    <div class="ac-loss-sub">${ent.isAll ? '운영 매장 합산 · ' : ''}미가동 ${fmtN(displayIdle)}대 × ${fmtN(UNIT_PRICE_TARGET)}원/대</div>
+    <div style="font-size:10.5px;color:var(--muted);margin:3px 0 8px;line-height:1.5">
+      ${displayBasis}${hasMTD_&&totProjLoss_>0?` · 월말 예상 손실 ${fmtS(totProjLoss_)}`:''}
+    </div>
     <div class="ac-loss-breakdown">
       ${sorted.filter(d => d.lossEstimate > 0).map(d => {
-        const pct = totalLossAll > 0 ? (d.lossEstimate / totalLossAll * 100).toFixed(0) : 0;
+        const pct = displayLoss > 0 ? (d.lossEstimate / displayLoss * 100).toFixed(0) : 0;
         const lossColor = d.lossEstimate > 50000000 ? '#b24c58' : '#c07b48';
         return `<div class="ac-loss-row">
           <span style="color:#74695d">${d.name}</span>
@@ -3394,8 +3742,12 @@ function renderAll() {
   renderPerformanceChart(ent);
   renderScoreChart(ent);
   renderSubscriptionChart(ent);
-  renderOpsChart(ent);
-  renderOpsQualityStats(ent);
+  renderOpsUtilChart(ent);
+  renderOpsUtilStats(ent);
+  renderOpsChurnChart(ent);
+  renderOpsChurnStats(ent);
+  renderOpsArpuChart(ent);
+  renderOpsArpuStats(ent);
   renderMrrTrendChart(ent);
   renderBridgeChart(ent);
   renderBenchmarkChart(ent);

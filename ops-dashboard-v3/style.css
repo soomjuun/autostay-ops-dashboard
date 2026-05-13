@@ -267,15 +267,16 @@ body{
 
 /* ══ HEATMAP ═══════════════════════════════════════════════════ */
 .heatmap-section{margin-bottom:14px;overflow-x:auto}
-.hm-head-row,.hm-data-row{display:grid;gap:4px;margin-bottom:4px;grid-template-columns:96px repeat(8,minmax(82px,1fr))}
+/* ★ Priority 8: 히트맵 — grid는 inline style로 동적 설정 (지표 수 가변) */
+.hm-head-row,.hm-data-row{display:grid;gap:4px;margin-bottom:3px}
 .hm-data-row{cursor:pointer;border-radius:var(--r-sm);transition:.12s}
 .hm-data-row:hover{box-shadow:0 0 0 2px var(--accent)}
 .hm-data-row.selected{box-shadow:0 0 0 2.5px var(--accent)}
 .hm-head-cell{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);text-align:center;padding:5px 4px}
-.hm-label-cell{font-size:13px;font-weight:800;color:var(--text);display:flex;align-items:center;padding:0 6px}
-.hm-cell{padding:9px 5px;border-radius:var(--r-xs);text-align:center;font-size:11.5px;font-weight:700;line-height:1.25;transition:filter .15s}
+.hm-label-cell{font-size:12.5px;font-weight:800;color:var(--text);display:flex;align-items:center;padding:0 4px}
+.hm-cell{padding:8px 4px;border-radius:var(--r-xs);text-align:center;font-size:11.5px;font-weight:700;line-height:1.25;transition:filter .15s}
 .hm-cell-top{display:block;font-weight:800}
-.hm-cell-rank{display:block;font-size:9.5px;font-weight:500;opacity:.6;margin-top:1px}
+.hm-cell-rank{display:none}  /* ★ rank는 title tooltip(hover)으로만 확인 — 상시 숨김 */
 
 /* ══ TABLE ══════════════════════════════════════════════════════ */
 .table-wrap{overflow-x:auto}
@@ -665,6 +666,11 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
 .chart-section-head>div{flex:1}
 .chart-section-head h2{margin:0}
 .chart-section-head .sub{margin:2px 0 0}
+/* 운영 품질 추적 — 3분할 서브섹션 구분선 */
+.ops-sub-section+.ops-sub-section{
+  border-top:1px solid var(--border);
+  padding-top:16px
+}
 
 /* ══ INLINE STORE DETAIL ════════════════════════════════════════ */
 #inlineStoreDetail{

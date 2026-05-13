@@ -175,10 +175,56 @@
       <div id="churnClassPanel" style="margin-top:16px"></div>
     </article>
     <article class="panel col-6">
-      <h2>운영 품질 추적</h2>
-      <p class="sub">가동률·환불율·이탈률·할인비중</p>
-      <div class="chart lg"><canvas id="opsChart"></canvas></div>
-      <div id="opsQualStats" style="margin-top:14px"></div>
+      <!-- ① 가동률 추이 -->
+      <div class="ops-sub-section">
+        <div class="chart-section-head" style="margin-bottom:6px">
+          <div>
+            <h2 style="font-size:13.5px;margin:0">① 가동률 추이</h2>
+            <p class="sub" style="margin:0">목표 75% 기준선 · 보정 Capacity 적용</p>
+          </div>
+          <button class="collapse-toggle collapsed" data-target="opsUtilDetail" aria-label="상세 보기">
+            <span class="arrow">▾</span><span class="toggle-label">상세</span>
+          </button>
+        </div>
+        <div class="chart" style="height:160px"><canvas id="opsUtilChart"></canvas></div>
+        <div id="opsUtilDetail" class="collapsible-content collapsed" style="margin-top:8px">
+          <div id="opsUtilStats"></div>
+        </div>
+      </div>
+
+      <!-- ② 이탈·환불 리스크 추이 -->
+      <div class="ops-sub-section" style="margin-top:18px">
+        <div class="chart-section-head" style="margin-bottom:6px">
+          <div>
+            <h2 style="font-size:13.5px;margin:0">② 이탈·환불 리스크</h2>
+            <p class="sub" style="margin:0">이탈률 · 환불율 월별 추이</p>
+          </div>
+          <button class="collapse-toggle collapsed" data-target="opsChurnDetail" aria-label="상세 보기">
+            <span class="arrow">▾</span><span class="toggle-label">상세</span>
+          </button>
+        </div>
+        <div class="chart" style="height:160px"><canvas id="opsChurnChart"></canvas></div>
+        <div id="opsChurnDetail" class="collapsible-content collapsed" style="margin-top:8px">
+          <div id="opsChurnStats"></div>
+        </div>
+      </div>
+
+      <!-- ③ 할인·ARPU 수익성 추이 -->
+      <div class="ops-sub-section" style="margin-top:18px">
+        <div class="chart-section-head" style="margin-bottom:6px">
+          <div>
+            <h2 style="font-size:13.5px;margin:0">③ 할인·ARPU 수익성</h2>
+            <p class="sub" style="margin:0">할인비중(%) · ARPU(원) 듀얼 축</p>
+          </div>
+          <button class="collapse-toggle collapsed" data-target="opsArpuDetail" aria-label="상세 보기">
+            <span class="arrow">▾</span><span class="toggle-label">상세</span>
+          </button>
+        </div>
+        <div class="chart" style="height:160px"><canvas id="opsArpuChart"></canvas></div>
+        <div id="opsArpuDetail" class="collapsible-content collapsed" style="margin-top:8px">
+          <div id="opsArpuStats"></div>
+        </div>
+      </div>
     </article>
     <article class="panel col-6">
       <div class="chart-section-head">
