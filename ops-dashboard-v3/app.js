@@ -3151,6 +3151,14 @@ function momDelta(cur, prev, suffix='%p', invert=false) {
 function renderTable(ent) {
   const selName = ent.isAll ? null : ent.name;
   // ★ 쿼터/매장 필터에 반응: 필터된 월 데이터 집계 사용
+  // 손실 추정 조회용 — 매장별 lossEstimate 빠르게 접근
+  const capLossMap = {};
+  try {
+    buildCapacityData({ isAll: true, months: [] }).forEach(d => {
+      if (d.name) capLossMap[d.name] = d.lossEstimate || 0;
+    });
+  } catch(e) {}
+
   const tableStores = dashboard.stores.map(s => {
     const filtMs = filterMonths(s.months);
     const agg    = aggMonths(filtMs) || {};
@@ -3171,6 +3179,7 @@ function renderTable(ent) {
       churn:       agg.churn        || ops.churn        || 0,
       netAdds:     agg.netAdds !== undefined ? agg.netAdds : (ops.netAdds || 0),
       arpu:        ops.arpu         || agg.arpu         || 0,
+      lossEstimate: capLossMap[s.name] || 0,
       opsStatus:   ops.status       || '—',   // 시트 원본 상태 (참고용)
       // prev period for MoM arrows
       prevUtil:    prevAgg ? (prevAgg.utilization || 0) : null,
@@ -3188,36 +3197,40 @@ function renderTable(ent) {
     const utilRaw  = s.utilizationRaw || util;   // 설계 기준 가동률
     const refund   = s.refundRate     || 0;
     const churn    = s.churn          || 0;
+    const loss     = s.lossEstimate   || 0;
 
     // ── 리스크 유형별로 단 하나의 태그만 선택 (중복 방지) ──
     // 각 차원에서 해당하는 단 하나의 가장 심각한 단계만 등록
-
     const risks = [];
 
-    // [Capacity 차원] 설계 또는 보정 가동률 100% 초과일 때만 표시
-    // usage > rawCap 비교는 다월 누적 시 항상 초과되므로 % 기반 판정 사용
+    // [Capacity 차원] 가동률 100% 초과 매장만 — % 기반 판정
     if (utilRaw > 100 || util > 100)            risks.push({ score:150, tag:'Capacity 검토' });
 
-    // [이탈 차원] 심각 / 경고 / 주의 — 가장 높은 단계 하나만
-    if      (churn > 12)                        risks.push({ score:130, tag:'이탈 위험 심각' });
-    else if (churn > 8)                         risks.push({ score:90,  tag:'이탈 위험' });
+    // [이탈 차원] 3단계 구간 — 가장 높은 단계 하나만
+    //   심각: 15% 초과 / 위험: 10~15% / 주의: 6~10%
+    if      (churn > 15)                        risks.push({ score:130, tag:'이탈 위험 심각' });
+    else if (churn > 10)                        risks.push({ score:90,  tag:'이탈 위험' });
     else if (churn > 6)                         risks.push({ score:50,  tag:'이탈 주의' });
 
-    // [환불 차원] 심각 / 경고 — 가장 높은 단계 하나만
+    // [환불 차원] 2단계 — 가장 높은 단계 하나만
     if      (refund > 15)                       risks.push({ score:120, tag:'환불 위험 심각' });
     else if (refund > 8)                        risks.push({ score:80,  tag:'환불 위험' });
 
-    // [달성률 차원] 심각 / 경고 — 가장 높은 단계 하나만
+    // [달성률 차원] 2단계 — 가장 높은 단계 하나만
     if      (ach < 70)                          risks.push({ score:110, tag:'목표 미달 심각' });
     else if (ach < 80)                          risks.push({ score:70,  tag:'목표 미달' });
 
-    // [가동률 차원] 저가동 — 달성률과 독립적 차원 (Capacity 검토와 중복 방지)
+    // [손실 추정 차원] 달성률 양호하지만 미가동 손실이 큰 매장 (예: 광명)
+    //   달성률 ≥ 90% + 손실 1억+ → 손실 위험으로 별도 표시
+    if (ach >= 90 && loss > 100000000)          risks.push({ score:75,  tag:'손실 위험' });
+
+    // [가동률 차원] 저가동 — Capacity 초과와 중복 방지
     if (util < 60 && utilRaw <= 100)            risks.push({ score:65,  tag:'저가동' });
 
     // 정상 매장 (리스크 없음)
     if (!risks.length) return { text:'정상', cls:'good' };
 
-    // 점수 내림차순 정렬 후 상위 2개만 표시 (유형별 중복 이미 제거됨)
+    // 점수 내림차순 정렬 후 상위 2개만 표시
     risks.sort((a,b) => b.score - a.score);
     const topTags = risks.slice(0, 2).map(r => r.tag);
 
@@ -3369,8 +3382,10 @@ function renderDetail(ent) {
   if (ach < 80)     issues.push({ sev:'critical', text:`목표 달성률 부진 (${fmtP(ach)}) — 현재 ${fmtS(c.gross)} vs 목표 ${fmtS(c.target||0)}` });
   else if (ach < 95) issues.push({ sev:'warning',  text:`달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 남음` });
 
-  if (churn > 10)   issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 즉각 대응 필요` });
-  else if (churn > 6) issues.push({ sev:'warning', text:`이탈률 ${fmtP(churn)} — 유지 ${fmtN(c.retained||0)}명 중 이탈 경계 수준` });
+  // 이탈 임계값: 15%+ 심각 / 10~15% 위험 / 6~10% 주의
+  if (churn > 15)     issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 긴급 대응 필요` });
+  else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 즉각 점검 필요` });
+  else if (churn > 6)  issues.push({ sev:'warning',  text:`이탈률 ${fmtP(churn)} — 유지 ${fmtN(c.retained||0)}명 중 이탈 경계 수준` });
 
   if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 미가동 ${fmtN(capRow.idleCount||0)}대, 손실 ${fmtS(capRow.lossEstimate||0)}` });
   else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 개선 여지 있음, 미가동 ${fmtN(capRow.idleCount||0)}대` });
@@ -3477,14 +3492,19 @@ function renderActionCenter(ent) {
     confirm:`7일 내 주간 매출 전주 대비 10% 이상 증가` });
 
   const churn = c.churn || 0;
-  if (churn > 10)     actions.push({ level:'critical', text:`이탈률 ${fmtP(churn)} — 해지 방어 캠페인 즉각 실행`,
+  // 이탈 임계값: 15%+ 심각 / 10~15% 위험 / 6~10% 주의 — deriveStoreStatus와 동일 기준
+  if (churn > 15)     actions.push({ level:'critical', text:`이탈률 ${fmtP(churn)} — 해지 방어 캠페인 즉각 실행`,
     dri:'사업운영팀', deadline:deadline3d,
-    kpi:'이탈률 10% 이하',
+    kpi:'이탈률 15% 이하',
     confirm:`7일 내 재결제 전환율 8% 이상 또는 해지 사유 태깅 완료 80건 이상` });
-  else if (churn > 6) actions.push({ level:'warning',  text:`이탈률 ${fmtP(churn)} — 리텐션 점검 및 구독 혜택 재검토`,
+  else if (churn > 10) actions.push({ level:'critical', text:`이탈률 ${fmtP(churn)} — 리텐션 캠페인 긴급 집행`,
+    dri:'사업운영팀', deadline:deadlineWk,
+    kpi:'이탈률 10% 이하',
+    confirm:`7일 내 이탈률 1%p 이상 개선 또는 리텐션 캠페인 전환율 8% 이상` });
+  else if (churn > 6) actions.push({ level:'warning',  text:`이탈률 ${fmtP(churn)} — 구독 혜택 재검토 및 모니터링`,
     dri:'사업운영팀', deadline:deadlineWk,
     kpi:'이탈률 6% 이하',
-    confirm:`7일 내 이탈률 1%p 이상 개선 또는 리텐션 캠페인 전환율 8% 이상` });
+    confirm:`주간 이탈률 추이 안정화 확인 또는 리텐션 메시지 발송 완료` });
 
   const util = c.utilization || 0;
   if (util < 45)      actions.push({ level:'critical', text:`가동률 ${fmtP(util)} — 미가동 설비 점검 및 프로모션 계획 수립`,
@@ -3614,8 +3634,9 @@ function renderActionCenter(ent) {
       // 각 차원에서 가장 심각한 단계 하나씩만, 복합 표시 시 최대 2가지
       const rc = [];
       if (utilRaw > 100 || util > 100)    rc.push({ score:150, cause:`Capacity 초과(${fmtP(utilRaw||util)})`, action:'설계 기준 재검토 · 예약 제한 운영', dri_:'Field Ops 담당' });
-      if (churn > 12)                     rc.push({ score:130, cause:`고이탈(${fmtP(churn)})`, action:'CS 이슈 긴급 점검 · 해지 사유 분류', dri_:'BizOps 리텐션 담당' });
-      else if (churn > 8)                 rc.push({ score:90,  cause:`이탈 위험(${fmtP(churn)})`, action:'리텐션 캠페인 집행 · 해지 사유 수집', dri_:'BizOps 리텐션 담당' });
+      // 이탈 구간: 15%+ 심각 / 10~15% 위험 / 6~10% 주의 — deriveStoreStatus와 동일 기준
+      if      (churn > 15)                rc.push({ score:130, cause:`고이탈 심각(${fmtP(churn)})`, action:'CS 이슈 긴급 점검 · 해지 사유 분류', dri_:'BizOps 리텐션 담당' });
+      else if (churn > 10)                rc.push({ score:90,  cause:`이탈 위험(${fmtP(churn)})`, action:'리텐션 캠페인 집행 · 해지 사유 수집', dri_:'BizOps 리텐션 담당' });
       else if (churn > 6)                 rc.push({ score:50,  cause:`이탈 주의(${fmtP(churn)})`, action:'해지 고객 설문 집계', dri_:'BizOps 리텐션 담당' });
       if (refund > 15)                    rc.push({ score:120, cause:`환불 심각(${fmtP(refund)})`, action:'CS 티켓 유형별 분류 · 환불 방어 프로세스 점검', dri_:'CS 담당' });
       else if (refund > 8)                rc.push({ score:80,  cause:`환불 위험(${fmtP(refund)})`, action:'환불 사유 태깅 · 서비스 품질 점검', dri_:'CS 담당' });
@@ -3753,7 +3774,8 @@ function renderInlineStoreDetail(ent) {
 
   if (ach < 80)     issues.push({ sev:'critical', text:`목표 달성률 부진 (${fmtP(ach)}) — 목표 대비 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 미달` });
   else if (ach < 95) issues.push({ sev:'warning',  text:`달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 남음` });
-  if (churn > 10)   issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 즉각 대응` });
+  if      (churn > 15) issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 긴급 대응` });
+  else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 즉각 점검` });
   else if (churn > 6) issues.push({ sev:'warning', text:`이탈률 ${fmtP(churn)} — 유지 구독자 이탈 경계` });
   if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 미가동 ${fmtN(capRow.idleCount||0)}대 · 손실 ${fmtS(capRow.lossEstimate||0)}` });
   else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 미가동 ${fmtN(capRow.idleCount||0)}대 개선 여지` });
