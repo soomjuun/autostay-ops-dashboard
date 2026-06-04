@@ -209,12 +209,12 @@
         </div>
       </div>
 
-      <!-- ③ 할인·ARPU 수익성 추이 -->
+      <!-- ③ ARPU 수익성 및 할인 데이터 상태 -->
       <div class="ops-sub-section" style="margin-top:18px">
         <div class="chart-section-head" style="margin-bottom:6px">
           <div>
-            <h2 style="font-size:13.5px;margin:0">③ 할인·ARPU 수익성</h2>
-            <p class="sub" style="margin:0">할인비중(%) · ARPU(원) 듀얼 축</p>
+            <h2 style="font-size:13.5px;margin:0">③ ARPU 수익성 · 할인 데이터 상태</h2>
+            <p class="sub" style="margin:0">ARPU 월별 추이 · 할인 원천 데이터 연결 상태</p>
           </div>
           <button class="collapse-toggle collapsed" data-target="opsArpuDetail" aria-label="상세 보기">
             <span class="arrow">▾</span><span class="toggle-label">상세</span>
@@ -237,7 +237,7 @@
     </article>
     <article class="panel col-6">
       <div class="chart-section-head">
-        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">총매출 → 할인 → 환불 → 순매출</p></div>
+        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">총매출 → 할인·환불·기타 차감 → 순매출</p></div>
         <button class="collapse-toggle" data-target="bridgeWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="bridgeWrap" class="collapsible-content">
@@ -320,7 +320,7 @@
 
   <section class="panel heatmap-section">
     <h2>매장 성과 히트맵</h2>
-    <p class="sub">운영 6개 + 오픈예정 1개 × 8개 핵심 지표. 초록=우수, 빨강=주의. 행 클릭으로 매장 선택. 오픈예정 매장은 KPI 집계에서 제외.</p>
+    <p class="sub">선택 기간 운영 매장 × 8개 핵심 지표. 초록=우수, 빨강=주의. 행 클릭으로 매장 선택. 해당 기간 미운영 매장은 KPI 집계에서 제외.</p>
     <div id="heatmapGrid"></div>
   </section>
 
