@@ -20,6 +20,7 @@ const GID = {
   sales:     1760990535,
   subs:      625947534,
   mrr:       2025485494,
+  coupon:    2006396236,
   dataCheck: 830227479,    // 데이터 점검 시트
   stores: {
     ilsan:       { gid: 2064859531, name: "일산"  },
@@ -309,6 +310,28 @@ function parseOverall(salesR, subR, mrrR) {
   ));
 }
 
+function applyPortfolioCouponDiscounts(months, couponRows) {
+  const q1 = mRows(couponRows, q1Fallback(couponRows));
+  const q2 = mRows(couponRows, qIdx(couponRows, 'Q2'));
+  months.forEach((m, i) => {
+    const sp = MONTH_SPECS[i];
+    const source = sp.quarter === 'Q1' ? q1 : q2;
+    const hasCouponRow = source.has('쿠폰할인금액');
+    const couponDiscount = mv(source, '쿠폰할인금액', sp.cur);
+    const canMapToListPrice = hasCouponRow && m.gross > 0;
+    const mappedDiscount = canMapToListPrice ? couponDiscount : 0;
+    const listPriceRevenue = m.gross + mappedDiscount;
+    m.discountAmount = mappedDiscount;
+    m.discountShare = listPriceRevenue > 0 ? mappedDiscount / listPriceRevenue * 100 : 0;
+    m.hasDiscountData = canMapToListPrice;
+    m.hasCouponSourceData = hasCouponRow;
+    m.unmappedCouponDiscount = canMapToListPrice ? 0 : couponDiscount;
+    m.discountScope = canMapToListPrice ? 'portfolio_coupon' : null;
+    m.listPriceRevenue = listPriceRevenue;
+  });
+  return months;
+}
+
 function parseOps(rows) {
   const idx = rows.findIndex(r => tx(r[0]) === '매장');
   const items = [];
@@ -427,6 +450,10 @@ function aggMonths(months) {
     netAdds:       a.netAdds+m.netAdds,
     discountAmount:a.discountAmount+m.discountAmount,
     hasDiscountData:a.hasDiscountData||m.hasDiscountData,
+    portfolioCouponData:a.portfolioCouponData||m.discountScope==='portfolio_coupon',
+    couponSourceMonths:a.couponSourceMonths+(m.hasCouponSourceData?1:0),
+    couponMappedMonths:a.couponMappedMonths+(m.hasDiscountData?1:0),
+    unmappedCouponDiscount:a.unmappedCouponDiscount+(m.unmappedCouponDiscount||0),
     refundVal:     a.refundVal+(m.refundAmount || m.gross*(m.refundRate/100)||0),
     // [통일] cap 누적: usage/(utilization/100) = 이 월의 보정 Capacity 역산값 (보정기준 가동률의 분모)
     //   → aggMonths()의 utilization = t.usage/t.cap*100 은 보정 Capacity 기반 집계 가동률임
@@ -436,7 +463,8 @@ function aggMonths(months) {
   }), {target:0,gross:0,grossPrev:0,net:0,netPrev:0,usage:0,
        comparableGross:0,comparableGrossPrev:0,comparableNet:0,comparableNetPrev:0,
        retainedExposure:0,newSubs:0,cancelSubs:0,netAdds:0,discountAmount:0,
-       hasDiscountData:false,refundVal:0,cap:0});
+       hasDiscountData:false,portfolioCouponData:false,couponSourceMonths:0,couponMappedMonths:0,
+       unmappedCouponDiscount:0,refundVal:0,cap:0});
   // 최신 월(마지막 요소) 기준 스냅샷 값
   const last = months[months.length-1];
   return {
@@ -453,8 +481,13 @@ function aggMonths(months) {
     refundRate:  t.gross?t.refundVal/t.gross*100:0,
     refundAmount:t.refundVal,
     discountAmount:t.discountAmount,
-    discountShare: t.gross?t.discountAmount/t.gross*100:0,
+    listPriceRevenue:t.gross+t.discountAmount,
+    discountShare: (t.gross+t.discountAmount)?t.discountAmount/(t.gross+t.discountAmount)*100:0,
     hasDiscountData:t.hasDiscountData,
+    discountScope:t.portfolioCouponData?'portfolio_coupon':null,
+    couponSourceMonths:t.couponSourceMonths,
+    couponMappedMonths:t.couponMappedMonths,
+    unmappedCouponDiscount:t.unmappedCouponDiscount,
     retainedYoY: last.retainedPrev?(last.retained-last.retainedPrev)/last.retainedPrev*100:0,
     // 스냅샷형 지표는 선택 기간의 최신 월 기준
     arpu: last.retained>0 && last.mrr>0 ? last.mrr/last.retained
@@ -495,11 +528,13 @@ function runAudit(months, opsStores) {
     // 극단적 이상치
     if (m.utilization > 130)
       opIssues.push(`${m.month}: 가동률 ${fmtP(m.utilization)} — Capacity 원천 데이터 확인 필요`);
-    // ★ v3: 할인비중 ≈ 환불율 동일값 감지 — 컬럼 혼용 가능성
+    // ★ v3: 쿠폰할인율 ≈ 환불율 동일값 감지 — 컬럼 혼용 가능성
     if (m.hasDiscountData && m.discountShare > 0 && m.refundRate > 0) {
       const diff = Math.abs(m.discountShare - m.refundRate);
-      if (diff < 0.01) opIssues.push(`${m.month}: 할인비중·환불율 동일값(${fmtP(m.refundRate)}) — 컬럼 매핑 확인 필요`);
+      if (diff < 0.01) opIssues.push(`${m.month}: 쿠폰할인율·환불율 동일값(${fmtP(m.refundRate)}) — 컬럼 매핑 확인 필요`);
     }
+    if ((m.unmappedCouponDiscount||0) > 0)
+      fmtIssues.push(`${m.month}: 쿠폰할인 ${fmtS(m.unmappedCouponDiscount)} 있으나 총매출 0원 — 정가 대비 할인율 산출 제외`);
   });
 
   // ★ v3: 매출 합산 정합성 체크 (전체 합산 vs 개별 매장 합산 ±0.5%)
@@ -557,7 +592,7 @@ function runAudit(months, opsStores) {
 
   // ★ v3: 정합성 카드 "정상" 판정 기준 강화
   //   아래 조건 중 하나라도 해당하면 "정상" 아님:
-  //   ① 가동률 >100% ② 할인비중=환불율 동일값 ③ 매출 불일치 ④ 매장 수 불일치 ⑤ 오픈 전 실데이터
+  //   ① 가동률 >100% ② 쿠폰할인율=환불율 동일값 ③ 매출 불일치 ④ 매장 수 불일치 ⑤ 오픈 전 실데이터
 
   // 운영 리스크 먼저, 시트 형식 확인 사항은 별도 prefix로 뒤에 추가
   return [
@@ -659,6 +694,7 @@ async function loadData() {
   // summary·dataCheck 시트는 실패해도 핵심 지표 로드는 계속한다.
   const summaryPromise   = loadSheet(GID.summary).catch(() => []);
   const dataCheckPromise = loadSheet(GID.dataCheck).catch(() => []);
+  const couponPromise    = loadSheet(GID.coupon).catch(() => []);
 
   // ① 핵심 4개 시트 먼저 로드 (진행 표시)
   const [salesR, subR, mrrR, opsR] = await Promise.all([
@@ -670,8 +706,8 @@ async function loadData() {
   markActive('lstep-stores');
 
   // ② 매장별 시트 + 보조 시트
-  const [summaryR, dataCheckR, ...storeRaws] = await Promise.all([
-    summaryPromise, dataCheckPromise,
+  const [summaryR, dataCheckR, couponR, ...storeRaws] = await Promise.all([
+    summaryPromise, dataCheckPromise, couponPromise,
     ...storeKeys.map(k => loadSheet(GID.stores[k].gid))
   ]);
 
@@ -679,7 +715,7 @@ async function loadData() {
   setProgress(80, '데이터 파싱 및 집계 중…');
   markActive('lstep-render');
 
-  const overall       = parseOverall(salesR, subR, mrrR);
+  const overall       = applyPortfolioCouponDiscounts(parseOverall(salesR, subR, mrrR), couponR);
   const opsStores     = parseOps(opsR);
   const summaryKpis   = parseSummary(summaryR);
   const dataQuality   = parseDataQuality(dataCheckR);
@@ -782,10 +818,8 @@ function getEntity() {
   const agg = aggMonths(filtered) || {};
   // 기간 필터 화면은 월별 원천 집계만 사용한다. 운영 시트의 현재 스냅샷으로 과거 기간을 덮어쓰지 않는다.
   if (!agg.utilizationRaw && agg.utilization > 0 && s.name && STORE_CAPACITY_RAW[s.name]) {
-    const rawCap = STORE_CAPACITY_RAW[s.name];
-    if (agg.usage > 0 && rawCap > 0 && filtered.length > 0) {
-      agg.utilizationRaw = agg.usage / (rawCap * filtered.length) * 100;
-    }
+    const capRow = buildCapacityData({ name:s.name, isAll:false, months:filtered })[0];
+    if (capRow?.capacity > 0) agg.utilizationRaw = capRow.utilization;
   }
   // MRR: parseStore() 수정으로 이제 매장 개별 시트에서 직접 파싱됨
   // mrr=0인 경우만 arpu×retained로 fallback (시트에 MRR 행 없는 경우 대비)
@@ -924,7 +958,7 @@ function renderGauges(ent) {
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
     ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 설계기준 미가동 ${fmtN(idleForGauge)}대${utilDelta}${periodLabel}`);
+    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}대${utilDelta}${periodLabel}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}${periodLabel}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
@@ -938,11 +972,26 @@ function renderGauges(ent) {
 
 /* ── 11. KPI 카드 ───────────────────────────────────────────── */
 // 지표 툴팁 정의 (산식 + 기준값)
+function couponCoverageSuffix(c) {
+  const sourceMonths = c.couponSourceMonths || 0;
+  const mappedMonths = c.couponMappedMonths || 0;
+  const excludedMonths = Math.max(0, sourceMonths - mappedMonths);
+  return excludedMonths > 0
+    ? ` · 매출 미집계 ${excludedMonths}개월 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 제외`
+    : '';
+}
+
+function couponUnavailableLabel(c) {
+  return (c.couponSourceMonths||0) > 0
+    ? `총매출 미집계로 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 정가 대비 산출 제외`
+    : '매장별 쿠폰할인 미배분';
+}
+
 const KPI_TOOLTIPS = {
   '총매출':  { formula:'목표매출 대비 총 수취 매출', benchmark:'달성률 ≥ 100% 목표' },
-  '순매출':  { formula:'총매출 − 할인금액 − 환불금액', benchmark:'할인비중 < 15%, 환불율 < 5%' },
+  '순매출':  { formula:'순매출 = 총매출 − 환불 · 정가 추정 매출 = 총매출 + 쿠폰할인', benchmark:'쿠폰할인율은 정가 추정 매출 대비 · 환불율 < 5%' },
   'MRR':    { formula:'월 정기 구독 매출 합계', benchmark:'YoY +10% 이상 = 성장 안정' },
-  '가동률':  { formula:'ops 집계 시트 기준 (실제 세차 대수 ÷ 운영 Capacity)\n설계 Capacity 기준 병기: ops테이블 설계(보정) 형식으로 표시\n심층 분석 미가동·손실은 설계 Capacity 기준', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
+  '가동률':  { formula:'ops 집계 시트 기준 (실제 세차 대수 ÷ 운영 Capacity)\n설계·보정 Capacity 기준은 심층 분석에 병기\n유휴 Capacity와 기회금액 상한은 설계 Capacity 기준', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
   '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
   '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' },
   'ARR':    { formula:'MRR × 12 (연간 반복 매출)', benchmark:'YoY +20% 이상 = 고성장' },
@@ -995,7 +1044,7 @@ function renderKpis(ent) {
       prog:c.achievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
       projection: projGross ? `월말 예상 ${fmtS(projGross)}` : null },
     { label:'순매출',  val:fmtS(c.net),
-      delta:c.netYoY,     sub:`${c.hasDiscountData ? `할인 ${fmtS(c.discountAmount||0)}` : '할인 데이터 미연결'} · 환불 ${fmtP(c.refundRate||0)}`,
+      delta:c.netYoY,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 정가 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}`,
       color:'navy',  spark:netTrend, sparkColor:'#24344f' },
     { label:'MRR',    val:fmtS(c.mrr||0),
       delta:c.mrrYoY,     sub:`MRR YoY · 전월 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`,
@@ -1173,7 +1222,7 @@ function renderInsights(ent) {
   }
   if ((c.utilization||0) < 45)
     risks.push({lv:'critical', text:`운영 가동률 저조 (${fmtP(c.utilization||0)})`,
-      impact:`미가동 손실 추정 매출 발생 · 설비 유휴화`,
+      impact:`유휴 Capacity 기회금액 상한 증가 · 설비 유휴화`,
       owner:`사업운영팀 · 건축관리팀`,
       action:`미가동 시간대 특가 프로모션 · 기업 제휴 세차 패키지 검토`});
   else if ((c.utilization||0) < 60)
@@ -1609,22 +1658,23 @@ function renderOpsChurnStats(ent) {
     </table>`;
 }
 
-/* ③ 할인·ARPU 수익성 */
+/* ③ 쿠폰할인·ARPU 수익성 */
 function renderOpsArpuChart(ent) {
   const ms = ent.months;
   const hasDiscountData = ms.some(m => m.hasDiscountData);
+  const hasCouponSourceData = ms.some(m => m.hasCouponSourceData);
   const arpuArt = $('opsArpuChart')?.closest('.ops-sub-section');
   if (arpuArt) {
     const h2 = arpuArt.querySelector('h2');
     const sub = arpuArt.querySelector('.sub');
-    if (h2) h2.textContent = hasDiscountData ? '③ 할인·ARPU 수익성' : '③ ARPU 수익성 · 할인 데이터 상태';
-    if (sub) sub.textContent = hasDiscountData ? '할인비중(%) · ARPU(원) 듀얼 축' : 'ARPU 월별 추이 · 할인 원천 데이터 미연결';
+    if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·ARPU 수익성' : `③ ARPU 수익성 · ${hasCouponSourceData ? '쿠폰할인율 산출 제외' : '매장별 쿠폰할인 미배분'}`;
+    if (sub) sub.textContent = hasDiscountData ? '정가 추정 대비 쿠폰할인율(%) · ARPU(원)' : `ARPU 월별 추이 · ${hasCouponSourceData ? '총매출 미집계' : '쿠폰 원천에 매장 ID 없음'}`;
   }
   mkChart('opsArpuChart', {
     data:{
       labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
-        ...(hasDiscountData ? [{ type:'bar', label:'할인비중 %', data:ms.map(m=>m.discountShare||0),
+        ...(hasDiscountData ? [{ type:'bar', label:'쿠폰할인율 %', data:ms.map(m=>m.hasDiscountData ? (m.discountShare||0) : null),
           backgroundColor:makeGrad(null,90,63,140,.55,.2),
           borderColor:PALETTE.violet, borderWidth:0, borderRadius:4, yAxisID:'pct' }] : []),
         { type:'line', label:'ARPU (원)', data:ms.map(m=>m.arpu||0),
@@ -1653,13 +1703,14 @@ function renderOpsArpuStats(ent) {
   const arpuList = ms.map(m=>m.arpu||0).filter(v=>v>0);
   const arpuAvg  = arpuList.length ? arpuList.reduce((a,b)=>a+b,0)/arpuList.length : 0;
   const hasDiscountData = ms.some(m => m.hasDiscountData);
+  const hasCouponSourceData = ms.some(m => m.hasCouponSourceData);
 
   el.innerHTML = `
     <table style="width:100%;border-collapse:collapse;font-size:11.5px">
       <thead>
         <tr style="border-bottom:1px solid var(--border)">
           <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
-          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--violet,#5a3f8c);font-size:10.5px">할인비중</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--violet,#5a3f8c);font-size:10.5px">쿠폰할인율</th>
           <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--navy,#24344f);font-size:10.5px">ARPU</th>
           <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">vs 평균</th>
         </tr>
@@ -1673,14 +1724,14 @@ function renderOpsArpuStats(ent) {
           const dColor = d <= 10 ? 'var(--green)' : d <= 20 ? 'var(--amber)' : 'var(--rose)';
           return `<tr style="border-bottom:1px solid var(--bg2)">
             <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
-            <td style="padding:4px 6px;text-align:right;color:${hasDiscountData ? dColor : 'var(--muted)'}">${hasDiscountData ? `${d.toFixed(1)}%` : '—'}</td>
+            <td style="padding:4px 6px;text-align:right;color:${m.hasDiscountData ? dColor : 'var(--muted)'}">${m.hasDiscountData ? `${d.toFixed(1)}%` : (m.hasCouponSourceData ? '산출 제외' : '—')}</td>
             <td style="padding:4px 6px;text-align:right;font-weight:700;color:var(--text)">${fmtS(arpu)}</td>
             <td style="padding:4px 0;text-align:right;color:${diff >= 0 ? 'var(--green)' : 'var(--rose)'};">${sign}${diff.toFixed(1)}%</td>
           </tr>`;
         }).join('')}
       </tbody>
     </table>
-    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? '' : ' · 할인 원천 데이터 미연결'}</div>`;
+    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 쿠폰할인율은 정가 추정 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 총매출 0원 월 산출 제외' : ''}` : ` · ${hasCouponSourceData ? '총매출 미집계로 쿠폰할인율 산출 제외' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -1729,30 +1780,31 @@ function renderBridgeChart(ent) {
   const c = ent.current;
   const gross    = Math.max(0, c.gross||0);
   const net      = Math.max(0, c.net||0);
-  const totalDeduction = Math.max(0, gross - net);
-  const refundVal  = Math.min(totalDeduction, Math.max(0, c.refundAmount || gross * ((c.refundRate||0)/100)));
-  const discount   = c.hasDiscountData
-    ? Math.min(Math.max(0, totalDeduction - refundVal), Math.max(0, c.discountAmount || 0))
-    : 0;
-  const otherDeduction = Math.max(0, totalDeduction - refundVal - discount);
+  const discount = c.hasDiscountData ? Math.max(0, c.discountAmount || 0) : 0;
+  const listPriceRevenue = gross + discount;
+  const afterSaleDeduction = Math.max(0, gross - net);
+  const refundVal = Math.min(afterSaleDeduction, Math.max(0, c.refundAmount || gross * ((c.refundRate||0)/100)));
+  const otherDeduction = Math.max(0, afterSaleDeduction - refundVal);
 
 
-  // ★ 절대값 5-bar 방식 — 원천 데이터가 없는 할인은 0원, 잔여 차감은 기타로 분리
+  // ★ 절대값 6-bar 방식 — 쿠폰할인은 정가 추정 매출에서 총매출로 내려오는 차감으로 분리
   //   Floating/Stack 방식의 Chart.js 렌더링 버그 완전 제거
-  //   할인=0 이어도 '0원' 레이블로 명시, 환불이 소액이어도 독립 바로 가독성 확보
-  const barData   = [gross, discount, refundVal, otherDeduction, net];
+  //   매장별 원천이 없는 경우 쿠폰할인은 0원으로 표시하고 임의 배분하지 않는다.
+  const barData   = [listPriceRevenue, discount, gross, refundVal, otherDeduction, net];
   const barColors = [
+    'rgba(90,63,140,.82)',   // violet — 정가 추정 매출
+    'rgba(178,76,88,.82)',   // rose  — 쿠폰할인
     'rgba(36,52,79,.85)',    // navy  — 총매출
-    'rgba(178,76,88,.82)',   // rose  — 할인
     'rgba(192,110,80,.78)',  // amber — 환불
     'rgba(192,123,72,.75)',  // amber — 기타 차감
     'rgba(33,101,82,.88)'    // green — 순매출
   ];
-  const barBorders = ['#24344f','#b24c58','#c06e50','#c07b48','#216552'];
-  const pctLabel = v => gross > 0 ? `${((v/gross)*100).toFixed(1)}%` : '';
+  const barBorders = ['#5a3f8c','#b24c58','#24344f','#c06e50','#c07b48','#216552'];
+  const pctBase = listPriceRevenue || gross;
+  const pctLabel = v => pctBase > 0 ? `${((v/pctBase)*100).toFixed(1)}%` : '';
 
   // 화살표 서브레이블 (X축 레이블 아래)
-  const arrowLabels = ['총매출', '(−) 할인', '(−) 환불', '(−) 기타', '순매출'];
+  const arrowLabels = [c.hasDiscountData ? '정가 추정' : '총매출', '(−) 쿠폰할인', '총매출', '(−) 환불', '(−) 기타', '순매출'];
 
   mkChart('bridgeChart', {
     type:'bar',
@@ -1778,8 +1830,8 @@ function renderBridgeChart(ent) {
             title: ctx => ctx[0].label,
             label: ctx => {
               const v = +ctx.raw || 0;
-              if (!v && ctx.dataIndex !== 4) return ['해당 없음 (0원)'];
-              return [`금액: ${fmtS(v)}`, `총매출 대비: ${pctLabel(v)}`];
+              if (!v && ctx.dataIndex !== barData.length - 1) return ['해당 없음 (0원)'];
+              return [`금액: ${fmtS(v)}`, `${c.hasDiscountData ? '정가 추정' : '총매출'} 대비: ${pctLabel(v)}`];
             }
           }
         },
@@ -1788,25 +1840,25 @@ function renderBridgeChart(ent) {
           // 값이 작으면 바 위에, 크면 바 중앙에
           anchor: ctx => {
             const v = barData[ctx.dataIndex];
-            return (gross > 0 && v/gross < 0.08) ? 'end' : 'center';
+            return (pctBase > 0 && v/pctBase < 0.08) ? 'end' : 'center';
           },
           align: ctx => {
             const v = barData[ctx.dataIndex];
-            return (gross > 0 && v/gross < 0.08) ? 'top' : 'center';
+            return (pctBase > 0 && v/pctBase < 0.08) ? 'top' : 'center';
           },
           color: ctx => {
             const v = barData[ctx.dataIndex];
-            return (gross > 0 && v/gross < 0.08) ? '#4a3f35' : '#fff';
+            return (pctBase > 0 && v/pctBase < 0.08) ? '#4a3f35' : '#fff';
           },
           font:{size:11, weight:700},
           textAlign:'center',
           padding:{ bottom: 2 },
           formatter: (v, ctx) => {
             const val = +v || 0;
-            const isSmall = gross > 0 && val/gross < 0.08;
+            const isSmall = pctBase > 0 && val/pctBase < 0.08;
             if (val === 0) {
               // 할인 또는 환불이 0원인 경우
-              return ctx.dataIndex === 0 || ctx.dataIndex === 4 ? `${fmtS(val)}\n${pctLabel(val)}` : '0원';
+              return ctx.dataIndex === 0 || ctx.dataIndex === barData.length - 1 ? `${fmtS(val)}\n${pctLabel(val)}` : '0원';
             }
             if (isSmall) {
               // 소액 항목: 값과 비율을 바 위에 표시
@@ -1822,7 +1874,7 @@ function renderBridgeChart(ent) {
           ticks:{callback:fmtA},
           grid:{color:'#f0ebe3'},
           beginAtZero:true,
-          suggestedMax: Math.ceil(gross * 1.20)  // 상단 여백 확보 (소액 레이블 공간)
+          suggestedMax: Math.ceil(pctBase * 1.20)  // 상단 여백 확보 (소액 레이블 공간)
         },
         x:{ grid:{display:false} }
       }
@@ -1833,9 +1885,10 @@ function renderBridgeChart(ent) {
   const bridgeSub = document.querySelector('#bridgeTitle + .sub') ||
     document.querySelector('[id="bridgeTitle"]')?.closest('article')?.querySelector('.sub');
   if (bridgeSub) {
-    const netPct = gross > 0 ? ` (${pctLabel(net)})` : '';
-    bridgeSub.textContent =
-      `총매출 ${fmtS(gross)} → ${c.hasDiscountData ? `할인 ${fmtS(discount)}` : '할인 미연결'} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}`;
+    const netPct = pctBase > 0 ? ` (${c.hasDiscountData ? '정가 추정' : '총매출'} 대비 ${pctLabel(net)})` : '';
+    bridgeSub.textContent = c.hasDiscountData
+      ? `정가 추정 ${fmtS(listPriceRevenue)} → 쿠폰할인 ${fmtS(discount)} → 총매출 ${fmtS(gross)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}${couponCoverageSuffix(c)}`
+      : `총매출 ${fmtS(gross)} → ${couponUnavailableLabel(c)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}`;
   }
 }
 
@@ -1975,35 +2028,156 @@ function renderQuarterChart(ent) {
 }
 
 function renderScatterChart(ent) {
+  // 포지션 맵은 달성률·총매출이 핵심 축이므로 총매출이 실제 집계된 월만 사용한다.
+  // 목표만 있고 총매출이 0원인 미집계 월을 포함하면 달성률이 인위적으로 낮아진다.
+  const selectedPeriodMonths = months => months.filter(m =>
+    (state.quarter === 'all' || m.quarter === state.quarter) && m.gross > 0 && m.target > 0
+  );
   const stores = getActiveStores().map(s => {
-    const agg = aggMonths(filterMonths(s.months)) || {};
-    return { name:s.name, achievement:agg.achievement||0, churn:agg.churn||0, gross:agg.gross||0 };
-  });
+    const positionMonths = selectedPeriodMonths(s.months);
+    const agg = aggMonths(positionMonths) || {};
+    return {
+      name:s.name,
+      achievement:agg.achievement||0,
+      churn:agg.churn||0,
+      gross:agg.gross||0,
+      monthCount:positionMonths.length,
+      monthNums:positionMonths.map(m=>m.monthNum).filter(Boolean)
+    };
+  }).filter(s => s.monthCount > 0 && s.gross > 0);
+
   const selName = ent.isAll ? null : ent.name;
+  const maxGross = Math.max(...stores.map(s=>s.gross), 1);
+  const classify = s => s.achievement >= 100 && s.churn <= 10
+    ? '목표 달성·이탈 관리'
+    : s.churn > 10
+      ? '고이탈 관리 필요'
+      : '목표 매출 개선 필요';
+  const bubbleColor = s => s.name === selName ? 'rgba(143,66,25,.92)'
+    : s.achievement >= 100 && s.churn <= 10 ? 'rgba(33,101,82,.78)'
+    : s.churn > 10 ? 'rgba(178,76,88,.72)'
+    : 'rgba(192,123,72,.75)';
   const datasets = stores.map(s=>({
     label: s.name,
-    data:[{ x:s.achievement||0, y:s.churn||0, r:Math.max(6, Math.sqrt(s.gross||0)/200) }],
-    backgroundColor: s.name===selName?'rgba(143,66,25,.85)':'rgba(36,52,79,.45)',
+    positionStatus: classify(s),
+    gross: s.gross,
+    monthCount: s.monthCount,
+    data:[{
+      x:s.achievement||0,
+      y:s.churn||0,
+      r:7 + Math.sqrt((s.gross||0) / maxGross) * 10
+    }],
+    backgroundColor: bubbleColor(s),
+    borderColor: s.name===selName ? PALETTE.accent : 'rgba(255,255,255,.92)',
+    borderWidth: s.name===selName ? 3 : 1.5,
     pointStyle:'circle'
   }));
 
+  const positionMonths = [...new Set(stores.flatMap(s=>s.monthNums))].sort((a,b)=>a-b);
+  const periodText = positionMonths.length
+    ? `${positionMonths[0]}월~${positionMonths[positionMonths.length-1]}월 매출 집계 기준`
+    : `${state.quarter === 'all' ? '선택 기간' : state.quarter} 총매출 미집계`;
+  const positionSub = $('positionSub');
+  if (positionSub) positionSub.textContent = stores.length
+    ? `${periodText} · 점선: 달성률 100% / 이탈률 10% · 버블 크기: 총매출`
+    : `${periodText}로 포지션 산출 제외`;
+
+  const maxAchievement = Math.max(...stores.map(s=>s.achievement), 100);
+  const maxChurn = Math.max(...stores.map(s=>s.churn), 10);
+  const xMax = Math.max(130, Math.ceil((maxAchievement + 10) / 10) * 10);
+  const yMax = Math.max(25, Math.ceil((maxChurn + 3) / 5) * 5);
+  const positionGuidePlugin = {
+    id:'positionGuide',
+    beforeDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales.x || !scales.y) return;
+      const x100 = scales.x.getPixelForValue(100);
+      const y10 = scales.y.getPixelForValue(10);
+      ctx.save();
+      ctx.fillStyle = 'rgba(33,101,82,.055)';
+      ctx.fillRect(Math.max(chartArea.left,x100), Math.max(chartArea.top,y10),
+        Math.max(0,chartArea.right-Math.max(chartArea.left,x100)),
+        Math.max(0,chartArea.bottom-Math.max(chartArea.top,y10)));
+      ctx.fillStyle = 'rgba(178,76,88,.04)';
+      ctx.fillRect(chartArea.left, chartArea.top,
+        Math.max(0,Math.min(chartArea.right,x100)-chartArea.left),
+        Math.max(0,Math.min(chartArea.bottom,y10)-chartArea.top));
+      ctx.restore();
+    },
+    afterDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales.x || !scales.y) return;
+      ctx.save();
+      if (!stores.length) {
+        ctx.fillStyle = '#74695d';
+        ctx.font = '600 12px Pretendard, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('총매출 집계 후 포지션을 표시합니다', (chartArea.left+chartArea.right)/2, (chartArea.top+chartArea.bottom)/2);
+        ctx.restore();
+        return;
+      }
+      const x100 = scales.x.getPixelForValue(100);
+      const y10 = scales.y.getPixelForValue(10);
+      ctx.setLineDash([5,4]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(33,101,82,.65)';
+      ctx.beginPath(); ctx.moveTo(x100,chartArea.top); ctx.lineTo(x100,chartArea.bottom); ctx.stroke();
+      ctx.strokeStyle = 'rgba(178,76,88,.65)';
+      ctx.beginPath(); ctx.moveTo(chartArea.left,y10); ctx.lineTo(chartArea.right,y10); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = '600 9px Pretendard, sans-serif';
+      ctx.fillStyle = '#216552';
+      ctx.textAlign = 'right';
+      ctx.fillText('목표 100%', Math.min(chartArea.right-2,x100-4), chartArea.top+10);
+      ctx.fillStyle = '#b24c58';
+      ctx.textAlign = 'left';
+      ctx.fillText('이탈 경계 10%', chartArea.left+4, Math.max(chartArea.top+10,y10-5));
+      ctx.restore();
+    }
+  };
+
   mkChart('scatterChart', {
     type:'bubble',
+    plugins:[positionGuidePlugin],
     data:{ datasets },
     options:{
       responsive:true, maintainAspectRatio:false,
       plugins:{
         legend:{display:false},
-        tooltip:{ callbacks:{ label:(ctx)=>` ${ctx.dataset.label}: 달성률 ${fmtP(ctx.parsed.x)}, 이탈률 ${fmtP(ctx.parsed.y)}` } },
+        tooltip:{ callbacks:{
+          label:(ctx)=>[
+            ` ${ctx.dataset.label}: 달성률 ${fmtP(ctx.parsed.x)} · 이탈률 ${fmtP(ctx.parsed.y)}`,
+            ` 총매출 ${fmtS(ctx.dataset.gross)} · ${ctx.dataset.monthCount}개월 집계`,
+            ` ${ctx.dataset.positionStatus}`
+          ]
+        } },
         datalabels:{
-          display:true, anchor:'end', align:'top',
+          display:true, anchor:'center', clamp:true, clip:false, offset:5,
+          align:ctx=>['top','right','bottom','left'][ctx.datasetIndex%4],
           formatter:(v,ctx)=>ctx.chart.data.datasets[ctx.datasetIndex].label,
-          font:{size:11,weight:600}, color:PALETTE.navy
+          font:ctx=>({size:ctx.chart.data.datasets[ctx.datasetIndex].label===selName?11:10,weight:700}),
+          color:ctx=>ctx.chart.data.datasets[ctx.datasetIndex].label===selName?PALETTE.accent:PALETTE.navy,
+          backgroundColor:'rgba(255,255,255,.9)',
+          borderColor:'rgba(239,232,220,.95)',
+          borderWidth:1,
+          borderRadius:3,
+          padding:{top:2,bottom:2,left:4,right:4}
+        }
+      },
+      onClick:(event,elements)=>{
+        if (!elements.length) return;
+        const name = datasets[elements[0].datasetIndex]?.label;
+        const key = Object.keys(GID.stores).find(k=>GID.stores[k].name===name);
+        if (key) {
+          state.store = key;
+          $('storeSelect').value = key;
+          renderAll();
+          syncHash();
         }
       },
       scales:{
-        x:{ title:{display:true,text:'달성률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} },
-        y:{ title:{display:true,text:'이탈률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} }
+        x:{ min:0, max:xMax, title:{display:true,text:'달성률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} },
+        y:{ min:0, max:yMax, title:{display:true,text:'이탈률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} }
       }
     }
   });
@@ -2051,7 +2225,7 @@ function renderMixChart(ent) {
   const discount = c.hasDiscountData ? Math.max(0, c.discountAmount||0) : 0;
   const refund   = Math.max(0, c.refundAmount || gross*((c.refundRate||0)/100));
   const net      = Math.max(0, c.net||0);
-  const other    = Math.max(0, gross - discount - refund - net);
+  const other    = Math.max(0, gross - refund - net);
 
   const rawData  = [net, discount, refund, other];
   const total    = rawData.reduce((a,b)=>a+b,0);
@@ -2060,7 +2234,7 @@ function renderMixChart(ent) {
   mkChart('mixChart', {
     type:'doughnut',
     data:{
-      labels:['순매출','할인금액','환불금액','기타차감'],
+      labels:['순매출','쿠폰할인','환불금액','기타차감'],
       datasets:[{
         data: rawData,
         backgroundColor:[
@@ -2125,7 +2299,7 @@ function renderMixChart(ent) {
   });
   $('mixTitle').textContent = ent.isAll ? '포트폴리오 구성 분석' : `${ent.name} 구성 분석`;
   $('mixSub').textContent   = total > 0
-    ? `순매출 비중 ${total?((net/total)*100).toFixed(1):'—'}% | 환불 ${fmtS(refund)} · ${c.hasDiscountData ? `할인 ${fmtS(discount)}` : '할인 데이터 미연결'}`
+    ? `${c.hasDiscountData ? '정가 추정' : '총매출'} 대비 순매출 ${total?((net/total)*100).toFixed(1):'—'}% | 환불 ${fmtS(refund)} · ${c.hasDiscountData ? `쿠폰할인 ${fmtS(discount)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)}`
     : `총매출 ${fmtS(gross)} 기준 수익 구조`;
 }
 
@@ -2284,8 +2458,30 @@ function capTip(html) {
   </span>`;
 }
 
-/* ── 15-C2. 가동률 심층 패널 (손실 추정 매출 + 계절 지수) ────────── */
-/* ★ buildCapacityData v2: store key 기준 매핑 + 확정/MTD/예상 3분리 */
+/* ── 15-C2. 가동률 심층 패널 (Capacity 기회금액 상한 + 계절 지수) ── */
+function storeActiveDaysInMonth(storeName, monthNum, throughDay = null) {
+  const year = new Date().getFullYear();
+  const monthDays = daysInMonth(monthNum, year);
+  const endDay = Math.min(monthDays, throughDay == null ? monthDays : throughDay);
+  if (endDay <= 0) return 0;
+
+  const openDateText = STORE_OPEN_DATES[storeName];
+  if (!openDateText) return endDay;
+
+  const openDate = new Date(`${openDateText}T00:00:00`);
+  const openMonth = openDate.getMonth() + 1;
+  if (openDate.getFullYear() < year || (openDate.getFullYear() === year && openMonth < monthNum)) return endDay;
+  if (openDate.getFullYear() > year || openMonth > monthNum) return 0;
+  return Math.max(0, endDay - openDate.getDate() + 1);
+}
+
+function proratedCapacity(monthlyCapacity, storeName, monthNum, throughDay = null) {
+  const monthDays = daysInMonth(monthNum);
+  const activeDays = storeActiveDaysInMonth(storeName, monthNum, throughDay);
+  return monthDays > 0 ? monthlyCapacity * activeDays / monthDays : 0;
+}
+
+/* ★ buildCapacityData v3: 누적 분모·오픈월 일할·설계/보정 Capacity 분리 */
 function buildCapacityData(ent) {
   // 단일 매장 계산 핵심 로직 — store key(name)로만 Capacity 조회
   function calcForStore(storeName, filtMs) {
@@ -2294,60 +2490,91 @@ function buildCapacityData(ent) {
     const mtdDay   = getMtdDay();
 
     const confirmedMs = filtMs.filter(m => m.status === 'confirmed');
+    const confirmedCapacityMs = confirmedMs.filter(m =>
+      !((m.usage || 0) === 0 && ((m.gross || 0) > 0 || (m.net || 0) > 0))
+    );
     const mtdM        = filtMs.find(m  => m.status === 'mtd') || null;
+    const hasMtdData  = !!mtdM && (mtdM.usage || 0) > 0;
 
-    // ── 보수적 단가: 기간 순매출 ÷ 총사용 (UNIT_PRICE_TARGET fallback) ──
-    const periodNet   = filtMs.reduce((s, m) => s + (m.net   || 0), 0);
-    const periodUsage = filtMs.reduce((s, m) => s + (m.usage || 0), 0);
-    const consPrice   = periodUsage > 0 ? periodNet / periodUsage : UNIT_PRICE_TARGET;
+    // ── 보수적 단가: 매출과 사용량이 모두 있는 월만 사용 ──────────
+    // 선택 기간에 매출 원천이 없으면 해당 매장의 가용 과거 실적으로 대체한다.
+    const calcUnitPrice = months => {
+      const valid = (months || []).filter(m => (m.net || 0) > 0 && (m.usage || 0) > 0);
+      const net = valid.reduce((s, m) => s + (m.net || 0), 0);
+      const usage = valid.reduce((s, m) => s + (m.usage || 0), 0);
+      return usage > 0 ? net / usage : 0;
+    };
+    const periodPrice = calcUnitPrice(filtMs);
+    const storeHistory = (dashboard?.stores || []).find(s => s.name === storeName)?.months || [];
+    const historyPrice = calcUnitPrice(storeHistory);
+    const consPrice = periodPrice || historyPrice || UNIT_PRICE_TARGET;
+    const priceSource = periodPrice ? 'selected_period' : historyPrice ? 'available_history' : 'fallback_target';
 
     // ── 확정월 집계 ─────────────────────────────────────────────
-    // ★ 설계 Capacity(rawCap) 기준 — 심층 분석·손실 추정 모두 설계 기준 사용
-    //    (보정 Capacity monthCap은 호환 필드로만 보존)
-    const confirmedUsage = confirmedMs.reduce((s, m) => s + (m.usage || 0), 0);
-    const confirmedCap   = rawCap * confirmedMs.length;      // 설계 기준
-    const confirmedIdle  = Math.max(0, confirmedCap - confirmedUsage);
-    const confirmedUtil  = confirmedCap  > 0 ? confirmedUsage / confirmedCap  * 100 : 0;
+    const confirmedUsage = confirmedCapacityMs.reduce((s, m) => s + (m.usage || 0), 0);
+    const confirmedDesignCap = confirmedCapacityMs.reduce(
+      (s, m) => s + proratedCapacity(rawCap, storeName, m.monthNum), 0
+    );
+    const confirmedAdjustedCap = confirmedCapacityMs.reduce(
+      (s, m) => s + proratedCapacity(monthCap, storeName, m.monthNum), 0
+    );
+    const confirmedIdle  = Math.max(0, confirmedDesignCap - confirmedUsage);
+    const confirmedDesignUtil = confirmedDesignCap > 0 ? confirmedUsage / confirmedDesignCap * 100 : 0;
+    const confirmedAdjustedUtil = confirmedAdjustedCap > 0 ? confirmedUsage / confirmedAdjustedCap * 100 : 0;
     const confirmedLoss  = confirmedIdle * consPrice;
 
     // ── 당월 MTD ─────────────────────────────────────────────────
     const mtdDaysIn  = daysInMonth(mtdM ? mtdM.monthNum : TODAY_MONTH);
-    const mtdCap     = mtdM ? Math.round(rawCap * mtdDay / mtdDaysIn) : 0;  // 설계 기준
-    const mtdUsage   = mtdM ? (mtdM.usage || 0) : 0;
-    const mtdIdle    = mtdM ? Math.max(0, mtdCap - mtdUsage) : 0;
-    const mtdUtil    = mtdCap   > 0 ? mtdUsage  / mtdCap   * 100 : 0;
+    const mtdActiveDays = hasMtdData ? storeActiveDaysInMonth(storeName, mtdM.monthNum, mtdDay) : 0;
+    const mtdMonthActiveDays = hasMtdData ? storeActiveDaysInMonth(storeName, mtdM.monthNum) : 0;
+    const mtdDesignCap = hasMtdData ? proratedCapacity(rawCap, storeName, mtdM.monthNum, mtdDay) : 0;
+    const mtdAdjustedCap = hasMtdData ? proratedCapacity(monthCap, storeName, mtdM.monthNum, mtdDay) : 0;
+    const mtdUsage   = hasMtdData ? (mtdM.usage || 0) : 0;
+    const mtdIdle    = hasMtdData ? Math.max(0, mtdDesignCap - mtdUsage) : 0;
+    const mtdDesignUtil = mtdDesignCap > 0 ? mtdUsage / mtdDesignCap * 100 : 0;
+    const mtdAdjustedUtil = mtdAdjustedCap > 0 ? mtdUsage / mtdAdjustedCap * 100 : 0;
     const mtdLoss    = mtdIdle  * consPrice;
 
     // ── 당월 예상 (MTD → 월말 환산) ─────────────────────────────
-    const projUsage  = (mtdM && mtdDay > 0) ? Math.round(mtdUsage / mtdDay * mtdDaysIn) : 0;
-    const projIdle   = mtdM ? Math.max(0, rawCap - projUsage) : 0;  // 설계 기준
-    const projUtil   = (rawCap > 0 && mtdM) ? projUsage / rawCap * 100 : 0;  // 설계 기준
+    const projUsage  = (hasMtdData && mtdActiveDays > 0)
+      ? Math.round(mtdUsage / mtdActiveDays * mtdMonthActiveDays) : 0;
+    const projDesignCap = hasMtdData ? proratedCapacity(rawCap, storeName, mtdM.monthNum) : 0;
+    const projAdjustedCap = hasMtdData ? proratedCapacity(monthCap, storeName, mtdM.monthNum) : 0;
+    const projIdle   = hasMtdData ? Math.max(0, projDesignCap - projUsage) : 0;
+    const projDesignUtil = projDesignCap > 0 ? projUsage / projDesignCap * 100 : 0;
+    const projAdjustedUtil = projAdjustedCap > 0 ? projUsage / projAdjustedCap * 100 : 0;
     const projLoss   = projIdle * consPrice;
 
     // ── 계절 지수 (확정월만 = 공식 계절지수) ──────────────────────
-    // 매장별 2025 연 월평균을 기준으로 해당 매장 계절지수 계산
-    // (SEASON_BASE_USAGE는 합산 기준이므로 단일 매장에 적용 시 왜곡)
     const storeMonthlyBase2025 = STORE_ANNUAL_2025[storeName]
       ? STORE_ANNUAL_2025[storeName] / 12
-      : SEASON_BASE_USAGE / 6;   // 매장 데이터 없으면 합산 ÷ 6 추산
-    const confirmedSeasonIdx = confirmedMs.map(m => ({
+      : 0;
+    const confirmedSeasonIdx = confirmedCapacityMs.map(m => ({
       month: m.month, monthNum: m.monthNum,
       usage: m.usage || 0,
-      idx: storeMonthlyBase2025 > 0 ? (m.usage || 0) / storeMonthlyBase2025 : 0
+      base: storeMonthlyBase2025 * storeActiveDaysInMonth(storeName, m.monthNum) / daysInMonth(m.monthNum),
+      idx: storeMonthlyBase2025 > 0 && storeActiveDaysInMonth(storeName, m.monthNum) > 0
+        ? (m.usage || 0) / (storeMonthlyBase2025 * storeActiveDaysInMonth(storeName, m.monthNum) / daysInMonth(m.monthNum))
+        : 0
     }));
+    const confirmedSeasonUsage = storeMonthlyBase2025 > 0 ? confirmedUsage : 0;
+    const confirmedSeasonBase = confirmedSeasonIdx.reduce((s, m) => s + (m.base || 0), 0);
     // MTD 계절 추이 (진행률 기준 지수) / 예상 계절지수
-    const mtdSeasonIdx = mtdM ? {
+    const mtdSeasonIdx = hasMtdData ? {
       month: mtdM.month, monthNum: mtdM.monthNum,
-      usage: mtdUsage, days: mtdDay, daysInMonth: mtdDaysIn,
-      idx_mtd: (storeMonthlyBase2025 > 0 && mtdDaysIn > 0 && mtdDay > 0)
-        ? mtdUsage / (storeMonthlyBase2025 * mtdDay / mtdDaysIn) : 0,
-      idx_proj: storeMonthlyBase2025 > 0 ? projUsage / storeMonthlyBase2025 : 0
+      usage: mtdUsage, days: mtdActiveDays, daysInMonth: mtdMonthActiveDays,
+      idx_mtd: (storeMonthlyBase2025 > 0 && mtdMonthActiveDays > 0 && mtdActiveDays > 0)
+        ? mtdUsage / (storeMonthlyBase2025 * mtdActiveDays / mtdMonthActiveDays) : 0,
+      idx_proj: storeMonthlyBase2025 > 0 && mtdMonthActiveDays > 0
+        ? projUsage / (storeMonthlyBase2025 * mtdMonthActiveDays / mtdDaysIn) : 0
     } : null;
 
     // ── 이상값 탐지 ──────────────────────────────────────────────
     const anomalies = [];
-    if (confirmedUtil > 100 || mtdUtil > 100)
+    if (confirmedDesignUtil > 100 || mtdDesignUtil > 100)
       anomalies.push('over_capacity');
+    if (mtdM && !hasMtdData)
+      anomalies.push('mtd_data_missing');
     filtMs.forEach(m => {
       if ((m.usage || 0) === 0 && (m.gross || 0) > 0)
         anomalies.push('usage_zero_revenue_nonzero');
@@ -2355,27 +2582,35 @@ function buildCapacityData(ent) {
         anomalies.push('usage_nonzero_revenue_zero');
     });
 
-    // ── 기존 호환 필드 (외부에서 lossEstimate·idleCount 참조용) ──
-    // MTD가 있으면 MTD 기준 대표값, 없으면 확정 기준
-    const repUtil  = mtdM ? mtdUtil  : confirmedUtil;
-    const repUsage = mtdM ? confirmedUsage + mtdUsage : confirmedUsage;
-    const repIdle  = mtdM ? mtdIdle  : confirmedIdle;
-    const repLoss  = mtdM ? mtdLoss  : confirmedLoss;
-    const repCap   = mtdM ? confirmedCap + mtdCap : confirmedCap;
+    // ── 기존 호환 필드: 선택 기간 누적(확정 + MTD) 기준 ─────────
+    const repUsage = confirmedUsage + mtdUsage;
+    const repIdle  = confirmedIdle + mtdIdle;
+    const repLoss  = confirmedLoss + mtdLoss;
+    const repCap   = confirmedDesignCap + mtdDesignCap;
+    const repUtil  = repCap > 0 ? repUsage / repCap * 100 : 0;
 
     return {
-      name: storeName, monthCap, rawCap, conservativePrice: consPrice,
+      name: storeName, monthCap, rawCap, conservativePrice: consPrice, priceSource,
       monthCount: filtMs.length,
       // 확정
-      confirmedMonths: confirmedMs.length, confirmedUsage, confirmedCap,
-      confirmedIdle, confirmedUtil, confirmedLoss,
+      confirmedMonths: confirmedCapacityMs.length,
+      confirmedExcludedMonths: confirmedMs.length - confirmedCapacityMs.length,
+      confirmedUsage,
+      confirmedDesignCap, confirmedAdjustedCap,
+      confirmedCap: confirmedDesignCap,
+      confirmedIdle, confirmedDesignUtil, confirmedAdjustedUtil,
+      confirmedUtil: confirmedDesignUtil, confirmedLoss,
       // MTD
-      hasMTD: !!mtdM, mtdDays: mtdDay, mtdDaysInMonth: mtdDaysIn,
-      mtdUsage, mtdCap, mtdIdle, mtdUtil, mtdLoss,
+      hasMTD: hasMtdData, mtdDataMissing: !!mtdM && !hasMtdData,
+      mtdDays: mtdDay, mtdDaysInMonth: mtdDaysIn,
+      mtdActiveDays, mtdMonthActiveDays, mtdUsage,
+      mtdDesignCap, mtdAdjustedCap, mtdCap: mtdDesignCap,
+      mtdIdle, mtdDesignUtil, mtdAdjustedUtil, mtdUtil: mtdDesignUtil, mtdLoss,
       // 예상
-      projUsage, projIdle, projUtil, projLoss,
+      projUsage, projDesignCap, projAdjustedCap, projIdle,
+      projDesignUtil, projAdjustedUtil, projUtil: projDesignUtil, projLoss,
       // 계절 지수
-      confirmedSeasonIdx, mtdSeasonIdx,
+      confirmedSeasonIdx, confirmedSeasonUsage, confirmedSeasonBase, mtdSeasonIdx,
       // 이상값
       anomalies,
       // 호환 필드
@@ -2405,32 +2640,38 @@ function renderCapacityPanel(ent) {
 
   // ── 포트폴리오 합산 ──────────────────────────────────────────
   const totConfUsage  = stores.reduce((s,st) => s+(st.confirmedUsage||0), 0);
-  const totConfCap    = stores.reduce((s,st) => s+(st.confirmedCap||0),   0);
+  const totConfDesignCap = stores.reduce((s,st) => s+(st.confirmedDesignCap||0), 0);
+  const totConfAdjustedCap = stores.reduce((s,st) => s+(st.confirmedAdjustedCap||0), 0);
   const totConfIdle   = stores.reduce((s,st) => s+(st.confirmedIdle||0),  0);
   const totConfLoss   = stores.reduce((s,st) => s+(st.confirmedLoss||0),  0);
   const totMtdUsage   = stores.reduce((s,st) => s+(st.mtdUsage||0),       0);
-  const totMtdCap     = stores.reduce((s,st) => s+(st.mtdCap||0),         0);
+  const totMtdDesignCap = stores.reduce((s,st) => s+(st.mtdDesignCap||0), 0);
+  const totMtdAdjustedCap = stores.reduce((s,st) => s+(st.mtdAdjustedCap||0), 0);
   const totMtdIdle    = stores.reduce((s,st) => s+(st.mtdIdle||0),        0);
   const totMtdLoss    = stores.reduce((s,st) => s+(st.mtdLoss||0),        0);
   const totProjUsage  = stores.reduce((s,st) => s+(st.projUsage||0),      0);
+  const totProjDesignCap = stores.reduce((s,st) => s+(st.projDesignCap||0), 0);
+  const totProjAdjustedCap = stores.reduce((s,st) => s+(st.projAdjustedCap||0), 0);
   const totProjIdle   = stores.reduce((s,st) => s+(st.projIdle||0),       0);
   const totProjLoss   = stores.reduce((s,st) => s+(st.projLoss||0),       0);
-  const totMonthCap   = stores.reduce((s,st) => s+(st.monthCap||0),       0);
+  const totDesignMonthCap = stores.reduce((s,st) => s+(st.rawCap||0),     0);
+  const totAdjustedMonthCap = stores.reduce((s,st) => s+(st.monthCap||0), 0);
   const hasMTD        = stores.some(s => s.hasMTD);
-  const confUtil      = totConfCap  > 0 ? totConfUsage / totConfCap  * 100 : 0;
-  const mtdUtil       = totMtdCap   > 0 ? totMtdUsage  / totMtdCap  * 100 : 0;
-  const projUtil      = totMonthCap > 0 ? totProjUsage / totMonthCap * 100 : 0;
-  const avgConfMonths = stores.length > 0 ? (stores[0]?.confirmedMonths||0) : 0;
+  const confDesignUtil = totConfDesignCap > 0 ? totConfUsage / totConfDesignCap * 100 : 0;
+  const confAdjustedUtil = totConfAdjustedCap > 0 ? totConfUsage / totConfAdjustedCap * 100 : 0;
+  const mtdDesignUtil = totMtdDesignCap > 0 ? totMtdUsage / totMtdDesignCap * 100 : 0;
+  const mtdAdjustedUtil = totMtdAdjustedCap > 0 ? totMtdUsage / totMtdAdjustedCap * 100 : 0;
+  const projDesignUtil = totProjDesignCap > 0 ? totProjUsage / totProjDesignCap * 100 : 0;
+  const projAdjustedUtil = totProjAdjustedCap > 0 ? totProjUsage / totProjAdjustedCap * 100 : 0;
+  const confMonthCounts = stores.map(s => s.confirmedMonths || 0);
+  const confMonthLabel = confMonthCounts.length && confMonthCounts.every(v => v === confMonthCounts[0])
+    ? `${confMonthCounts[0]}개월 마감 완료`
+    : '매장별 운영기간 반영';
 
   // 계절지수 (확정월 기준) — 2025 실적 기반 매장별 월평균으로 계산
-  // ★ 버그 수정: 이전 버전은 SEASON_BASE_USAGE × storeCount로 6배 과대 계산 → 지수 0.17 수준 왜곡
-  // 전체 합산: 합산 월평균(45,741) × 확정 개월수
-  // 단일 매장: 해당 매장 2025 연간 ÷ 12 × 확정 개월수
-  const storeBase2025monthly = ent.isAll
-    ? SEASON_BASE_USAGE
-    : (STORE_ANNUAL_2025[ent.name] ? STORE_ANNUAL_2025[ent.name] / 12 : SEASON_BASE_USAGE / 6);
-  const confSeasonBase = storeBase2025monthly * Math.max(1, avgConfMonths);
-  const confSeasonIdx  = confSeasonBase > 0 ? totConfUsage / confSeasonBase : 0;
+  const confSeasonUsage = stores.reduce((s,st) => s+(st.confirmedSeasonUsage||0), 0);
+  const confSeasonBase = stores.reduce((s,st) => s+(st.confirmedSeasonBase||0), 0);
+  const confSeasonIdx  = confSeasonBase > 0 ? confSeasonUsage / confSeasonBase : null;
 
   // 상태 배지 헬퍼
   function sBadge(type) {
@@ -2443,14 +2684,14 @@ function renderCapacityPanel(ent) {
   const capPanelArt = el.closest('article') || el.closest('section');
   if (capPanelArt) {
     const capSub = capPanelArt.querySelector('.sub');
-    if (capSub) capSub.textContent = '설계 Capacity 기준 운영 효율 분석';
+    if (capSub) capSub.textContent = '설계·보정 Capacity 기준 운영 효율 분석';
   }
 
   // ── 기준 고지 (상단 게이지와의 차이 명시) ─────────────────────
   // 상단 게이지/헤드라인의 운영 가동률은 ops 집계 시트 기준
-  // 이 심층 분석 패널의 가동률은 설계 Capacity(rawCap) 기준 — 미가동·손실 추정 목적
+  // 이 심층 분석 패널의 가동률은 설계/보정 Capacity 기준이다.
   let html = `<div style="padding:6px 10px;background:var(--navy-soft);border:1px solid rgba(36,51,80,.12);border-radius:var(--r-sm);font-size:11px;color:#4a5568;margin-bottom:12px;line-height:1.6">
-    ℹ️ <strong>심층 분석 기준:</strong> 설계 Capacity (rawCap) 기준 — 미가동 대수·손실 추정 목적<br>
+    ℹ️ <strong>심층 분석 기준:</strong> 설계 Capacity와 보정 Capacity(설계 × 0.85)를 병기하며, 오픈월은 운영일수로 일할 계산합니다.<br>
     상단 게이지·헤드라인의 <strong>운영 가동률</strong>은 ops 집계 시트 기준 (운영 Capacity 기준, 더 높게 표시될 수 있음)
   </div>`;
 
@@ -2462,40 +2703,36 @@ function renderCapacityPanel(ent) {
     html += `<div class="cap-anomaly-banner">⚠ 데이터 점검 필요 — 총사용 0대인데 매출이 존재하는 월/매장 있음</div>`;
   if (anomalySet.has('usage_nonzero_revenue_zero'))
     html += `<div class="cap-anomaly-banner">⚠ 데이터 점검 필요 — 총사용 대수가 있는데 매출이 0원인 월/매장 있음</div>`;
+  if (anomalySet.has('mtd_data_missing'))
+    html += `<div class="cap-anomaly-banner">⚠ MTD 사용량 미집계 — 당월 총사용 관측값이 없는 매장은 MTD 유휴 Capacity와 월말 예상을 산출하지 않음</div>`;
 
   // ── 확정월 요약 ──────────────────────────────────────────────
-  html += `<div class="cap-section-divider">확정 구간 ${sBadge('confirmed')} <span style="font-size:10px;color:#9e8c7e;font-weight:400">${avgConfMonths}개월 마감 완료</span></div>
+  html += `<div class="cap-section-divider">확정 구간 ${sBadge('confirmed')} <span style="font-size:10px;color:#9e8c7e;font-weight:400">${confMonthLabel}</span></div>
   <div class="cap-summary">
     <div class="cap-sum-item">
-      <div class="cap-sum-label">확정 가동률 설계(보정)${capTip('설계기준: 확정월 총사용 ÷ 설계 Capacity × 100<br>보정기준: 확정월 총사용 ÷ 보정 Capacity × 100<br>마감 완료 월만 적용 (풀 월 기준)')}</div>
-      <div class="cap-sum-val" style="color:${utilColor(confUtil)}">
-        ${(() => {
-          const totRawCap = Object.values(STORE_CAPACITY_RAW).reduce((s,v)=>s+v,0);
-          const rawUtil = totRawCap > 0 ? totConfUsage / (totRawCap * Math.max(1, avgConfMonths)) * 100 : 0;
-          return totConfCap > 0
-            ? `${fmtP(rawUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(confUtil)})</span>`
-            : '—';
-        })()}
-      </div>
-      <div class="cap-sum-sub">보정 ${fmtN(totConfCap)}대 기준</div>
+      <div class="cap-sum-label">확정 가동률 설계(보정)${capTip('설계: 확정월 총사용 ÷ 설계 Capacity<br>보정: 확정월 총사용 ÷ 설계 Capacity의 85%<br>매장 오픈월은 운영일수로 일할 적용')}</div>
+      <div class="cap-sum-val" style="color:${utilColor(confDesignUtil)}">${totConfDesignCap>0
+        ? `${fmtP(confDesignUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(confAdjustedUtil)})</span>`
+        : '—'}</div>
+      <div class="cap-sum-sub">설계 ${fmtN(totConfDesignCap)}대 · 보정 ${fmtN(totConfAdjustedCap)}대</div>
     </div>
     <div class="cap-sum-item">
-      <div class="cap-sum-label">설계 Capacity${capTip('설비 × 월운영일 × 일처리대수<br>보정 = 설계 × 0.85 (점검·대기 15% 차감)<br>2025 실적 기반: avg raw 가동률 64.8% → 보정 후 76.3%<br>광명 14,280 / 하남 12,240 / 자유로 12,240<br>일산 8,160 / 성수 8,160 / 고양 4,896')}</div>
-      <div class="cap-sum-val">${fmtN(totMonthCap)}<span style="font-size:11px;font-weight:600">대/월</span></div>
-      <div class="cap-sum-sub">보정 Capacity (×0.85)</div>
+      <div class="cap-sum-label">월 Capacity 설계(보정)${capTip('설계 Capacity = 설비 × 월운영일 × 일처리대수<br>보정 Capacity = 설계 × 0.85 (점검·대기 15% 차감)')}</div>
+      <div class="cap-sum-val">${fmtN(totDesignMonthCap)} <span style="font-size:12px;color:var(--muted)">(${fmtN(totAdjustedMonthCap)})</span></div>
+      <div class="cap-sum-sub">운영 대상 매장 월 기준</div>
     </div>
     <div class="cap-sum-item">
-      <div class="cap-sum-label">확정 미가동${capTip('보정 Capacity − 확정월 세차 대수<br>확정 기간 합산 기준')}</div>
+      <div class="cap-sum-label">확정 유휴 Capacity${capTip('MAX(0, 설계 Capacity − 확정월 총사용)<br>확정 기간 합산 기준')}</div>
       <div class="cap-sum-val bad">${fmtN(totConfIdle)}<span style="font-size:11px;font-weight:600">대</span></div>
     </div>
     <div class="cap-sum-item">
-      <div class="cap-sum-label">확정 손실 추정${capTip('확정 미가동 × 보수적 단가<br>보수적 단가 = 기간 순매출 ÷ 총사용<br>(UNIT_PRICE_TARGET 아닌 실제 단가 적용)')}</div>
+      <div class="cap-sum-label">확정 기회금액 상한${capTip('확정 유휴 Capacity × 보수적 단가<br>수요를 반영하지 않은 상한 추정치이며 실제 손실이 아님')}</div>
       <div class="cap-sum-val bad">${fmtS(totConfLoss)}</div>
     </div>
     <div class="cap-sum-item">
-      <div class="cap-sum-label">계절 지수 (확정)${capTip('확정월 총사용 ÷ (기준선 × 매장수 × 개월수)<br>1.0 = 연평균 수준<br>확정 기간만 공식 계절지수로 해석')}</div>
-      <div class="cap-sum-val" style="color:${confSeasonIdx>=1?'#216552':confSeasonIdx>=0.8?'#c07b48':'#b24c58'}">${confSeasonIdx.toFixed(2)}</div>
-      <div class="cap-sum-sub">기준 ${fmtN(SEASON_BASE_USAGE)}대/월</div>
+      <div class="cap-sum-label">계절 지수 (확정)${capTip('2025 매장별 월평균 대비 확정월 총사용<br>2025 기준선이 없는 신규 매장은 제외')}</div>
+      <div class="cap-sum-val" style="color:${confSeasonIdx==null?'var(--muted)':confSeasonIdx>=1?'#216552':confSeasonIdx>=0.8?'#c07b48':'#b24c58'}">${confSeasonIdx==null?'—':confSeasonIdx.toFixed(2)}</div>
+      <div class="cap-sum-sub">2025 실적 보유 매장 기준</div>
     </div>
   </div>`;
 
@@ -2504,24 +2741,28 @@ function renderCapacityPanel(ent) {
     html += `<div class="cap-section-divider">당월 진행 ${sBadge('mtd')} <span style="font-size:10px;color:#9e8c7e;font-weight:400">${getMtdDay()}일 경과 기준</span></div>
     <div class="cap-summary">
       <div class="cap-sum-item">
-        <div class="cap-sum-label">MTD 가동률${capTip('당월 총사용 ÷ MTD Capacity × 100<br>MTD Capacity = 월 보정 Capacity × (경과일/월일수)<br>★ 확정값과 직접 비교 불가')}</div>
-        <div class="cap-sum-val" style="color:${utilColor(mtdUtil)}">${totMtdCap>0?fmtP(mtdUtil):'—'} ${sBadge('mtd')}</div>
-        <div class="cap-sum-sub">MTD ${fmtN(totMtdCap)}대 기준</div>
+        <div class="cap-sum-label">MTD 가동률 설계(보정)${capTip('당월 총사용 ÷ MTD Capacity<br>오픈월은 오픈일부터 원천 최신일까지 일할 적용')}</div>
+        <div class="cap-sum-val" style="color:${utilColor(mtdDesignUtil)}">${totMtdDesignCap>0
+          ? `${fmtP(mtdDesignUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(mtdAdjustedUtil)})</span>`
+          : '—'} ${sBadge('mtd')}</div>
+        <div class="cap-sum-sub">설계 ${fmtN(totMtdDesignCap)}대 · 보정 ${fmtN(totMtdAdjustedCap)}대</div>
       </div>
       <div class="cap-sum-item">
-        <div class="cap-sum-label">MTD 미가동${capTip('MAX(0, MTD Capacity − 당월 총사용)')}</div>
+        <div class="cap-sum-label">MTD 유휴 Capacity${capTip('MAX(0, MTD 설계 Capacity − 당월 총사용)')}</div>
         <div class="cap-sum-val bad">${fmtN(totMtdIdle)}대 ${sBadge('mtd')}</div>
       </div>
       <div class="cap-sum-item">
-        <div class="cap-sum-label">MTD 손실 추정${capTip('MTD 미가동 × 보수적 단가\n보수적 단가 = 기간 순매출 ÷ 총사용')}</div>
+        <div class="cap-sum-label">MTD 기회금액 상한${capTip('MTD 유휴 Capacity × 보수적 단가<br>실제 손실이 아닌 상한 추정치')}</div>
         <div class="cap-sum-val bad">${fmtS(totMtdLoss)} ${sBadge('mtd')}</div>
       </div>
       <div class="cap-sum-item">
-        <div class="cap-sum-label">예상 가동률${capTip('예상 총사용 ÷ 월 보정 Capacity × 100<br>예상 총사용 = 당월실적 ÷ 경과일 × 월일수')}</div>
-        <div class="cap-sum-val" style="color:${utilColor(projUtil)}">${fmtP(projUtil)} ${sBadge('projected')}</div>
+        <div class="cap-sum-label">예상 가동률 설계(보정)${capTip('예상 총사용 ÷ 월 Capacity<br>예상 총사용 = 당월실적 ÷ 운영 경과일 × 월 운영일수')}</div>
+        <div class="cap-sum-val" style="color:${utilColor(projDesignUtil)}">${totProjDesignCap>0
+          ? `${fmtP(projDesignUtil)} <span style="font-size:12px;color:var(--muted)">(${fmtP(projAdjustedUtil)})</span>`
+          : '—'} ${sBadge('projected')}</div>
       </div>
       <div class="cap-sum-item">
-        <div class="cap-sum-label">예상 손실 추정${capTip('예상 미가동 × 보수적 단가\n현재 추세 기준 월말 환산 — 참고용')}</div>
+        <div class="cap-sum-label">예상 기회금액 상한${capTip('예상 유휴 Capacity × 보수적 단가<br>현재 추세 기준 월말 환산 참고치')}</div>
         <div class="cap-sum-val bad">${fmtS(totProjLoss)} ${sBadge('projected')}</div>
       </div>
     </div>`;
@@ -2554,33 +2795,24 @@ function renderCapacityPanel(ent) {
   <div class="cap-store-grid">`;
 
   [...stores].sort((a,b) => {
-    const ua = a.hasMTD ? a.mtdUtil : a.confirmedUtil;
-    const ub = b.hasMTD ? b.mtdUtil : b.confirmedUtil;
+    const ua = a.hasMTD ? a.mtdDesignUtil : a.confirmedDesignUtil;
+    const ub = b.hasMTD ? b.mtdDesignUtil : b.confirmedDesignUtil;
     return ub - ua;
   }).forEach(s => {
-    const dispUtil   = s.hasMTD ? s.mtdUtil   : s.confirmedUtil;
+    const designUtil = s.hasMTD ? s.mtdDesignUtil : s.confirmedDesignUtil;
+    const adjUtil    = s.hasMTD ? s.mtdAdjustedUtil : s.confirmedAdjustedUtil;
     const dispIdle   = s.hasMTD ? s.mtdIdle   : s.confirmedIdle;
     const dispLoss   = s.hasMTD ? s.mtdLoss   : s.confirmedLoss;
     const dispUsage  = s.hasMTD ? s.mtdUsage  : s.confirmedUsage;
-    const dispCap    = s.hasMTD ? s.mtdCap    : s.confirmedCap;
+    const dispDesignCap = s.hasMTD ? s.mtdDesignCap : s.confirmedDesignCap;
+    const dispAdjustedCap = s.hasMTD ? s.mtdAdjustedCap : s.confirmedAdjustedCap;
     const dispStatus = s.hasMTD ? 'mtd' : 'confirmed';
 
-    // ★ 설계기준 가동률 — barW·라벨 모두 설계 Capacity(rawCap) 기준
-    //    (buildCapacityData가 rawCap 기준으로 바뀌었으므로 dispUtil = 설계 기준)
-    //    별도 rawCapacity 계산은 label용 역할만 수행
-    const rawCapacity = STORE_CAPACITY_RAW[s.name] || 0;
-    const designUtil  = rawCapacity > 0 && dispUsage > 0
-      ? (dispUsage / rawCapacity * 100) : dispUtil;
-    // 설계기준(rawCap) vs 보정기준(rawCap×0.85) 병기
-    // ★ "운영 가동률"(ops시트 col13)과 혼동 방지: 이 카드는 Capacity 계산값만 다룸
-    const adjUtil = s.monthCap > 0 && dispUsage > 0
-      ? (dispUsage / s.monthCap * 100) : 0;
-    const utilDualLabel = rawCapacity > 0
+    const utilDualLabel = dispDesignCap > 0
       ? `설계 기준 ${fmtP(designUtil)} <span style="font-size:11.5px;color:var(--muted);font-weight:500">/ 보정 기준 ${fmtP(adjUtil)}</span>`
       : `설계 기준 ${fmtP(designUtil)}`;
 
     const bColor = utilColor(designUtil);
-    // ★ 바 폭: 설계 Capacity 기준 가동률
     const barW   = Math.min(100, designUtil).toFixed(1);
 
     // 이상값 배지 (카드 단위)
@@ -2589,6 +2821,8 @@ function renderCapacityPanel(ent) {
       cardBadge += `<span class="status-badge anomaly" style="margin-left:0;margin-bottom:5px;display:inline-block">Capacity 검토 필요</span> `;
     if ((s.anomalies||[]).some(a=>a.includes('usage')))
       cardBadge += `<span class="status-badge anomaly" style="margin-left:0;margin-bottom:5px;display:inline-block">데이터 점검 필요</span>`;
+    if ((s.anomalies||[]).includes('mtd_data_missing'))
+      cardBadge += `<span class="status-badge anomaly" style="margin-left:0;margin-bottom:5px;display:inline-block">MTD 미집계</span>`;
 
     html += `<div class="cap-store-card">
       <div class="cap-store-head">
@@ -2598,19 +2832,19 @@ function renderCapacityPanel(ent) {
       ${cardBadge ? `<div style="margin-bottom:5px">${cardBadge}</div>` : ''}
       <div class="cap-bar-wrap">
         <div class="cap-bar" style="width:${barW}%;background:${bColor}88;${s.hasMTD?'border-right:2px dashed '+bColor:''}"></div>
-        ${dispUtil > 100 ? '<span class="cap-over">OVER</span>' : ''}
+        ${designUtil > 100 ? '<span class="cap-over">OVER</span>' : ''}
       </div>
       <div class="cap-store-meta">
-        <span>${s.hasMTD?'MTD':'확정월 누적'} ${fmtN(dispUsage)}대 / ${fmtN(dispCap)}대</span>
-        <span style="color:${lossColor(dispLoss)}">${s.hasMTD?'MTD':'확정'} 손실 ${fmtS(dispLoss)}</span>
+        <span>${s.hasMTD?'MTD':'확정월 누적'} ${fmtN(dispUsage)}대 / 설계 ${fmtN(dispDesignCap)}대 · 보정 ${fmtN(dispAdjustedCap)}대</span>
+        <span style="color:${lossColor(dispLoss)}">${s.hasMTD?'MTD':'확정'} 기회금액 상한 ${fmtS(dispLoss)}</span>
       </div>
       <div class="cap-store-meta" style="margin-top:3px">
         <span class="period-badge" style="font-size:10px;color:var(--muted);background:var(--bg2);border-radius:4px;padding:1px 6px">${s.confirmedMonths > 0 ? `확정 ${s.confirmedMonths}개월${s.hasMTD?' + MTD':''}` : (s.hasMTD ? 'MTD만' : '—')}</span>
       </div>
-      <div class="cap-idle">보수 단가 ~${fmtS(Math.round(s.conservativePrice||0))}/대 · 미가동 <strong>${fmtN(dispIdle)}대</strong> · 설계 ${fmtN(s.rawCap||0)}대</div>
+      <div class="cap-idle">보수 단가 ~${fmtS(Math.round(s.conservativePrice||0))}/대 · 유휴 <strong>${fmtN(dispIdle)}대</strong>${s.priceSource==='available_history'?' · 가용 과거 매출 단가 적용':''}</div>
       ${s.hasMTD && s.projUsage > 0 ? `
       <div class="cap-idle" style="color:#c07b48;margin-top:4px">
-        예상: ${fmtP(s.projUtil)} · 손실 ${fmtS(s.projLoss)} ${sBadge('projected')}
+        예상 설계 ${fmtP(s.projDesignUtil)} · 보정 ${fmtP(s.projAdjustedUtil)} · 기회금액 상한 ${fmtS(s.projLoss)} ${sBadge('projected')}
       </div>` : ''}
     </div>`;
   });
@@ -2621,10 +2855,10 @@ function renderCapacityPanel(ent) {
   html += `<div class="cap-basis-note">
     <strong>산정 기준</strong> ·
     적용 단가: <strong>보수적 단가 (순매출 ÷ 총사용)</strong>, 기간 평균 약 ${fmtS(Math.round(avgPrice))}/대 ·
-    미가동 = 설계 Capacity(rawCap) − 실제 세차 대수 · 보정 Capacity(×0.85) 병기 표시 ·
-    <strong>확정월</strong>: 풀 월 Capacity 기준 ·
-    <strong>당월(MTD)</strong>: MTD Capacity = 월 Capacity × (원천 매출 최신일 기준 ${getMtdDay()}일 ÷ 월일수) 적용 ·
-    <strong>시간대·요일 변동 미반영 추정치</strong> — 실제 손실과 상이할 수 있음
+    유휴 Capacity = MAX(0, 설계 Capacity − 실제 세차 대수) · 보정 Capacity(×0.85) 병기 표시 ·
+    <strong>확정월·MTD</strong>: 오픈월 운영일수 일할 적용 ·
+    <strong>기회금액 상한</strong>: 유휴 Capacity × 보수적 단가, 수요·시간대·요일 변동 미반영 ·
+    <strong>실제 손실이 아님</strong>
   </div>`;
 
   el.innerHTML = html;
@@ -2956,11 +3190,11 @@ function renderPaymentPanel(ent) {
     { label:'건당 매출', val:fmtS(revenuePerWash),
       note:`총매출 ÷ ${fmtN(usage)}대`, color:'navy' },
     { label:'건당 순매출', val:fmtS(netPerWash),
-      note:`할인·환불 차감 후`, color:'green' },
+      note:`총매출에서 환불·기타 차감 후`, color:'green' },
     { label:'구독 ARPU', val:arpu>0?fmtS(arpu):(mrrPerSub>0?fmtS(mrrPerSub):'—'),
       note:`MRR ÷ 유지 구독자`, color:'accent' },
     { label:'목표 실현 단가', val:`${fmtN(UNIT_PRICE_TARGET)}원`,
-      note:`손실 추정 기준 단가`, color:'amber' }
+      note:`Capacity 기회금액 상한 기준 단가`, color:'amber' }
   ];
 
   el.innerHTML = items.map(it => `
@@ -3020,7 +3254,7 @@ function renderHeatmap(ent) {
     { key:'utilization',   label:'가동률',   fmt:fmtP,  inv:false },
     { key:'churn',         label:'이탈률',   fmt:fmtP,  inv:true  },
     { key:'refundRate',    label:'환불율',   fmt:fmtP,  inv:true  },
-    { key:'lossEstimate',  label:'손실추정', fmt:fmtS,  inv:true  }
+    { key:'lossEstimate',  label:'기회금액 상한', fmt:fmtS, inv:true }
   ];
   const metricsExtra = [
     { key:'netAdds',  label:'순증감', fmt:fmtN,  inv:false },
@@ -3142,11 +3376,11 @@ function momDelta(cur, prev, suffix='%p', invert=false) {
 function renderTable(ent) {
   const selName = ent.isAll ? null : ent.name;
   // ★ 쿼터/매장 필터에 반응: 필터된 월 데이터 집계 사용
-  // 손실 추정 조회용 — 매장별 lossEstimate 빠르게 접근
-  const capLossMap = {};
+  // 심층 Capacity 계산값 조회용 — 기간·오픈월·MTD 기준을 동일하게 적용
+  const capMetricMap = {};
   try {
     buildCapacityData({ isAll: true, months: [] }).forEach(d => {
-      if (d.name) capLossMap[d.name] = d.lossEstimate || 0;
+      if (d.name) capMetricMap[d.name] = d;
     });
   } catch(e) {}
 
@@ -3158,10 +3392,8 @@ function renderTable(ent) {
     // ★ Change 3: 이전 달 집계 계산
     const prevMs = filtMs.length >= 2 ? filtMs.slice(0, -1) : null;
     const prevAgg = prevMs ? (aggMonths(prevMs) || {}) : null;
-    const rawCap = STORE_CAPACITY_RAW[s.name] || 0;
-    const utilizationRaw = rawCap > 0 && filtMs.length > 0
-      ? (agg.usage || 0) / (rawCap * filtMs.length) * 100
-      : 0;
+    const capMetric = capMetricMap[s.name] || {};
+    const utilizationRaw = capMetric.capacity > 0 ? capMetric.utilization : 0;
     return {
       name:        s.name,
       gross:       agg.gross        || 0,
@@ -3174,7 +3406,7 @@ function renderTable(ent) {
       churn:       agg.churn        || 0,
       netAdds:     agg.netAdds      || 0,
       arpu:        agg.arpu         || 0,
-      lossEstimate: capLossMap[s.name] || 0,
+      lossEstimate: capMetric.lossEstimate || 0,
       opsStatus:   ops.status       || '—',   // 시트 원본 상태 (참고용)
       // prev period for MoM arrows
       prevUtil:    prevAgg ? (prevAgg.utilization || 0) : null,
@@ -3215,9 +3447,8 @@ function renderTable(ent) {
     if      (ach < 70)                          risks.push({ score:110, tag:'목표 미달 심각' });
     else if (ach < 80)                          risks.push({ score:70,  tag:'목표 미달' });
 
-    // [손실 추정 차원] 달성률 양호하지만 미가동 손실이 큰 매장 (예: 광명)
-    //   달성률 ≥ 90% + 손실 1억+ → 손실 위험으로 별도 표시
-    if (ach >= 90 && loss > 100000000)          risks.push({ score:75,  tag:'손실 위험' });
+    // [Capacity 기회 차원] 달성률 양호하지만 유휴 Capacity가 큰 매장
+    if (ach >= 90 && loss > 100000000)          risks.push({ score:75,  tag:'Capacity 기회' });
 
     // [가동률 차원] 저가동 — Capacity 초과와 중복 방지
     if (util < 60 && utilRaw <= 100)            risks.push({ score:65,  tag:'저가동' });
@@ -3302,7 +3533,7 @@ function renderDetail(ent) {
   // 기본 지표 그리드
   const items = [
     { label:'총매출',    val:fmtS(c.gross),         sub:`목표 ${fmtS(c.target||0)}` },
-    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `할인·환불·기타 차감` : `환불·기타 차감 · 할인 미연결` },
+    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `총매출−환불 · 쿠폰할인 정가 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `총매출−환불 · ${couponUnavailableLabel(c)}` },
     { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
     { label:'달성률',   val:fmtP(c.achievement||0),  sub:`목표 ${fmtS(c.target||0)}` },
     { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
@@ -3310,30 +3541,23 @@ function renderDetail(ent) {
         const cr = ent.isAll
           ? { idleCount: capAll.reduce((s,d)=>s+(d.idleCount||0),0) }
           : (capAll[0]||{});
-        return `총사용 ${fmtN(c.usage||0)}대 · 설계기준 미가동 ${fmtN(cr.idleCount||0)}대`;
+        return `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(cr.idleCount||0)}대`;
       })() },
     { label:'이탈률',   val:fmtP(c.churn||0),        sub:`해지 ${fmtN(c.cancelSubs||0)}건` },
     (()=>{
-      const dDiscount = c.discountShare||0;
       const dRefund   = c.refundRate||0;
-      const sameVal   = c.hasDiscountData && dDiscount > 0 && dRefund > 0 && Math.abs(dDiscount - dRefund) < 0.01;
-      const badge     = sameVal ? ' <span style="font-size:9px;background:#ffe082;color:#7a5900;padding:1px 4px;border-radius:3px;font-weight:700">⚠ 원천 확인</span>' : '';
-      return { label:`환불율${badge}`, val:fmtP(dRefund), sub: sameVal ? `할인비중과 동일값 — 원천 컬럼 재확인 필요` : `총매출 기준` };
+      return { label:'환불율', val:fmtP(dRefund), sub:'총매출 기준' };
     })(),
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
     (()=>{
       const dDiscount = c.discountShare||0;
-      const dRefund   = c.refundRate||0;
-      const sameVal   = c.hasDiscountData && dDiscount > 0 && dRefund > 0 && Math.abs(dDiscount - dRefund) < 0.01;
       const noData    = !c.hasDiscountData;
-      const badge     = sameVal ? ' <span style="font-size:9px;background:#ffe082;color:#7a5900;padding:1px 4px;border-radius:3px;font-weight:700">⚠ 원천 확인</span>'
-                      : noData  ? ' <span style="font-size:9px;background:#f0ebe3;color:#7a6a50;padding:1px 4px;border-radius:3px;font-weight:700">미연결</span>'
+      const badge     = noData  ? ` <span style="font-size:9px;background:#f0ebe3;color:#7a6a50;padding:1px 4px;border-radius:3px;font-weight:700">${(c.couponSourceMonths||0) > 0 ? '산출 제외' : '미배분'}</span>`
                       : '';
       const dispVal   = noData  ? '—' : fmtP(dDiscount);
-      const dispSub   = sameVal ? `환불율과 동일값 — 컬럼 매핑 재확인 필요`
-                      : noData  ? `할인 데이터 미연결 (0원)`
-                      : fmtS(c.discountAmount||0);
-      return { label:`할인비중${badge}`, val:dispVal, sub:dispSub };
+      const dispSub   = noData  ? ((c.couponSourceMonths||0) > 0 ? `총매출 미집계 · 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 정가 대비 산출 제외` : `쿠폰 원천에 매장 ID 없음`)
+                      : `정가 추정 대비 · ${fmtS(c.discountAmount||0)}${couponCoverageSuffix(c)}`;
+      return { label:`쿠폰할인율${badge}`, val:dispVal, sub:dispSub };
     })(),
     { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:`MRR ÷ 유지 구독자` },
     { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`ARR YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'} (연간 반복매출)` },
@@ -3382,8 +3606,8 @@ function renderDetail(ent) {
   else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 즉각 점검 필요` });
   else if (churn > 6)  issues.push({ sev:'warning',  text:`이탈률 ${fmtP(churn)} — 유지 ${fmtN(c.retained||0)}명 중 이탈 경계 수준` });
 
-  if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 미가동 ${fmtN(capRow.idleCount||0)}대, 손실 ${fmtS(capRow.lossEstimate||0)}` });
-  else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 개선 여지 있음, 미가동 ${fmtN(capRow.idleCount||0)}대` });
+  if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 유휴 Capacity ${fmtN(capRow.idleCount||0)}대, 기회금액 상한 ${fmtS(capRow.lossEstimate||0)}` });
+  else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 개선 여지 있음, 유휴 Capacity ${fmtN(capRow.idleCount||0)}대` });
 
   if (refund > 15)  issues.push({ sev:'critical', text:`환불율 ${fmtP(refund)} — 서비스 품질 이슈 또는 CS 불만 다수 예상` });
   else if (refund > 8) issues.push({ sev:'warning', text:`환불율 ${fmtP(refund)} — 클레임 원인 점검 권장` });
@@ -3530,17 +3754,17 @@ function renderActionCenter(ent) {
     kpi:'순증감 0건 이상',
     confirm:`7일 내 신규가입 전환율 8% 이상 도달` });
 
-  // 손실 추정 기반 액션 (★ v3: 이미 오픈 전 제외된 buildCapacityData 사용)
+  // Capacity 기회금액 상한 기반 액션
   const capData   = buildCapacityData(ent);
   const totalLoss = capData.reduce((s,d) => s + ((d.confirmedLoss||0)+(d.mtdLoss||0)), 0);
-  if (totalLoss > 100000000)  actions.push({ level:'critical', text:`손실 추정 ${fmtS(totalLoss)} — 가동률 제고를 통한 회수 계획 즉시 수립`,
+  if (totalLoss > 100000000)  actions.push({ level:'critical', text:`Capacity 기회금액 상한 ${fmtS(totalLoss)} — 수요 검증 후 가동률 제고 계획 수립`,
     dri:'사업운영팀', deadline:deadlineWk,
-    kpi:'가동률 65% 이상 달성으로 손실 50% 이상 감소',
+    kpi:'가동률 65% 이상 달성으로 유휴 Capacity 50% 이상 감소',
     confirm:`14일 내 주간 가동률 5%p 이상 반등 수치 확인` });
-  else if (totalLoss > 30000000) actions.push({ level:'warning', text:`손실 추정 ${fmtS(totalLoss)} — 미가동 대수 최소화 방안 검토`,
+  else if (totalLoss > 30000000) actions.push({ level:'warning', text:`Capacity 기회금액 상한 ${fmtS(totalLoss)} — 수요 검증 및 유휴 Capacity 최소화 방안 검토`,
     dri:'사업운영팀', deadline:deadlineWk,
-    kpi:'미가동 대수 10% 감소',
-    confirm:`7일 내 미가동 대수 전주 대비 10% 이상 감소 또는 프로모션 전환율 5% 이상` });
+    kpi:'유휴 Capacity 10% 감소',
+    confirm:`7일 내 유휴 Capacity 전주 대비 10% 이상 감소 또는 프로모션 전환율 5% 이상` });
 
   if (!actions.length) actions.push({ level:'ok', text:'현재 즉각 조치가 필요한 항목 없음 — 정상 운영 중' });
 
@@ -3615,10 +3839,8 @@ function renderActionCenter(ent) {
       // ★ Priority 7: 1차 원인 + 우선 액션 도출 (deriveStoreStatus와 동일 차원 우선순위)
       const ach     = agg.achievement  || 0;
       const util    = agg.utilization  || 0;
-      const rawCap = STORE_CAPACITY_RAW[s.name] || 0;
-      const utilRaw = rawCap > 0 && filtMs.length > 0
-        ? (agg.usage || 0) / (rawCap * filtMs.length) * 100
-        : util;
+      const capMetric = buildCapacityData({ name:s.name, isAll:false, months:filtMs })[0] || {};
+      const utilRaw = capMetric.capacity > 0 ? capMetric.utilization : util;
       const churn   = agg.churn        || 0;
       const refund  = agg.refundRate   || 0;
       let rootCause = '', priorityAction = '', dri = '';
@@ -3683,7 +3905,7 @@ function renderActionCenter(ent) {
     }).join('') + openingHtml;
   }
 
-  // ③ 손실 추정 금액 ─────────────────────────────────────────
+  // ③ Capacity 기회금액 상한 ──────────────────────────────────
   // 전체 뷰: 포트폴리오 합산 | 단일 매장: 해당 매장 기준
   const lossTitleEl = document.querySelector('.ac-loss .ac-title');
   const capForLoss = ent.isAll
@@ -3692,7 +3914,7 @@ function renderActionCenter(ent) {
   const totalLossAll  = capForLoss.reduce((s,d) => s+(d.lossEstimate||0), 0);
   const totalIdleAll  = capForLoss.reduce((s,d) => s+(d.idleCount||0),    0);
   const sorted = [...capForLoss].sort((a,b) => b.lossEstimate - a.lossEstimate);
-  if (lossTitleEl) lossTitleEl.textContent = ent.isAll ? '누적 손실 추정' : `${ent.name} 누적 손실 추정`;
+  if (lossTitleEl) lossTitleEl.textContent = ent.isAll ? '누적 기회금액 상한' : `${ent.name} 누적 기회금액 상한`;
 
   // ★ v3: 손실 기준 명확화 — 확정월 합산 + 당월 MTD 합산 구분
   const totConfLoss_ = capForLoss.reduce((s,d)=>s+(d.confirmedLoss||0),0);
@@ -3712,7 +3934,7 @@ function renderActionCenter(ent) {
 
   $('acLossBody').innerHTML = `
     <div class="ac-loss-total">${fmtS(displayLoss)}</div>
-    <div class="ac-loss-sub">${ent.isAll ? '운영 매장 합산 · ' : ''}미가동 ${fmtN(displayIdle)}대 · 가중 평균 단가 ${fmtN(weightedPrice)}원/대</div>
+    <div class="ac-loss-sub">${ent.isAll ? '운영 매장 합산 · ' : ''}유휴 Capacity ${fmtN(displayIdle)}대 · 가중 평균 단가 ${fmtN(weightedPrice)}원/대</div>
     <div style="font-size:10.5px;color:var(--muted);margin:3px 0 8px;line-height:1.5">
       ${hasMTD_
         ? `<span style="background:rgba(36,51,80,.08);border-radius:3px;padding:1px 5px">확정월 누적</span> ${fmtS(totConfLoss_)} · <span style="background:rgba(192,123,72,.1);border-radius:3px;padding:1px 5px">MTD (${getMtdDay()}일)</span> ${fmtS(totMtdLoss_)}`
@@ -3770,8 +3992,8 @@ function renderInlineStoreDetail(ent) {
   if      (churn > 15) issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 긴급 대응` });
   else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 즉각 점검` });
   else if (churn > 6) issues.push({ sev:'warning', text:`이탈률 ${fmtP(churn)} — 유지 구독자 이탈 경계` });
-  if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 미가동 ${fmtN(capRow.idleCount||0)}대 · 손실 ${fmtS(capRow.lossEstimate||0)}` });
-  else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 미가동 ${fmtN(capRow.idleCount||0)}대 개선 여지` });
+  if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 유휴 Capacity ${fmtN(capRow.idleCount||0)}대 · 기회금액 상한 ${fmtS(capRow.lossEstimate||0)}` });
+  else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 유휴 Capacity ${fmtN(capRow.idleCount||0)}대 개선 여지` });
   if (refund > 15)  issues.push({ sev:'critical', text:`환불율 ${fmtP(refund)} — CS 이슈 즉각 점검` });
   else if (refund > 8) issues.push({ sev:'warning', text:`환불율 ${fmtP(refund)} — 클레임 원인 점검 권장` });
   if (netAdds < -5) issues.push({ sev:'critical', text:`순구독 감소 ${netAdds}건 — 신규 채널 긴급 강화` });
@@ -3816,7 +4038,7 @@ function renderInlineStoreDetail(ent) {
       ${[
         {l:'총매출',      v:fmtS(c.gross),        s:`목표 ${fmtS(c.target||0)}`},
         {l:'달성률',      v:fmtP(ach),             s:`목표 대비 ${ach>=100?'초과':'미달'}`},
-        {l:'운영 가동률', v:fmtP(util),            s:`설계기준 미가동 ${fmtN(capRow.idleCount||0)}대`},
+        {l:'운영 가동률', v:fmtP(util),            s:`기간 누적 유휴 Capacity ${fmtN(capRow.idleCount||0)}대`},
         {l:'이탈률',      v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
         {l:'순증감',   v:`${netAdds>=0?'+':''}${fmtN(netAdds)}`, s:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`},
       ].map(i=>`
@@ -3988,7 +4210,7 @@ async function init(showLoading=true) {
     const failedNames = [..._failedSheets].map(gid => {
       const storeEntry = Object.entries(GID.stores).find(([,v]) => v.gid === gid);
       if (storeEntry) return `${storeEntry[1].name} 매장`;
-      const knownGids = { [GID.summary]:'요약', [GID.ops]:'운영', [GID.sales]:'매출', [GID.subs]:'구독', [GID.mrr]:'MRR', [GID.dataCheck]:'데이터 점검' };
+      const knownGids = { [GID.summary]:'요약', [GID.ops]:'운영', [GID.sales]:'매출', [GID.subs]:'구독', [GID.mrr]:'MRR', [GID.coupon]:'쿠폰 분석', [GID.dataCheck]:'데이터 점검' };
       return knownGids[gid] || `시트(${gid})`;
     });
     const failedStr = failedNames.length ? ` · 실패 시트: ${failedNames.join(', ')}` : '';
