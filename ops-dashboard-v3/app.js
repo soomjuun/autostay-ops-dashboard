@@ -212,6 +212,15 @@ function clearSlowLoadTimer() { clearTimeout(_slowLoadTimer); }
 function qIdx(rows, label) {
   return rows.findIndex(r => tx(r[0]) === label);
 }
+function qSectionIdx(rows, label) {
+  const exact = qIdx(rows, label);
+  if (exact >= 0) return exact;
+  const normalized = tx(label);
+  return rows.findIndex(r => {
+    const v = tx(r[0]);
+    return v === normalized || v === `${normalized} 상세` || v === `${normalized}상세`;
+  });
+}
 function mRows(rows, idx) {
   const m = new Map();
   if (idx < 0) return m;
@@ -295,12 +304,12 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
 // ★ Q1 섹션 레이블 없이 시트 최상단부터 데이터가 시작하는 경우 처리
 //    (매출/구독/MRR 시트 모두 Q1 헤더 행 없이 row 0 = 첫 지표)
 //    qIdx가 -1 → idx=-2 → mRows 시작 i=idx+2=0 (Q2 레이블에서 자동 중단)
-function q1Fallback(rows) { const i = qIdx(rows,'Q1'); return i >= 0 ? i : -2; }
+function q1Fallback(rows) { const i = qSectionIdx(rows,'Q1'); return i >= 0 ? i : -2; }
 
 function parseOverall(salesR, subR, mrrR) {
-  const sQ1 = mRows(salesR, q1Fallback(salesR)), sQ2 = mRows(salesR, qIdx(salesR,'Q2'));
-  const bQ1 = mRows(subR,   q1Fallback(subR)),   bQ2 = mRows(subR,   qIdx(subR,  'Q2'));
-  const mQ1 = mRows(mrrR,   q1Fallback(mrrR)),   mQ2 = mRows(mrrR,   qIdx(mrrR,  'Q2'));
+  const sQ1 = mRows(salesR, q1Fallback(salesR)), sQ2 = mRows(salesR, qSectionIdx(salesR,'Q2'));
+  const bQ1 = mRows(subR,   q1Fallback(subR)),   bQ2 = mRows(subR,   qSectionIdx(subR,  'Q2'));
+  const mQ1 = mRows(mrrR,   q1Fallback(mrrR)),   mQ2 = mRows(mrrR,   qSectionIdx(mrrR,  'Q2'));
   return MONTH_SPECS.map(sp => buildMonth(
     sp.month, sp.quarter,
     sp.quarter==='Q1'?sQ1:sQ2,
@@ -312,7 +321,7 @@ function parseOverall(salesR, subR, mrrR) {
 
 function applyPortfolioCouponDiscounts(months, couponRows) {
   const q1 = mRows(couponRows, q1Fallback(couponRows));
-  const q2 = mRows(couponRows, qIdx(couponRows, 'Q2'));
+  const q2 = mRows(couponRows, qSectionIdx(couponRows, 'Q2'));
   months.forEach((m, i) => {
     const sp = MONTH_SPECS[i];
     const source = sp.quarter === 'Q1' ? q1 : q2;
@@ -418,8 +427,8 @@ function parseStore(name, rows) {
   const snapIdx = ['당월 스냅샷','스냅샷','현황','Summary'].reduce((f,l)=>f>=0?f:qIdx(rows,l),-1);
   const snap = mRows(rows, snapIdx);
   // 분기 상세 섹션 레이블 유연 처리
-  const q1Idx = ['Q1 상세','Q1상세','Q1'].reduce((f,l)=>f>=0?f:qIdx(rows,l),-1);
-  const q2Idx = ['Q2 상세','Q2상세','Q2'].reduce((f,l)=>f>=0?f:qIdx(rows,l),-1);
+  const q1Idx = qSectionIdx(rows, 'Q1');
+  const q2Idx = qSectionIdx(rows, 'Q2');
   const q1 = mRows(rows, q1Idx);
   const q2 = mRows(rows, q2Idx);
   const curSpec = { cur:1, prev:2, yoy:3, mom:0, num:TODAY_MONTH };
@@ -640,12 +649,23 @@ function parseSummary(rows) {
 /* ── 8-B. 데이터 점검 시트 파싱 ──────────────────────────────── */
 function parseDataQuality(rows) {
   const checks = [];
+  const details = [];
   const headerIdx = rows.findIndex(r => tx(r[0]) === '점검 항목');
   if (headerIdx >= 0) {
     for (let i = headerIdx + 1; i < rows.length; i++) {
       const name = tx(rows[i][0]);
-      if (!name || name === '오류 상세') break;
+      if (!name || name === '오류 상세' || name === '검증 상세') break;
       checks.push({ name, status: tx(rows[i][1]), value: tx(rows[i][2]), note: tx(rows[i][3]) });
+    }
+  }
+  const detailIdx = rows.findIndex(r => tx(r[0]) === '검증 상세' || tx(r[0]) === '오류 상세');
+  if (detailIdx >= 0) {
+    for (let i = detailIdx + 1; i < rows.length; i++) {
+      const loc = tx(rows[i][0]);
+      const msg = tx(rows[i][1]);
+      if (!loc && !msg) continue;
+      if (loc === '위치' && msg === '메시지') continue;
+      details.push({ location: loc, message: msg || loc });
     }
   }
   const salesCheck = checks.find(c => c.name === '매출 최신일');
@@ -654,6 +674,7 @@ function parseDataQuality(rows) {
   return {
     checks,
     warnings: checks.filter(c => c.status && c.status !== '정상'),
+    details,
     salesLatestDate,
     sheetUpdatedText: tx(rows.find(r => tx(r[0]).startsWith('업데이트'))?.[0] || '')
   };
@@ -662,6 +683,10 @@ function parseDataQuality(rows) {
 function runDataQualityAudit(dataQuality) {
   if (!dataQuality) return [];
   return (dataQuality.warnings || []).map(c => {
+    if (c.name === '검증 경고') {
+      const detailCount = dataQuality.details?.length || num(c.value);
+      return `원천 검증 경고: ${detailCount || c.value || c.status}건 · 세부 항목은 데이터 점검 시트의 검증 상세 참고`;
+    }
     if (c.name === '매출 최신일' && dataQuality.salesLatestDate) {
       const d = dataQuality.salesLatestDate;
       const dateText = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -2028,11 +2053,15 @@ function renderQuarterChart(ent) {
 }
 
 function renderScatterChart(ent) {
-  // 포지션 맵은 달성률·총매출이 핵심 축이므로 총매출이 실제 집계된 월만 사용한다.
-  // 목표만 있고 총매출이 0원인 미집계 월을 포함하면 달성률이 인위적으로 낮아진다.
-  const selectedPeriodMonths = months => months.filter(m =>
-    (state.quarter === 'all' || m.quarter === state.quarter) && m.gross > 0 && m.target > 0
-  );
+  // 포지션 맵은 확정월 기준을 우선한다. MTD를 섞으면 4·5월 마감 성과가 6월 초 부분 실적으로 희석된다.
+  // 선택 기간에 확정월이 없을 때만 MTD를 대체 사용한다.
+  const selectedPeriodMonths = months => {
+    const base = months.filter(m =>
+      (state.quarter === 'all' || m.quarter === state.quarter) && m.gross > 0 && m.target > 0
+    );
+    const confirmed = base.filter(m => m.status === 'confirmed');
+    return confirmed.length ? confirmed : base.filter(m => m.status === 'mtd');
+  };
   const stores = getActiveStores().map(s => {
     const positionMonths = selectedPeriodMonths(s.months);
     const agg = aggMonths(positionMonths) || {};
@@ -2074,12 +2103,17 @@ function renderScatterChart(ent) {
   }));
 
   const positionMonths = [...new Set(stores.flatMap(s=>s.monthNums))].sort((a,b)=>a-b);
+  const positionUsesMtd = stores.length > 0 && stores.every(s => {
+    const src = getActiveStores().find(st => st.name === s.name)?.months || [];
+    const selected = selectedPeriodMonths(src);
+    return selected.length && selected.every(m => m.status === 'mtd');
+  });
   const periodText = positionMonths.length
     ? `${positionMonths[0]}월~${positionMonths[positionMonths.length-1]}월 매출 집계 기준`
     : `${state.quarter === 'all' ? '선택 기간' : state.quarter} 총매출 미집계`;
   const positionSub = $('positionSub');
   if (positionSub) positionSub.textContent = stores.length
-    ? `${periodText} · 점선: 달성률 100% / 이탈률 10% · 버블 크기: 총매출`
+    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (확정월)'} · 점선: 달성률 100% / 이탈률 10% · 버블 크기: 총매출`
     : `${periodText}로 포지션 산출 제외`;
 
   const maxAchievement = Math.max(...stores.map(s=>s.achievement), 100);
