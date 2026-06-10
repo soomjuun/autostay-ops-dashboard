@@ -385,14 +385,21 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
   .chart-master-grid [class*="col-"] { grid-column: span 1 }
 }
 
-/* ══ SUBSCRIPTION PIPELINE (Salesforce-style) ══════════════════ */
+/* ══ SUBSCRIPTION STATUS ═══════════════════════════════════════ */
 .sub-pipeline{display:flex;flex-direction:column;gap:10px;padding-top:4px}
 .pipe-row{display:flex;flex-direction:column;gap:3px}
 .pipe-label{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.03em}
+.pipe-label-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pipe-note{font-size:10px;color:var(--subtle);font-weight:700;white-space:nowrap}
 .pipe-bar-wrap{display:flex;align-items:center;gap:7px}
 .pipe-bar{height:14px;border-radius:var(--r-xs);transition:width .6s cubic-bezier(.4,0,.2,1);min-width:4px}
 .pipe-val{font-size:12px;font-weight:800;color:var(--text);white-space:nowrap}
 .pipe-pct{font-size:10.5px;font-weight:700;white-space:nowrap}
+.pipe-summary-card{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;padding:10px 12px;background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--r-md)}
+.pipe-main-val{font-size:20px;font-weight:900;color:var(--text);margin-top:2px}
+.pipe-summary-note{font-size:10px;color:var(--muted);font-weight:700;white-space:nowrap}
+.pipe-flow-title{font-size:10.5px;color:var(--muted);font-weight:900;text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+.pipe-footnote{font-size:10px;color:var(--subtle);line-height:1.45;padding:7px 9px;background:var(--bg);border-radius:var(--r-sm)}
 .pipe-footer{font-size:11px;color:var(--muted);margin-top:6px;padding-top:8px;border-top:1px solid var(--border);line-height:1.55}
 
 /* ══ CAPACITY PANEL ═════════════════════════════════════════════ */
@@ -493,7 +500,7 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
 }
 .ac-item-act:hover{background:#ffd5d8}
 
-/* 문제 매장 카드 */
+/* 우선 점검 매장 카드 */
 .ac-danger-store{
   display:flex;align-items:center;gap:10px;
   padding:8px 10px;border-radius:var(--r-sm);
@@ -859,4 +866,3 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
   .chart-master-grid [class*="col-"]{grid-column:span 1}
   .chart-master-grid .col-6,.chart-master-grid .col-8,.chart-master-grid .col-12{grid-column:span 2}
 }
-

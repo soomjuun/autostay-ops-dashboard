@@ -588,7 +588,7 @@ function runAudit(months, opsStores) {
     if (s._refundParseFlag) {
       fmtIssues.push(`${s.name}: 환불율 컬럼 형식 확인 필요 (원천값 ${s._refundRawVal?.toFixed(0)||'?'} — 비율·건수 혼재 가능)`);
     } else if (s.refundRate > 30) {
-      opIssues.push(`${s.name}: 환불율 ${fmtP(s.refundRate)} — 고위험 즉시 점검`);
+      opIssues.push(`${s.name}: 환불율 ${fmtP(s.refundRate)} — 집중 점검 필요`);
     } else if (s.refundRate > 10) {
       opIssues.push(`${s.name}: 환불율 ${fmtP(s.refundRate)} — 주의 수준`);
     }
@@ -1698,14 +1698,14 @@ function renderOpsChurnStats(ent) {
           <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
           <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--rose);font-size:10.5px">이탈률</th>
           <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--amber);font-size:10.5px">환불율</th>
-          <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">위험도</th>
+          <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">관리 수준</th>
         </tr>
       </thead>
       <tbody>
         ${ms.map(m => {
           const c = m.churn     || 0;
           const r = m.refundRate || 0;
-          const riskLevel = (c > 10 || r > 5) ? '🔴 고위험' : (c > 6 || r > 3) ? '🔶 주의' : '✅ 양호';
+          const riskLevel = (c > 10 || r > 5) ? '🔴 집중관리' : (c > 6 || r > 3) ? '🔶 주의' : '✅ 양호';
           return `<tr style="border-bottom:1px solid var(--bg2)">
             <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
             <td style="padding:4px 6px;text-align:right;font-weight:700;color:${churnColor(c)};background:${churnBg(c)};border-radius:4px">${c.toFixed(1)}%</td>
@@ -3106,7 +3106,7 @@ function renderSeasonChart(ent) {
   });
 }
 
-/* ── 15-D. 구독 파이프라인 패널 (Salesforce-style funnel) ──────── */
+/* ── 15-D. 구독 현황 패널 ───────────────────────────────────── */
 function renderSubscriptionPipeline(ent) {
   const el = $('subPipeline');
   if (!el) return;
@@ -3118,27 +3118,42 @@ function renderSubscriptionPipeline(ent) {
   const retained   = last.retained   || 0;
   const newSubs    = last.newSubs    || 0;
   const cancelSubs = last.cancelSubs || 0;
-  const total      = retained + newSubs;
-
-  const stages = [
-    { label:'총 구독자', val: total,      color:'#24344f', pct: 100 },
-    { label:'유지 구독', val: retained,   color:'#216552', pct: total?retained/total*100:0 },
-    { label:'신규 유입', val: newSubs,    color:'#1d7a8a', pct: total?newSubs/total*100:0 },
-    { label:'이탈·해지', val: cancelSubs, color:'#b24c58', pct: total?cancelSubs/total*100:0 }
+  const netAdds    = last.netAdds != null ? last.netAdds : newSubs - cancelSubs;
+  const flowBase   = Math.max(newSubs, cancelSubs, Math.abs(netAdds), 1);
+  const churnPct   = retained > 0 ? cancelSubs / retained * 100 : 0;
+  const acquisitionPct = retained > 0 ? newSubs / retained * 100 : 0;
+  const flowRows = [
+    { label:'월중 신규', val: newSubs, color:'#1d7a8a', note:`유지 대비 ${fmtP(acquisitionPct)}` },
+    { label:'월중 해지', val: cancelSubs, color:'#b24c58', note:`유지 대비 ${fmtP(churnPct)}` },
+    { label:'순증감', val: netAdds, color:netAdds>=0?'#216552':'#b24c58', note:newSubs >= cancelSubs ? '신규 우위' : '해지 우위' }
   ];
 
-  const maxVal = Math.max(total, 1);
-  el.innerHTML = stages.map(s => {
-    const w = Math.max(8, (s.val / maxVal * 100)).toFixed(1);
-    return `<div class="pipe-row">
-      <div class="pipe-label">${s.label}</div>
-      <div class="pipe-bar-wrap">
-        <div class="pipe-bar" style="width:${w}%;background:${s.color}88"></div>
-        <span class="pipe-val">${fmtN(s.val)}명</span>
-        <span class="pipe-pct" style="color:${s.color}">${s.pct.toFixed(1)}%</span>
+  el.innerHTML = `
+    <div class="pipe-summary-card">
+      <div>
+        <div class="pipe-label">월말 유지 구독자</div>
+        <div class="pipe-main-val">${fmtN(retained)}명</div>
       </div>
-    </div>`;
-  }).join('');
+      <div class="pipe-summary-note">${last.month} 기준</div>
+    </div>
+    <div class="pipe-flow-title">월중 변동 흐름</div>
+    ${flowRows.map(s => {
+      const absVal = Math.abs(s.val || 0);
+      const w = Math.max(6, (absVal / flowBase * 100)).toFixed(1);
+      const signVal = s.label === '순증감' && s.val > 0 ? `+${fmtN(s.val)}` : fmtN(s.val);
+      return `<div class="pipe-row">
+        <div class="pipe-label-row">
+          <span class="pipe-label">${s.label}</span>
+          <span class="pipe-note">${s.note}</span>
+        </div>
+        <div class="pipe-bar-wrap">
+          <div class="pipe-bar" style="width:${w}%;background:${s.color}88"></div>
+          <span class="pipe-val" style="color:${s.color}">${signVal}명</span>
+        </div>
+      </div>`;
+    }).join('')}
+    <div class="pipe-footnote">유지 구독자는 월말 스냅샷, 신규·해지는 월중 발생 건수입니다.</div>
+  `;
 
   // MoM 변화 요약
   if (ms.length >= 2) {
@@ -3487,7 +3502,7 @@ function renderTable(ent) {
   });
 
   // ★ v3: 파생 상태 계산 함수 — 실데이터 기반 다중 조건
-  // TOP3 리스크 로직과 동일 기준 사용
+  // 우선 점검 매장 로직과 동일 기준 사용
   function deriveStoreStatus(s) {
     if (s.opsStatus === '오픈 전') return { text:'오픈 전', cls:'open' };
     const ach      = s.achievement    || 0;
@@ -3506,16 +3521,16 @@ function renderTable(ent) {
 
     // [이탈 차원] 3단계 구간 — 가장 높은 단계 하나만
     //   심각: 15% 초과 / 위험: 10~15% / 주의: 6~10%
-    if      (churn > 15)                        risks.push({ score:130, tag:'이탈 위험 심각' });
-    else if (churn > 10)                        risks.push({ score:90,  tag:'이탈 위험' });
+    if      (churn > 15)                        risks.push({ score:130, tag:'이탈 집중관리' });
+    else if (churn > 10)                        risks.push({ score:90,  tag:'이탈 관리필요' });
     else if (churn > 6)                         risks.push({ score:50,  tag:'이탈 주의' });
 
     // [환불 차원] 2단계 — 가장 높은 단계 하나만
-    if      (refund > 15)                       risks.push({ score:120, tag:'환불 위험 심각' });
-    else if (refund > 8)                        risks.push({ score:80,  tag:'환불 위험' });
+    if      (refund > 15)                       risks.push({ score:120, tag:'환불 집중관리' });
+    else if (refund > 8)                        risks.push({ score:80,  tag:'환불 관리필요' });
 
     // [달성률 차원] 2단계 — 가장 높은 단계 하나만
-    if      (ach < 70)                          risks.push({ score:110, tag:'목표 미달 심각' });
+    if      (ach < 70)                          risks.push({ score:110, tag:'목표 큰 폭 미달' });
     else if (ach < 80)                          risks.push({ score:70,  tag:'목표 미달' });
 
     // [Capacity 기회 차원] 달성률 양호하지만 유휴 Capacity가 큰 매장
@@ -3644,7 +3659,7 @@ function renderDetail(ent) {
   $('detailTitle').textContent = ent.isAll ? '포트폴리오 합산 상세' : `${ent.name} 드릴다운`;
   $('detailSub').textContent = `${ms.length}개월 집계 기준`;
 
-  // ── 드릴다운: 문제 원인·추세·권장 액션 (단일 매장 선택 시) ──
+  // ── 드릴다운: 점검 포인트·추세·권장 액션 (단일 매장 선택 시) ──
   if (ent.isAll) return; // 전체 뷰는 기본 그리드만 표시
 
   // 트렌드 헬퍼 (최근 2개월 변화)
@@ -3660,7 +3675,7 @@ function renderDetail(ent) {
     return `<span class="drilldown-trend-chip ${cls}">${sign}${delta.toFixed(1)}</span>`;
   };
 
-  // 문제 원인 탐지
+  // 점검 포인트 탐지
   const issues = [];
   const ach = c.achievement || 0;
   const churn = c.churn || 0;
@@ -3686,7 +3701,7 @@ function renderDetail(ent) {
   if (netAdds < -5) issues.push({ sev:'critical', text:`순감 ${netAdds}건 — 신규 ${fmtN(c.newSubs||0)} < 해지 ${fmtN(c.cancelSubs||0)}` });
   else if (netAdds < 0) issues.push({ sev:'warning', text:`구독 순감 (${netAdds}건) — 해지 방어 필요` });
 
-  if (!issues.length) issues.push({ sev:'ok', text:'식별된 주요 문제 없음 — 현재 정상 운영 중' });
+  if (!issues.length) issues.push({ sev:'ok', text:'식별된 주요 특이사항 없음 — 현재 정상 운영 중' });
 
   // 최근 추세 (월별 변화)
   const trends = [];
@@ -3712,7 +3727,7 @@ function renderDetail(ent) {
   // HTML 조합
   const drilldownHtml = `<div class="drilldown-panel" style="margin-top:14px">
     <div class="drilldown-section">
-      <div class="drilldown-section-title">⚠ 문제 원인 분석</div>
+      <div class="drilldown-section-title">⚠ 점검 포인트</div>
       ${issues.map(i => `
         <div class="drilldown-issue">
           <span class="drilldown-dot" style="background:${i.sev==='critical'?'#b24c58':i.sev==='warning'?'#c07b48':'#216552'}"></span>
@@ -3857,8 +3872,8 @@ function renderActionCenter(ent) {
     </div>`;
   }).join('');
 
-  // ② 문제 매장 / 매장 현황 ────────────────────────────────────
-  // 전체 뷰: TOP3 랭킹 | 단일 매장: 해당 매장 이슈 집중 표시
+  // ② 우선 점검 매장 / 매장 현황 ────────────────────────────────
+  // 전체 뷰: 우선 점검 3곳 | 단일 매장: 해당 매장 이슈 집중 표시
   const dangerTitleEl = document.querySelector('.ac-danger .ac-title');
   if (!ent.isAll) {
     // ── 단일 매장: 해당 매장 이슈 표시 ──
@@ -3893,8 +3908,8 @@ function renderActionCenter(ent) {
         <span class="ac-danger-score" style="color:${scoreColor}">${score}점</span>
       </div>`;
   } else {
-    // ── 전체 뷰: TOP3 랭킹 (★ v3: 오픈 전 매장 제외) ──
-    if (dangerTitleEl) dangerTitleEl.textContent = '문제 매장 TOP 3 (운영 중)';
+    // ── 전체 뷰: 우선 점검 3곳 (★ v3: 오픈 전 매장 제외) ──
+    if (dangerTitleEl) dangerTitleEl.textContent = '우선 점검 매장 3곳';
     const activeStoresForRank = getActiveStores();
     const storeScores = activeStoresForRank.map(s => {
       const filtMs = filterMonths(s.months);
@@ -3920,12 +3935,12 @@ function renderActionCenter(ent) {
       const rc = [];
       if (utilRaw > 100 || util > 100)    rc.push({ score:150, cause:`Capacity 초과(${fmtP(utilRaw||util)})`, action:'설계 기준 재검토 · 예약 제한 운영', dri_:'Field Ops 담당' });
       // 이탈 구간: 15%+ 심각 / 10~15% 위험 / 6~10% 주의 — deriveStoreStatus와 동일 기준
-      if      (churn > 15)                rc.push({ score:130, cause:`고이탈 심각(${fmtP(churn)})`, action:'CS 이슈 긴급 점검 · 해지 사유 분류', dri_:'BizOps 리텐션 담당' });
-      else if (churn > 10)                rc.push({ score:90,  cause:`이탈 위험(${fmtP(churn)})`, action:'리텐션 캠페인 집행 · 해지 사유 수집', dri_:'BizOps 리텐션 담당' });
+      if      (churn > 15)                rc.push({ score:130, cause:`이탈 집중관리(${fmtP(churn)})`, action:'CS 이슈 긴급 점검 · 해지 사유 분류', dri_:'BizOps 리텐션 담당' });
+      else if (churn > 10)                rc.push({ score:90,  cause:`이탈 관리필요(${fmtP(churn)})`, action:'리텐션 캠페인 집행 · 해지 사유 수집', dri_:'BizOps 리텐션 담당' });
       else if (churn > 6)                 rc.push({ score:50,  cause:`이탈 주의(${fmtP(churn)})`, action:'해지 고객 설문 집계', dri_:'BizOps 리텐션 담당' });
-      if (refund > 15)                    rc.push({ score:120, cause:`환불 심각(${fmtP(refund)})`, action:'CS 티켓 유형별 분류 · 환불 방어 프로세스 점검', dri_:'CS 담당' });
-      else if (refund > 8)                rc.push({ score:80,  cause:`환불 위험(${fmtP(refund)})`, action:'환불 사유 태깅 · 서비스 품질 점검', dri_:'CS 담당' });
-      if (ach < 70)                       rc.push({ score:110, cause:`목표 미달 심각(순매출 달성률 ${fmtP(ach)})`, action:'가격·프로모션 긴급 검토', dri_:'BizOps 영업 담당' });
+      if (refund > 15)                    rc.push({ score:120, cause:`환불 집중관리(${fmtP(refund)})`, action:'CS 티켓 유형별 분류 · 환불 방어 프로세스 점검', dri_:'CS 담당' });
+      else if (refund > 8)                rc.push({ score:80,  cause:`환불 관리필요(${fmtP(refund)})`, action:'환불 사유 태깅 · 서비스 품질 점검', dri_:'CS 담당' });
+      if (ach < 70)                       rc.push({ score:110, cause:`목표 큰 폭 미달(순매출 달성률 ${fmtP(ach)})`, action:'가격·프로모션 긴급 검토', dri_:'BizOps 영업 담당' });
       else if (ach < 80)                  rc.push({ score:70,  cause:`목표 미달(순매출 달성률 ${fmtP(ach)})`, action:'채널별 전환율 분석', dri_:'BizOps 영업 담당' });
       if (util < 60 && utilRaw <= 100)    rc.push({ score:65,  cause:`저가동(${fmtP(util)})`, action:'예약 채널 점검 · 피크 마케팅 집행', dri_:'Field Ops 담당' });
 
@@ -4049,7 +4064,7 @@ function renderInlineStoreDetail(ent) {
   const lastM = ms.length ? ms[ms.length-1] : null;
   const prevM = ms.length >= 2 ? ms[ms.length-2] : null;
 
-  // 문제 원인
+  // 점검 포인트
   const issues = [];
   const ach    = c.achievement || 0;
   const churn  = c.churn       || 0;
@@ -4069,7 +4084,7 @@ function renderInlineStoreDetail(ent) {
   else if (refund > 8) issues.push({ sev:'warning', text:`환불율 ${fmtP(refund)} — 클레임 원인 점검 권장` });
   if (netAdds < -5) issues.push({ sev:'critical', text:`순구독 감소 ${netAdds}건 — 신규 채널 긴급 강화` });
   else if (netAdds < 0) issues.push({ sev:'warning', text:`구독 순감 (${netAdds}건) — 해지 방어 필요` });
-  if (!issues.length) issues.push({ sev:'ok', text:'현재 주요 문제 없음 — 정상 운영 중' });
+  if (!issues.length) issues.push({ sev:'ok', text:'현재 주요 특이사항 없음 — 정상 운영 중' });
 
   // 최근 트렌드
   const trends = [];
@@ -4135,7 +4150,7 @@ function renderInlineStoreDetail(ent) {
 
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
       <div>
-        <div class="drilldown-section-title" style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">⚠ 문제 원인</div>
+        <div class="drilldown-section-title" style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">⚠ 점검 포인트</div>
         ${issues.map(i=>`
           <div class="drilldown-issue">
             <span class="drilldown-dot" style="background:${i.sev==='critical'?'#b24c58':i.sev==='warning'?'#c07b48':'#216552'}"></span>
