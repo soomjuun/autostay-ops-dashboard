@@ -351,9 +351,12 @@ function applyPortfolioCouponDiscounts(months, couponRows) {
 function parseOps(rows) {
   const idx = rows.findIndex(r => tx(r[0]) === '매장');
   const items = [];
-  if (idx < 0) return items;
-  for (let i = idx+1; i < rows.length; i++) {
+  const knownStoreNames = new Set(Object.values(GID.stores).map(s => s.name));
+  const startRow = idx >= 0 ? idx + 1 : rows.findIndex(r => knownStoreNames.has(tx(r[0])));
+  if (startRow < 0) return items;
+  for (let i = startRow; i < rows.length; i++) {
     const name = tx(rows[i][0]); if (!name) break;
+    if (!knownStoreNames.has(name)) continue;
 
     // ─── 컬럼 매핑 (gviz 실제 데이터 확인 기준) ─────────────────────
     // col0 : 매장명
@@ -370,7 +373,7 @@ function parseOps(rows) {
     // col11: 순증감
     // col12: ARPU (원)
     // col13: 가동률 (소수, 0.6787 → 67.87%)
-    // col14: 판정 (텍스트, '주의/달성률' 등)
+    // col14: 판정 (텍스트, '주의/달성률' 등) — 최신 시트에서는 생략 가능
     // col15-16: null
     // ────────────────────────────────────────────────────────────────
 
@@ -416,7 +419,7 @@ function parseOps(rows) {
       refundRate,     retained,
       newSubs:        num(rows[i][7]),  cancelSubs,
       netAdds:        num(rows[i][11]), arpu:        num(rows[i][12]),
-      status:         tx(rows[i][14]),
+      status:         tx(rows[i][14]) || '운영 중',
       churn,
       // ★ 파싱 플래그 — 정상 컬럼 매핑으로 항상 false (하위 호환성 유지)
       _refundParseFlag: false,
@@ -658,6 +661,12 @@ function parseSummary(rows) {
 }
 
 /* ── 8-B. 데이터 점검 시트 파싱 ──────────────────────────────── */
+function isInformationalDataQualityCheck(c) {
+  // 최신 원천의 "전년 비교 완전성=주의"는 2025년 1월 기준일 부재로 YoY를 공란 처리했다는 안내다.
+  // 데이터 오류나 운영 리스크로 카운트하지 않는다.
+  return c?.name === '전년 비교 완전성' && c?.status === '주의';
+}
+
 function parseDataQuality(rows) {
   const checks = [];
   const details = [];
@@ -682,9 +691,11 @@ function parseDataQuality(rows) {
   const salesCheck = checks.find(c => c.name === '매출 최신일');
   const dateMatch = salesCheck?.value?.match(/latest\s+(\d{4}-\d{2}-\d{2})/i);
   const salesLatestDate = dateMatch ? new Date(`${dateMatch[1]}T00:00:00`) : null;
+  const nonNormalChecks = checks.filter(c => c.status && c.status !== '정상');
   return {
     checks,
-    warnings: checks.filter(c => c.status && c.status !== '정상'),
+    warnings: nonNormalChecks.filter(c => !isInformationalDataQualityCheck(c)),
+    infos: nonNormalChecks.filter(isInformationalDataQualityCheck),
     details,
     salesLatestDate,
     sheetUpdatedText: tx(rows.find(r => tx(r[0]).startsWith('업데이트'))?.[0] || '')
@@ -693,7 +704,7 @@ function parseDataQuality(rows) {
 
 function runDataQualityAudit(dataQuality) {
   if (!dataQuality) return [];
-  return (dataQuality.warnings || []).map(c => {
+  const warningItems = (dataQuality.warnings || []).map(c => {
     if (c.name === '검증 경고') {
       const detailCount = dataQuality.details?.length || num(c.value);
       return `원천 검증 경고: ${detailCount || c.value || c.status}건 · 세부 항목은 데이터 점검 시트의 검증 상세 참고`;
@@ -708,6 +719,10 @@ function runDataQualityAudit(dataQuality) {
     }
     return `원천 점검 ${c.name}: ${c.value || c.status}${c.note ? ` · ${c.note}` : ''}`;
   });
+  const infoItems = (dataQuality.infos || []).map(c =>
+    `[정보] 원천 점검 ${c.name}: ${c.value || c.status}${c.note ? ` · ${c.note}` : ''}`
+  );
+  return [...warningItems, ...infoItems];
 }
 
 /* ── 8-D. 데이터 로드 ─────────────────────────────────────────── */
@@ -1302,18 +1317,21 @@ function renderInsights(ent) {
 
   // ── 정합성 — 문제·영향 지표·권장 조치 ──────────────────
   const al = dashboard.audit;
-  const alOp = al.filter(a => a !== '---' && !a.startsWith('[형식]'));  // 운영 리스크만
+  const alOp = al.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]'));  // 운영 리스크만
   $('auditList').innerHTML = al.length
     ? al.map(a => {
         if (a === '---') {
           return `<div class="audit-section-divider"><span>시트 형식 확인 사항</span></div>`;
         }
         const isFmt = a.startsWith('[형식]');
-        const text  = isFmt ? a.replace('[형식] ', '') : a;
-        const icon  = isFmt ? '⚙' : '⚑';
-        const cls   = isFmt ? 'audit-action-item audit-fmt' : 'audit-action-item';
+        const isInfo = a.startsWith('[정보]');
+        const text  = isFmt ? a.replace('[형식] ', '') : isInfo ? a.replace('[정보] ', '') : a;
+        const icon  = isFmt ? '⚙' : isInfo ? 'ℹ' : '⚑';
+        const cls   = isFmt ? 'audit-action-item audit-fmt' : isInfo ? 'audit-action-item audit-fmt' : 'audit-action-item';
         const rec   = isFmt
           ? '→ 데이터 값은 계산 대체값으로 표시 중 · 시트 컬럼 형식 확인 권장'
+          : isInfo
+          ? '→ 참고 정보 · 원천 시트 정책에 따라 자동 제외'
           : '→ 원본 시트 대조 · 입력값 검토 필요';
         return `
         <div class="${cls}">
@@ -2416,7 +2434,8 @@ function renderHeroKpis(ent) {
   // 정합성 — 운영 리스크만 카운트 (파싱 형식 오류는 별도)
   const auditAll    = dashboard.audit || [];
   const auditQualityCnt = auditAll.filter(a => a.startsWith('원천 ')).length;
-  const auditOpCnt  = auditAll.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('원천 ')).length;
+  const auditInfoCnt = auditAll.filter(a => a.startsWith('[정보]')).length;
+  const auditOpCnt  = auditAll.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('원천 ')).length;
   const auditFmtCnt = auditAll.filter(a => a.startsWith('[형식]')).length;
   const auditClass  = auditOpCnt || auditQualityCnt ? 'warn' : (auditFmtCnt ? 'info' : 'ok');
   const auditText   = auditQualityCnt
@@ -2425,7 +2444,9 @@ function renderHeroKpis(ent) {
     ? `⚠ 운영 이슈 ${auditOpCnt}건${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}`
     : auditFmtCnt
       ? `⚙ 시트 형식 확인 ${auditFmtCnt}건`
-      : '✓ 정합성 정상';
+      : auditInfoCnt
+        ? `✓ 정합성 정상 · 안내 ${auditInfoCnt}건`
+        : '✓ 정합성 정상';
 
   // 연결 상태는 실제 로드 실패 여부, 데이터 최신성은 원천 매출 최신일로 별도 표시한다.
   const connectionIssue = _failedSheets.size > 0;
@@ -2457,7 +2478,7 @@ function renderAlerts(ent) {
   if ((c.refundRate||0) > 15)    alerts.push({ lvl:'warn',    msg: `△ 환불율 ${fmtP(c.refundRate||0)} — CS 이슈 점검 필요` });
   // ★ 정합성 — 알림 센터에는 요약만 (상세는 정합성 카드에서 확인)
   // 컬럼 매핑 관련 반복 경고를 건수 요약으로 통합
-  const auditOpItems = (dashboard.audit||[]).filter(a => a !== '---' && !a.startsWith('[형식]'));
+  const auditOpItems = (dashboard.audit||[]).filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]'));
   if (auditOpItems.length) {
     const mappingItems = auditOpItems.filter(a => a.includes('컬럼 매핑') || a.includes('동일값'));
     const otherItems   = auditOpItems.filter(a => !a.includes('컬럼 매핑') && !a.includes('동일값'));
