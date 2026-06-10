@@ -223,7 +223,8 @@ function qSectionIdx(rows, label) {
 }
 function mRows(rows, idx) {
   const m = new Map();
-  if (idx < 0) return m;
+  // idx=-2는 Q1 레이블 없이 시트 최상단부터 데이터가 시작하는 구조를 의미한다.
+  if (idx < 0 && idx !== -2) return m;
   let emptyStreak = 0;
   for (let i = idx+2; i < rows.length; i++) {
     const k = tx(rows[i][0]);
@@ -252,14 +253,20 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
   // 이탈률: 시트에 직접 기재된 값 우선, 없으면 해지/유지로 계산
   const churnRaw   = mvAlias(subM, ['이탈률','이탈율','이탈율(%)','이탈률(%)'], spec.cur, pct);
   const churn      = churnRaw > 0 ? churnRaw : (retained > 0 && cancelSubs > 0 ? cancelSubs / retained * 100 : 0);
+  const target     = mv(salesM,'목표매출', spec.cur);
+  const gross      = mv(salesM,'총매출',   spec.cur);
+  const net        = mv(salesM,'순매출',   spec.cur);
+  const netAchievementRaw   = mvAlias(salesM,['달성률','달성율','달성률(순매출)','순매출 달성률','순매출달성률'], spec.cur, pct);
+  const grossAchievementRaw = mvAlias(salesM,['총매출 달성률','총매출달성률','달성률(총매출)','Gross Achievement'], spec.cur, pct);
   return {
     month: label, quarter,
-    target:       mv(salesM,'목표매출',   spec.cur),
-    gross:        mv(salesM,'총매출',     spec.cur),
+    target,
+    gross,
     grossPrev:    mv(salesM,'총매출',     spec.prev),
     grossYoY:     mv(salesM,'총매출',     spec.yoy, pct),
-    achievement:  mvAlias(salesM,['달성률','달성율'],  spec.cur, pct),
-    net:          mv(salesM,'순매출',     spec.cur),
+    achievement:  netAchievementRaw || (target ? net / target * 100 : 0),
+    grossAchievement: grossAchievementRaw || (target ? gross / target * 100 : 0),
+    net,
     netPrev:      mv(salesM,'순매출',     spec.prev),
     netYoY:       mv(salesM,'순매출',     spec.yoy, pct),
     usage:        mvAlias(salesM,['총사용','사용건수','총이용'],          spec.cur),
@@ -289,7 +296,7 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
       const mrrVal = mv(mrrM, 'MRR', spec.cur);
       const retVal = mv(subM, '유지', spec.cur);
       if (mrrVal > 0 && retVal > 0) return mrrVal / retVal;
-      const nVal = mv(salesM, '순매출', spec.cur);
+      const nVal = net;
       const uVal = mvAlias(salesM, ['총사용','사용건수','총이용'], spec.cur);
       return (nVal > 0 && uVal > 0) ? nVal / uVal : 0;
     })(),
@@ -367,6 +374,7 @@ function parseOps(rows) {
     // col15-16: null
     // ────────────────────────────────────────────────────────────────
 
+    const target       = num(rows[i][1]);
     const gross        = num(rows[i][2]);
     const net          = num(rows[i][4]);
     const usageVal     = num(rows[i][5]);
@@ -394,11 +402,13 @@ function parseOps(rows) {
     // ★ Change 1: 설계기준 가동률 (utilizationRaw) = usage / STORE_CAPACITY_RAW * 100
     const utilizationRaw = (STORE_CAPACITY_RAW[name] && STORE_CAPACITY_RAW[name] > 0)
       ? usageVal / STORE_CAPACITY_RAW[name] * 100 : 0;
+    const netAchievement = pct(rows[i][3]) || (target > 0 ? net / target * 100 : 0);
 
     items.push({
       name,
-      target:         num(rows[i][1]),  gross,
-      achievement:    pct(rows[i][3]),  net,
+      target,         gross,
+      achievement:    netAchievement,  net,
+      grossAchievement: target > 0 ? gross / target * 100 : 0,
       discountAmount, discountShare, hasDiscountData: false,
       refundAmount: Math.max(0, gross - net),
       usage:          usageVal,         utilization: utilizationVal,
@@ -480,7 +490,8 @@ function aggMonths(months) {
     target:t.target, gross:t.gross, net:t.net,
     grossYoY: t.comparableGrossPrev?(t.comparableGross-t.comparableGrossPrev)/t.comparableGrossPrev*100:0,
     netYoY:   t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
-    achievement: t.target?t.gross/t.target*100:0,
+    achievement: t.target?t.net/t.target*100:0,
+    grossAchievement: t.target?t.gross/t.target*100:0,
     usage:t.usage, retained:last.retained, retainedPrev:last.retainedPrev, newSubs:t.newSubs,
     cancelSubs:t.cancelSubs, netAdds:t.netAdds, mrr:last.mrr,
     mrrPrev:last.mrrPrev,
@@ -518,7 +529,7 @@ function filterMonths(months) {
 
 /* ── 7. 정합성 검사 ─────────────────────────────────────────── */
 // ★ 노이즈 감소 원칙:
-//  - 수치 자체의 이상치(net>gross, 달성률 200%+)만 flagging
+//  - 수치 자체의 이상치(net>gross, 순매출 달성률 200%+)만 flagging
 //  - 운영 지표(ARPU, 이탈률) 임계값은 보수적으로 적용 (false positive 최소화)
 //  - ARPU=0 은 MRR/구독 데이터가 실제로 있을 때만 flag
 //  - 파싱 이상(> 100% rate)은 운영 리스크가 아닌 '시트 형식 확인' 카테고리로 분리
@@ -530,7 +541,7 @@ function runAudit(months, opsStores) {
     if (m.gross > 0 && m.net > m.gross * 1.02)
       opIssues.push(`${m.month}: 순매출이 총매출 초과`);
     if (m.achievement > 200)
-      opIssues.push(`${m.month}: 달성률 ${fmtP(m.achievement)} — 목표값 확인 필요`);
+      opIssues.push(`${m.month}: 순매출 달성률 ${fmtP(m.achievement)} — 목표값 확인 필요`);
     // ★ v3: 가동률 >100% 경고 (보정 Capacity 기준)
     if (m.utilization > 100 && m.utilization <= 130)
       opIssues.push(`${m.month}: 가동률 ${fmtP(m.utilization)} — 보정 Capacity 초과 (Capacity 재검토 필요)`);
@@ -960,8 +971,8 @@ function renderGauges(ent) {
     : '';
 
   // [Change 2] 게이지 서브레이블 강화 — KPI 카드 레이어 제거 후 핵심 컨텍스트 통합
-  // 달성률: 목표 · 총매출
-  const achSubGross = c.gross ? ` · 총매출 ${fmtS(c.gross)}` : '';
+  // 달성률: 목표 대비 순매출
+  const achSubNet = c.net ? ` · 순매출 ${fmtS(c.net)}` : '';
   // FIX 2 — 가동률: 총사용 · 미가동 추정 (전체 시 모든 매장 합산)
   const capArrForGauge = (typeof buildCapacityData === 'function' && ent) ? buildCapacityData(ent) : [];
   const idleForGauge = ent.isAll
@@ -981,7 +992,7 @@ function renderGauges(ent) {
 
   // HTML의 element ID와 일치: gsvg-*, gval-*, gsub-*
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
-    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubGross}${achDelta}${periodLabel}`);
+    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubNet}${achDelta}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
     util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}대${utilDelta}${periodLabel}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
@@ -1013,7 +1024,7 @@ function couponUnavailableLabel(c) {
 }
 
 const KPI_TOOLTIPS = {
-  '총매출':  { formula:'목표매출 대비 총 수취 매출', benchmark:'달성률 ≥ 100% 목표' },
+  '총매출':  { formula:'환불 차감 전 총 수취 매출. 목표 달성 판단은 순매출 달성률을 우선 적용', benchmark:'총매출 달성률은 보조 지표' },
   '순매출':  { formula:'순매출 = 총매출 − 환불 · 정가 추정 매출 = 총매출 + 쿠폰할인', benchmark:'쿠폰할인율은 정가 추정 매출 대비 · 환불율 < 5%' },
   'MRR':    { formula:'월 정기 구독 매출 합계', benchmark:'YoY +10% 이상 = 성장 안정' },
   '가동률':  { formula:'ops 집계 시트 기준 (실제 세차 대수 ÷ 운영 Capacity)\n설계·보정 Capacity 기준은 심층 분석에 병기\n유휴 Capacity와 기회금액 상한은 설계 Capacity 기준', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
@@ -1065,8 +1076,8 @@ function renderKpis(ent) {
 
   const kpis = [
     { label:'총매출',  val:fmtS(c.gross),
-      delta:c.grossYoY,   sub:`목표 ${fmtS(c.target||0)} · 달성 ${fmtP(c.achievement||0)}`,
-      prog:c.achievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
+      delta:c.grossYoY,   sub:`총매출 달성 ${fmtP(c.grossAchievement||0)} · 순매출 달성 ${fmtP(c.achievement||0)}`,
+      prog:c.grossAchievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
       projection: projGross ? `월말 예상 ${fmtS(projGross)}` : null },
     { label:'순매출',  val:fmtS(c.net),
       delta:c.netYoY,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 정가 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}`,
@@ -1127,12 +1138,12 @@ function renderSignals(ent) {
   const c = ent.current;
   const signals = [];
 
-  // 달성률
+  // 순매출 달성률
   const ach = c.achievement||0;
-  if (ach >= 110) signals.push({type:'ok',  title:'목표 초과 달성', text:`달성률 ${fmtP(ach)} ★`});
-  else if (ach >= 100) signals.push({type:'ok', title:'목표 달성',  text:`달성률 ${fmtP(ach)}`});
-  else if (ach >= 80)  signals.push({type:'warn',title:'목표 근접', text:`달성률 ${fmtP(ach)} — ${fmtS((c.target||0)*(1-ach/100))} 미달`});
-  else                 signals.push({type:'bad', title:'목표 미달', text:`달성률 ${fmtP(ach)} — 즉시 점검 필요`});
+  if (ach >= 110) signals.push({type:'ok',  title:'목표 초과 달성', text:`순매출 달성률 ${fmtP(ach)} ★`});
+  else if (ach >= 100) signals.push({type:'ok', title:'목표 달성',  text:`순매출 달성률 ${fmtP(ach)}`});
+  else if (ach >= 80)  signals.push({type:'warn',title:'목표 근접', text:`순매출 달성률 ${fmtP(ach)} — ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 미달`});
+  else                 signals.push({type:'bad', title:'목표 미달', text:`순매출 달성률 ${fmtP(ach)} — 즉시 점검 필요`});
 
   // 이탈률
   const churn = c.churn||0;
@@ -1189,8 +1200,8 @@ function renderInsights(ent) {
   // ★ v3: 운영 중 매장 수 동적 (오픈 전 제외)
   const _insActiveN = getActiveOpsStores().length;
   let summary = ent.isAll
-    ? `${periodInfo}${_insActiveN}개 직영점 합산 (오픈 중): 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
-    : `${periodInfo}${ent.name}: 총매출 ${fmtS(c.gross)} (${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
+    ? `${periodInfo}${_insActiveN}개 직영점 합산 (오픈 중): 순매출 ${fmtS(c.net)} / 총매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
+    : `${periodInfo}${ent.name}: 순매출 ${fmtS(c.net)} / 총매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
 
   if (ent.isAll && topStore) {
     // ★ v3: 기간 명시 — 누적 합산 기준임을 명확히
@@ -1217,7 +1228,7 @@ function renderInsights(ent) {
 
   // ── 리스크 — 문제/영향/담당/조치 구조화 ──────────────────
   const risks = [];
-  const gap = fmtS(Math.max(0,(c.target||0)-(c.gross||0)));
+  const gap = fmtS(Math.max(0,(c.target||0)-(c.net||0)));
   if ((c.churn||0) > 12)
     risks.push({lv:'critical', text:`이탈률 심각 (${fmtP(c.churn||0)})`,
       impact:`MRR 직접 손실 · 구독 기반 잠식 위험`,
@@ -1229,12 +1240,12 @@ function renderInsights(ent) {
       owner:`사업운영팀`,
       action:`리텐션 캠페인 검토 · 혜택 재설계 우선`});
   if ((c.achievement||0) < 70)
-    risks.push({lv:'critical', text:`달성률 부진 (${fmtP(c.achievement||0)})`,
+    risks.push({lv:'critical', text:`순매출 달성률 부진 (${fmtP(c.achievement||0)})`,
       impact:`목표 대비 ${gap} 미달 — 수익 직결`,
       owner:`마케팅팀 · 사업운영팀`,
       action:`채널별 원인 분석 후 집중 마케팅 캠페인 실행`});
   else if ((c.achievement||0) < 85)
-    risks.push({lv:'warning', text:`달성률 미달 (${fmtP(c.achievement||0)})`,
+    risks.push({lv:'warning', text:`순매출 달성률 미달 (${fmtP(c.achievement||0)})`,
       impact:`${gap} 추가 달성 필요`,
       owner:`마케팅팀`,
       action:`월말 집중 프로모션 · 신규 채널 테스트`});
@@ -1393,7 +1404,11 @@ function renderPerformanceChart(ent) {
           tension:0.4, order:1 },
         { type:'line', label:'MRR', data:ms.map(m=>m.mrr),
           borderColor:PALETTE.amber, borderWidth:2.5, pointRadius:4,
-          borderDash:[5,3], fill:false, tension:0.4, order:0 }
+          borderDash:[5,3], fill:false, tension:0.4, order:0 },
+        { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.achievement||0),
+          yAxisID:'y1',
+          borderColor:PALETTE.rose, borderWidth:2, pointRadius:3,
+          borderDash:[3,3], fill:false, tension:0.35, order:0 }
       ]
     },
     options: {
@@ -1402,6 +1417,7 @@ function renderPerformanceChart(ent) {
       plugins:{ legend:{position:'top',labels:{boxWidth:12,padding:14}}, tooltip:TTdefaults },
       scales:{
         y:{ ticks:{callback:fmtA}, grid:{color:'#f0ebe3'} },
+        y1:{ position:'right', min:0, suggestedMax:130, ticks:{callback:v=>`${v}%`}, grid:{drawOnChartArea:false} },
         x:{ grid:{display:false} }
       }
     }
@@ -1443,7 +1459,7 @@ function renderScoreChart(ent) {
   } else {
     // 개별: 레이더 형식으로 항목별 점수
     const c = ent.current;
-    const dims = ['달성률','가동률','이탈건전성','환불건전성','MRR성장','매출성장'];
+    const dims = ['순매출달성률','가동률','이탈건전성','환불건전성','MRR성장','매출성장'];
     const vals = [
       Math.min(100,c.achievement||0),
       Math.min(100,c.utilization||0),
@@ -1980,7 +1996,7 @@ function renderBenchmarkChart(ent) {
 
 function renderHealthChart(ent) {
   const c = ent.current;
-  const dims = ['달성률','가동률','이탈건전성','환불건전성','MRR성장','매출성장'];
+  const dims = ['순매출달성률','가동률','이탈건전성','환불건전성','MRR성장','매출성장'];
   const selVals = [
     Math.min(100,c.achievement||0),
     Math.min(100,c.utilization||0),
@@ -2113,7 +2129,7 @@ function renderScatterChart(ent) {
     : `${state.quarter === 'all' ? '선택 기간' : state.quarter} 총매출 미집계`;
   const positionSub = $('positionSub');
   if (positionSub) positionSub.textContent = stores.length
-    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (확정월)'} · 점선: 달성률 100% / 이탈률 10% · 버블 크기: 총매출`
+    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (확정월)'} · 점선: 순매출 달성률 100% / 이탈률 10% · 버블 크기: 총매출`
     : `${periodText}로 포지션 산출 제외`;
 
   const maxAchievement = Math.max(...stores.map(s=>s.achievement), 100);
@@ -2180,7 +2196,7 @@ function renderScatterChart(ent) {
         legend:{display:false},
         tooltip:{ callbacks:{
           label:(ctx)=>[
-            ` ${ctx.dataset.label}: 달성률 ${fmtP(ctx.parsed.x)} · 이탈률 ${fmtP(ctx.parsed.y)}`,
+            ` ${ctx.dataset.label}: 순매출 달성률 ${fmtP(ctx.parsed.x)} · 이탈률 ${fmtP(ctx.parsed.y)}`,
             ` 총매출 ${fmtS(ctx.dataset.gross)} · ${ctx.dataset.monthCount}개월 집계`,
             ` ${ctx.dataset.positionStatus}`
           ]
@@ -2210,7 +2226,7 @@ function renderScatterChart(ent) {
         }
       },
       scales:{
-        x:{ min:0, max:xMax, title:{display:true,text:'달성률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} },
+        x:{ min:0, max:xMax, title:{display:true,text:'순매출 달성률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} },
         y:{ min:0, max:yMax, title:{display:true,text:'이탈률 (%)'}, ticks:{callback:v=>`${v}%`}, grid:{color:'#f0ebe3'} }
       }
     }
@@ -2219,12 +2235,12 @@ function renderScatterChart(ent) {
 
 function renderMomentumChart(ent) {
   const ms = ent.months;
-  // ★ 운영 건전성 3종 특화: 달성률·가동률·이탈률 — MRR 재무 차트와 역할 분리
+  // ★ 운영 건전성 3종 특화: 순매출 달성률·가동률·이탈률 — MRR 재무 차트와 역할 분리
   mkChart('momentumChart', {
     data:{
       labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
-        { type:'line', label:'달성률 %', data:ms.map(m=>m.achievement||0),
+        { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.achievement||0),
           borderColor:PALETTE.accent, borderWidth:2.5, pointRadius:4,
           fill:true, backgroundColor:makeGrad(null,143,66,25,.13,0), tension:0.4 },
         { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization||0),
@@ -2249,7 +2265,7 @@ function renderMomentumChart(ent) {
   const momArt = $('momentumTitle')?.closest('article');
   if (momArt) {
     const sub = momArt.querySelector('.sub');
-    if (sub) sub.textContent = '달성률 · 가동률 · 이탈률 — 운영 건전성 3종 월별 흐름';
+    if (sub) sub.textContent = '순매출 달성률 · 가동률 · 이탈률 — 운영 건전성 3종 월별 흐름';
   }
 }
 
@@ -2343,12 +2359,12 @@ function renderHeroKpis(ent) {
   const el = $('heroKpiStrip');
   if (!el) return;
   const items = [
-    { label:'총매출', val: fmtS(c.gross), note: `목표대비 ${fmtP(c.achievement||0)}`, good: (c.achievement||0)>=100 },
+    { label:'총매출', val: fmtS(c.gross), note: `총매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
     { label:'MRR',   val: fmtS(c.mrr||0), note: `MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`, good: (c.mrrYoY||0)>=0 },
     { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}대 사용`, good: (c.utilization||0)>=70 },
     { label:'이탈률', val: fmtP(c.churn||0), note: `해지 ${fmtN(c.cancelSubs||0)}건`, good: (c.churn||0)<8, invert:true },
     { label:'순증감', val: `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, note: `신규 ${fmtN(c.newSubs||0)} − 해지 ${fmtN(c.cancelSubs||0)}`, good: (c.netAdds||0)>=0 },
-    { label:'달성률', val: fmtP(c.achievement||0), note: `목표 ${fmtS(c.target||0)}`, good: (c.achievement||0)>=100 }
+    { label:'순매출 달성률', val: fmtP(c.achievement||0), note: `순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`, good: (c.achievement||0)>=100 }
   ];
   el.innerHTML = items.map(it => {
     const color = it.invert ? (it.good?'#1d6450':'#ae3f4d') : (it.good?'#1d6450':'#b87030');
@@ -2432,8 +2448,8 @@ function renderAlerts(ent) {
   const el = $('alertStrip');
   if (!el) return;
   const alerts = [];
-  if ((c.achievement||0) < 80)   alerts.push({ lvl:'danger',  msg: `⚠ 달성률 ${fmtP(c.achievement||0)} — 목표 80% 미달. 즉각 점검 필요` });
-  else if ((c.achievement||0) >= 100) alerts.push({ lvl:'success', msg: `✓ 달성률 ${fmtP(c.achievement||0)} — 목표 초과 달성` });
+  if ((c.achievement||0) < 80)   alerts.push({ lvl:'danger',  msg: `⚠ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 80% 미달. 즉각 점검 필요` });
+  else if ((c.achievement||0) >= 100) alerts.push({ lvl:'success', msg: `✓ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 초과 달성` });
   if ((c.utilization||0) > 110)  alerts.push({ lvl:'info',    msg: `ℹ 가동률 ${fmtP(c.utilization||0)} — 100% 초과, 설비 과부하 모니터링 권장` });
   else if ((c.utilization||0) < 50) alerts.push({ lvl:'danger', msg: `⚠ 가동률 ${fmtP(c.utilization||0)} — 50% 미달, 운영 효율화 필요` });
   if ((c.churn||0) > 10)         alerts.push({ lvl:'danger',  msg: `⚠ 이탈률 ${fmtP(c.churn||0)} — 긴급 해지 방어 캠페인 검토` });
@@ -3284,7 +3300,7 @@ function renderHeatmap(ent) {
 
   // ★ 기본 5개 지표 + 선택적 3개
   const metricsCore = [
-    { key:'achievement',   label:'달성률',   fmt:fmtP,  inv:false },
+    { key:'achievement',   label:'순매출 달성률',   fmt:fmtP,  inv:false },
     { key:'utilization',   label:'가동률',   fmt:fmtP,  inv:false },
     { key:'churn',         label:'이탈률',   fmt:fmtP,  inv:true  },
     { key:'refundRate',    label:'환불율',   fmt:fmtP,  inv:true  },
@@ -3566,10 +3582,10 @@ function renderDetail(ent) {
 
   // 기본 지표 그리드
   const items = [
-    { label:'총매출',    val:fmtS(c.gross),         sub:`목표 ${fmtS(c.target||0)}` },
+    { label:'총매출',    val:fmtS(c.gross),         sub:`총매출 달성 ${fmtP(c.grossAchievement||0)}` },
     { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `총매출−환불 · 쿠폰할인 정가 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `총매출−환불 · ${couponUnavailableLabel(c)}` },
     { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
-    { label:'달성률',   val:fmtP(c.achievement||0),  sub:`목표 ${fmtS(c.target||0)}` },
+    { label:'순매출 달성률',   val:fmtP(c.achievement||0),  sub:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}` },
     { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
         const capAll = buildCapacityData(ent);
         const cr = ent.isAll
@@ -3632,8 +3648,8 @@ function renderDetail(ent) {
   const netAdds = c.netAdds || 0;
   const capRow = buildCapacityData(ent)[0] || {};
 
-  if (ach < 80)     issues.push({ sev:'critical', text:`목표 달성률 부진 (${fmtP(ach)}) — 현재 ${fmtS(c.gross)} vs 목표 ${fmtS(c.target||0)}` });
-  else if (ach < 95) issues.push({ sev:'warning',  text:`달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 남음` });
+  if (ach < 80)     issues.push({ sev:'critical', text:`순매출 달성률 부진 (${fmtP(ach)}) — 현재 순매출 ${fmtS(c.net)} vs 목표 ${fmtS(c.target||0)}` });
+  else if (ach < 95) issues.push({ sev:'warning',  text:`순매출 달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 남음` });
 
   // 이탈 임계값: 15%+ 심각 / 10~15% 위험 / 6~10% 주의
   if (churn > 15)     issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 긴급 대응 필요` });
@@ -3667,7 +3683,7 @@ function renderDetail(ent) {
   const recActions = [];
   if (churn > 6)   recActions.push('구독 만료 전 리텐션 메시지 발송 (할인 쿠폰·혜택 강조)');
   if (util < 65)   recActions.push('미가동 시간대 특가 프로모션 또는 기업 제휴 세차 패키지 도입 검토');
-  if (ach < 90)    recActions.push('달성률 개선: 월 중순 집중 마케팅 캠페인 및 신규 채널 테스트');
+  if (ach < 90)    recActions.push('순매출 달성률 개선: 월 중순 집중 마케팅 캠페인 및 신규 채널 테스트');
   if (refund > 8)  recActions.push('환불 클레임 항목별 분류 후 서비스 프로세스 개선 적용');
   if (netAdds < 0) recActions.push('신규 유입 채널 강화: 지역 SNS 광고·아파트 단지 제휴 확대');
   if (!recActions.length) recActions.push('현재 지표 유지: 이탈률·가동률 주간 모니터링 지속');
@@ -3735,13 +3751,13 @@ function renderActionCenter(ent) {
   const deadline3d  = fmt2d(d3);
   const deadlineWk  = fmt2d(dWk);
 
-  if (ach < 70)       actions.push({ level:'critical', text:`달성률 ${fmtP(ach)} — 매출 채널별 원인 분석 즉시 필요`,
+  if (ach < 70)       actions.push({ level:'critical', text:`순매출 달성률 ${fmtP(ach)} — 매출 채널별 원인 분석 즉시 필요`,
     dri:'마케팅팀', deadline:deadline3d,
-    kpi:`달성률 80% 이상`,
-    confirm:`3일 내 달성률 5%p 이상 반등 확인` });
-  else if (ach < 90)  actions.push({ level:'warning',  text:`달성률 ${fmtP(ach)} — 월말까지 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 추가 달성 필요`,
+    kpi:`순매출 달성률 80% 이상`,
+    confirm:`3일 내 순매출 달성률 5%p 이상 반등 확인` });
+  else if (ach < 90)  actions.push({ level:'warning',  text:`순매출 달성률 ${fmtP(ach)} — 월말까지 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 추가 달성 필요`,
     dri:'마케팅팀', deadline:deadlineEOM,
-    kpi:`달성률 90% 이상`,
+    kpi:`순매출 달성률 90% 이상`,
     confirm:`7일 내 주간 매출 전주 대비 10% 이상 증가` });
 
   const churn = c.churn || 0;
@@ -3828,7 +3844,7 @@ function renderActionCenter(ent) {
     if (dangerTitleEl) dangerTitleEl.textContent = `${ent.name} 운영 현황`;
     const score  = computeScore(c);
     const sIssues = [];
-    if ((c.achievement||0) < 80)  sIssues.push(`달성률 ${fmtP(c.achievement||0)}`);
+    if ((c.achievement||0) < 80)  sIssues.push(`순매출 달성률 ${fmtP(c.achievement||0)}`);
     if ((c.churn||0)       > 8)   sIssues.push(`이탈 ${fmtP(c.churn||0)}`);
     if ((c.utilization||0) < 60)  sIssues.push(`가동 ${fmtP(c.utilization||0)}`);
     if ((c.refundRate||0)  > 10)  sIssues.push(`환불 ${fmtP(c.refundRate||0)}`);
@@ -3837,7 +3853,7 @@ function renderActionCenter(ent) {
     const sWarnings = [];
     if ((c.churn||0) > 6  && (c.churn||0)     <= 8)  sWarnings.push(`이탈 경계 ${fmtP(c.churn||0)}`);
     if ((c.refundRate||0) > 5 && (c.refundRate||0) <= 10) sWarnings.push(`환불 경계 ${fmtP(c.refundRate||0)}`);
-    if ((c.achievement||0) >= 80 && (c.achievement||0) < 90) sWarnings.push(`달성률 ${fmtP(c.achievement||0)} 점검`);
+    if ((c.achievement||0) >= 80 && (c.achievement||0) < 90) sWarnings.push(`순매출 달성률 ${fmtP(c.achievement||0)} 점검`);
     // ★ 이슈 없음 vs 경계 vs 정상에 따른 맥락 문구
     const issueText = sIssues.length
       ? sIssues.join(' · ')
@@ -3864,7 +3880,7 @@ function renderActionCenter(ent) {
       const agg    = aggMonths(filtMs) || {};
       const score = computeScore(agg);
       const issues = [];
-      if ((agg.achievement||0) < 80)  issues.push(`달성률 ${fmtP(agg.achievement||0)}`);
+      if ((agg.achievement||0) < 80)  issues.push(`순매출 달성률 ${fmtP(agg.achievement||0)}`);
       if ((agg.churn||0)       > 8)   issues.push(`이탈 ${fmtP(agg.churn||0)}`);
       if ((agg.utilization||0) < 60)  issues.push(`가동 ${fmtP(agg.utilization||0)}`);
       if ((agg.refundRate||0)  > 10)  issues.push(`환불 ${fmtP(agg.refundRate||0)}`);
@@ -3888,8 +3904,8 @@ function renderActionCenter(ent) {
       else if (churn > 6)                 rc.push({ score:50,  cause:`이탈 주의(${fmtP(churn)})`, action:'해지 고객 설문 집계', dri_:'BizOps 리텐션 담당' });
       if (refund > 15)                    rc.push({ score:120, cause:`환불 심각(${fmtP(refund)})`, action:'CS 티켓 유형별 분류 · 환불 방어 프로세스 점검', dri_:'CS 담당' });
       else if (refund > 8)                rc.push({ score:80,  cause:`환불 위험(${fmtP(refund)})`, action:'환불 사유 태깅 · 서비스 품질 점검', dri_:'CS 담당' });
-      if (ach < 70)                       rc.push({ score:110, cause:`목표 미달 심각(달성률 ${fmtP(ach)})`, action:'가격·프로모션 긴급 검토', dri_:'BizOps 영업 담당' });
-      else if (ach < 80)                  rc.push({ score:70,  cause:`목표 미달(달성률 ${fmtP(ach)})`, action:'채널별 전환율 분석', dri_:'BizOps 영업 담당' });
+      if (ach < 70)                       rc.push({ score:110, cause:`목표 미달 심각(순매출 달성률 ${fmtP(ach)})`, action:'가격·프로모션 긴급 검토', dri_:'BizOps 영업 담당' });
+      else if (ach < 80)                  rc.push({ score:70,  cause:`목표 미달(순매출 달성률 ${fmtP(ach)})`, action:'채널별 전환율 분석', dri_:'BizOps 영업 담당' });
       if (util < 60 && utilRaw <= 100)    rc.push({ score:65,  cause:`저가동(${fmtP(util)})`, action:'예약 채널 점검 · 피크 마케팅 집행', dri_:'Field Ops 담당' });
 
       if (rc.length) {
@@ -4021,8 +4037,8 @@ function renderInlineStoreDetail(ent) {
   const netAdds= c.netAdds     || 0;
   const capRow = buildCapacityData(ent)[0] || {};
 
-  if (ach < 80)     issues.push({ sev:'critical', text:`목표 달성률 부진 (${fmtP(ach)}) — 목표 대비 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 미달` });
-  else if (ach < 95) issues.push({ sev:'warning',  text:`달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.gross||0)))} 남음` });
+  if (ach < 80)     issues.push({ sev:'critical', text:`순매출 달성률 부진 (${fmtP(ach)}) — 목표 대비 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 미달` });
+  else if (ach < 95) issues.push({ sev:'warning',  text:`순매출 달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 남음` });
   if      (churn > 15) issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 긴급 대응` });
   else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 즉각 점검` });
   else if (churn > 6) issues.push({ sev:'warning', text:`이탈률 ${fmtP(churn)} — 유지 구독자 이탈 경계` });
@@ -4051,7 +4067,7 @@ function renderInlineStoreDetail(ent) {
   const recs = [];
   if (churn > 6)   recs.push('구독 만료 전 리텐션 메시지 발송 (할인 쿠폰·혜택 강조)');
   if (util < 65)   recs.push('미가동 시간대 특가 프로모션 또는 기업 제휴 세차 패키지 검토');
-  if (ach < 90)    recs.push('달성률 개선: 월 중순 집중 마케팅 캠페인 및 신규 채널 테스트');
+  if (ach < 90)    recs.push('순매출 달성률 개선: 월 중순 집중 마케팅 캠페인 및 신규 채널 테스트');
   if (refund > 8)  recs.push('환불 클레임 항목별 분류 후 서비스 프로세스 개선 적용');
   if (netAdds < 0) recs.push('신규 유입 채널 강화: 지역 SNS 광고·아파트 단지 제휴 확대');
   if (!recs.length) recs.push('현재 지표 유지: 이탈률·가동률 주간 모니터링 지속');
@@ -4070,8 +4086,8 @@ function renderInlineStoreDetail(ent) {
 
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">
       ${[
-        {l:'총매출',      v:fmtS(c.gross),        s:`목표 ${fmtS(c.target||0)}`},
-        {l:'달성률',      v:fmtP(ach),             s:`목표 대비 ${ach>=100?'초과':'미달'}`},
+        {l:'총매출',      v:fmtS(c.gross),        s:`총매출 달성 ${fmtP(c.grossAchievement||0)}`},
+        {l:'순매출 달성률',      v:fmtP(ach),             s:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`},
         {l:'운영 가동률', v:fmtP(util),            s:`기간 누적 유휴 Capacity ${fmtN(capRow.idleCount||0)}대`},
         {l:'이탈률',      v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
         {l:'순증감',   v:`${netAdds>=0?'+':''}${fmtN(netAdds)}`, s:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`},
