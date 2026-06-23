@@ -137,7 +137,7 @@
 
   <details style="margin-bottom:14px">
     <summary style="cursor:pointer;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);font-size:12.5px;font-weight:700;color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px">
-      <span>▶</span> 상세 KPI 카드 (총매출·순매출·MRR·가동률·이탈률·순증감 월별 스파크라인)
+      <span>▶</span> 상세 KPI 카드 (실결제매출·순매출·MRR·가동률·이탈률·순증감 월별 스파크라인)
     </summary>
     <section class="kpis" id="kpiGrid" style="margin-top:8px"></section>
   </details>
@@ -160,7 +160,7 @@
 
   <div class="chart-master-grid">
     <article class="panel col-8">
-      <div class="section-header"><div><h2>매출 콕핏</h2><p class="sub" style="margin-bottom:0">목표·총매출·순매출·순매출 달성률·MRR 월별 추적</p></div><span class="section-tag live">5MIN SYNC</span></div>
+      <div class="section-header"><div><h2>매출 콕핏</h2><p class="sub" style="margin-bottom:0">목표·실결제매출·순매출·순매출 달성률·MRR 월별 추적</p></div><span class="section-tag live">5MIN SYNC</span></div>
       <div class="chart xl"><canvas id="performanceChart"></canvas></div>
     </article>
     <article class="panel col-4">
@@ -237,7 +237,7 @@
     </article>
     <article class="panel col-6">
       <div class="chart-section-head">
-        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">정가 추정 매출 → 쿠폰할인 → 총매출 → 환불 → 순매출</p></div>
+        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">정가 추정 매출 → 쿠폰할인 → 실결제매출 → 환불 → 순매출</p></div>
         <button class="collapse-toggle" data-target="bridgeWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="bridgeWrap" class="collapsible-content">
@@ -246,7 +246,7 @@
     </article>
     <article class="panel col-4">
       <h2>매장 벤치마크 랭킹</h2>
-      <p class="sub">총매출 순위 + 순매출 달성률 비교 — 행 클릭으로 선택 (운영 중 매장만 · 오픈예정 제외)</p>
+      <p class="sub">실결제매출 순위 + 순매출 달성률 비교 — 행 클릭으로 선택 (운영 중 매장만 · 오픈예정 제외)</p>
       <div id="rankStripSub" style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600"></div>
       <div id="rankStrip" class="rank-strip"></div>
     </article>
@@ -276,7 +276,7 @@
     </article>
     <article class="panel col-4">
       <div class="chart-section-head">
-        <div><h2 id="positionTitle">포지션 맵</h2><p class="sub" id="positionSub">매출 집계 월 기준 · 순매출 달성률(X)·이탈률(Y)·총매출(버블)</p></div>
+        <div><h2 id="positionTitle">포지션 맵</h2><p class="sub" id="positionSub">매출 집계 월 기준 · 순매출 달성률(X)·이탈률(Y)·실결제매출(버블)</p></div>
         <button class="collapse-toggle" data-target="scatterWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="scatterWrap" class="collapsible-content">
@@ -285,7 +285,7 @@
     </article>
     <article class="panel col-4">
       <div class="chart-section-head">
-        <div><h2 id="momentumTitle">YoY 성장 모멘텀</h2><p class="sub">총매출·순매출·가동률 전년 동기 대비</p></div>
+        <div><h2 id="momentumTitle">YoY 성장 모멘텀</h2><p class="sub">실결제매출·순매출·가동률 전년 동기 대비</p></div>
         <button class="collapse-toggle" data-target="momentumWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="momentumWrap" class="collapsible-content">
@@ -334,7 +334,7 @@
         <table>
           <thead><tr>
             <th style="text-align:left">매장</th>
-            <th>총매출</th><th>순매출 달성률</th><th>순매출</th>
+            <th>실결제매출</th><th>순매출 달성률</th><th>순매출</th>
             <th>총사용</th><th title="설계기준% (보정기준%)">가동률 설계(보정)</th><th>환불율</th>
             <th>순증감</th><th>ARPU (원)</th><th>상태</th>
           </tr></thead>

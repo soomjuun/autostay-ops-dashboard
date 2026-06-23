@@ -247,6 +247,23 @@ function mvAlias(map, keys, col, fn=num) {
   return 0;
 }
 
+const GROSS_REVENUE_KEYS = [
+  '실결제매출(구 총매출)',
+  '실결제매출',
+  '총매출',
+  'Gross Revenue',
+  'Paid Revenue'
+];
+const GROSS_ACHIEVEMENT_KEYS = [
+  '실결제매출 달성률',
+  '실결제매출달성률',
+  '달성률(실결제매출)',
+  '총매출 달성률',
+  '총매출달성률',
+  '달성률(총매출)',
+  'Gross Achievement'
+];
+
 function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
   const retained   = mv(subM, '유지', spec.cur);
   const cancelSubs = mv(subM, '해지', spec.cur);
@@ -254,16 +271,16 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
   const churnRaw   = mvAlias(subM, ['이탈률','이탈율','이탈율(%)','이탈률(%)'], spec.cur, pct);
   const churn      = churnRaw > 0 ? churnRaw : (retained > 0 && cancelSubs > 0 ? cancelSubs / retained * 100 : 0);
   const target     = mv(salesM,'목표매출', spec.cur);
-  const gross      = mv(salesM,'총매출',   spec.cur);
+  const gross      = mvAlias(salesM, GROSS_REVENUE_KEYS, spec.cur);
   const net        = mv(salesM,'순매출',   spec.cur);
   const netAchievementRaw   = mvAlias(salesM,['달성률','달성율','달성률(순매출)','순매출 달성률','순매출달성률'], spec.cur, pct);
-  const grossAchievementRaw = mvAlias(salesM,['총매출 달성률','총매출달성률','달성률(총매출)','Gross Achievement'], spec.cur, pct);
+  const grossAchievementRaw = mvAlias(salesM, GROSS_ACHIEVEMENT_KEYS, spec.cur, pct);
   return {
     month: label, quarter,
     target,
     gross,
-    grossPrev:    mv(salesM,'총매출',     spec.prev),
-    grossYoY:     mv(salesM,'총매출',     spec.yoy, pct),
+    grossPrev:    mvAlias(salesM, GROSS_REVENUE_KEYS, spec.prev),
+    grossYoY:     mvAlias(salesM, GROSS_REVENUE_KEYS, spec.yoy, pct),
     achievement:  netAchievementRaw || (target ? net / target * 100 : 0),
     grossAchievement: grossAchievementRaw || (target ? gross / target * 100 : 0),
     net,
@@ -542,7 +559,7 @@ function runAudit(months, opsStores) {
 
   months.forEach(m => {
     if (m.gross > 0 && m.net > m.gross * 1.02)
-      opIssues.push(`${m.month}: 순매출이 총매출 초과`);
+      opIssues.push(`${m.month}: 순매출이 실결제매출 초과`);
     if (m.achievement > 200)
       opIssues.push(`${m.month}: 순매출 달성률 ${fmtP(m.achievement)} — 목표값 확인 필요`);
     // ★ v3: 가동률 >100% 경고 (보정 Capacity 기준)
@@ -557,7 +574,7 @@ function runAudit(months, opsStores) {
       if (diff < 0.01) opIssues.push(`${m.month}: 쿠폰할인율·환불율 동일값(${fmtP(m.refundRate)}) — 컬럼 매핑 확인 필요`);
     }
     if ((m.unmappedCouponDiscount||0) > 0)
-      fmtIssues.push(`${m.month}: 쿠폰할인 ${fmtS(m.unmappedCouponDiscount)} 있으나 총매출 0원 — 정가 대비 할인율 산출 제외`);
+      fmtIssues.push(`${m.month}: 쿠폰할인 ${fmtS(m.unmappedCouponDiscount)} 있으나 실결제매출 0원 — 정가 대비 할인율 산출 제외`);
   });
 
   // ★ v3: 매출 합산 정합성 체크 (전체 합산 vs 개별 매장 합산 ±0.5%)
@@ -650,7 +667,7 @@ function parseSummary(rows) {
   };
   const updatedRow = rows.find(r => tx(r[0]).startsWith('업데이트'));
   return {
-    totalGross:   get(['누적 총매출','총매출','매출합계','Total Revenue','total_gross']),
+    totalGross:   get(['누적 실결제매출(구 총매출)','누적 실결제매출','실결제매출(구 총매출)','실결제매출','누적 총매출','총매출','매출합계','Total Revenue','total_gross']),
     totalNet:     get(['누적 순매출','순매출','Net Revenue']),
     totalMrr:     get(['MRR','월정기매출']),
     avgUtilization: getPct(['가동률','평균가동률','Utilization']),
@@ -1034,13 +1051,13 @@ function couponCoverageSuffix(c) {
 
 function couponUnavailableLabel(c) {
   return (c.couponSourceMonths||0) > 0
-    ? `총매출 미집계로 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 정가 대비 산출 제외`
+    ? `실결제매출 미집계로 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 정가 대비 산출 제외`
     : '매장별 쿠폰할인 미배분';
 }
 
 const KPI_TOOLTIPS = {
-  '총매출':  { formula:'환불 차감 전 총 수취 매출. 목표 달성 판단은 순매출 달성률을 우선 적용', benchmark:'총매출 달성률은 보조 지표' },
-  '순매출':  { formula:'순매출 = 총매출 − 환불 · 정가 추정 매출 = 총매출 + 쿠폰할인', benchmark:'쿠폰할인율은 정가 추정 매출 대비 · 환불율 < 5%' },
+  '실결제매출':  { formula:'환불 차감 전 실결제 기준 매출. 목표 달성 판단은 순매출 달성률을 우선 적용', benchmark:'실결제매출 달성률은 보조 지표' },
+  '순매출':  { formula:'순매출 = 실결제매출 − 환불 · 정가 추정 매출 = 실결제매출 + 쿠폰할인', benchmark:'쿠폰할인율은 정가 추정 매출 대비 · 환불율 < 5%' },
   'MRR':    { formula:'월 정기 구독 매출 합계', benchmark:'YoY +10% 이상 = 성장 안정' },
   '가동률':  { formula:'ops 집계 시트 기준 (실제 세차 대수 ÷ 운영 Capacity)\n설계·보정 Capacity 기준은 심층 분석에 병기\n유휴 Capacity와 기회금액 상한은 설계 Capacity 기준', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
   '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
@@ -1090,8 +1107,8 @@ function renderKpis(ent) {
     ? lastM.gross / monthProg : null;
 
   const kpis = [
-    { label:'총매출',  val:fmtS(c.gross),
-      delta:c.grossYoY,   sub:`총매출 달성 ${fmtP(c.grossAchievement||0)} · 순매출 달성 ${fmtP(c.achievement||0)}`,
+    { label:'실결제매출',  val:fmtS(c.gross),
+      delta:c.grossYoY,   sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)} · 순매출 달성 ${fmtP(c.achievement||0)}`,
       prog:c.grossAchievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
       projection: projGross ? `월말 예상 ${fmtS(projGross)}` : null },
     { label:'순매출',  val:fmtS(c.net),
@@ -1215,8 +1232,8 @@ function renderInsights(ent) {
   // ★ v3: 운영 중 매장 수 동적 (오픈 전 제외)
   const _insActiveN = getActiveOpsStores().length;
   let summary = ent.isAll
-    ? `${periodInfo}${_insActiveN}개 직영점 합산 (오픈 중): 순매출 ${fmtS(c.net)} / 총매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
-    : `${periodInfo}${ent.name}: 순매출 ${fmtS(c.net)} / 총매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
+    ? `${periodInfo}${_insActiveN}개 직영점 합산 (오픈 중): 순매출 ${fmtS(c.net)} / 실결제매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
+    : `${periodInfo}${ent.name}: 순매출 ${fmtS(c.net)} / 실결제매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
 
   if (ent.isAll && topStore) {
     // ★ v3: 기간 명시 — 누적 합산 기준임을 명확히
@@ -1234,7 +1251,7 @@ function renderInsights(ent) {
         summary += ` (최근월 ${latestM.month} MTD vs ${prevLabel} 확정 기준 ${momGross>=0?'+':''}${momGross.toFixed(1)}% — 경과일 차이 있음).`;
       } else if (ms.length === 2) {
         // 2개월 비교일 때만 MoM 표기 (명확한 맥락)
-        summary += ` ${prev.month} 대비 ${latestM.month} 총매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM.`;
+        summary += ` ${prev.month} 대비 ${latestM.month} 실결제매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM.`;
       }
       // 3개월+ 누적 화면에서는 MoM 숫자 생략 — 월별 카드에서 확인
     }
@@ -1412,7 +1429,7 @@ function renderPerformanceChart(ent) {
         { type:'bar', label:'목표매출', data:ms.map(m=>m.target),
           backgroundColor:'rgba(36,52,79,0.12)', borderColor:PALETTE.navy, borderWidth:1.5,
           borderRadius:4, order:2 },
-        { type:'bar', label:'총매출', data:ms.map(m=>m.gross),
+        { type:'bar', label:'실결제매출', data:ms.map(m=>m.gross),
           backgroundColor:makeGrad(null,143,66,25,0.80,0.55),
           borderColor:PALETTE.accent, borderWidth:0, borderRadius:5, order:3 },
         { type:'line', label:'순매출', data:ms.map(m=>m.net),
@@ -1727,7 +1744,7 @@ function renderOpsArpuChart(ent) {
     const h2 = arpuArt.querySelector('h2');
     const sub = arpuArt.querySelector('.sub');
     if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·ARPU 수익성' : `③ ARPU 수익성 · ${hasCouponSourceData ? '쿠폰할인율 산출 제외' : '매장별 쿠폰할인 미배분'}`;
-    if (sub) sub.textContent = hasDiscountData ? '정가 추정 대비 쿠폰할인율(%) · ARPU(원)' : `ARPU 월별 추이 · ${hasCouponSourceData ? '총매출 미집계' : '쿠폰 원천에 매장 ID 없음'}`;
+    if (sub) sub.textContent = hasDiscountData ? '정가 추정 대비 쿠폰할인율(%) · ARPU(원)' : `ARPU 월별 추이 · ${hasCouponSourceData ? '실결제매출 미집계' : '쿠폰 원천에 매장 ID 없음'}`;
   }
   mkChart('opsArpuChart', {
     data:{
@@ -1790,7 +1807,7 @@ function renderOpsArpuStats(ent) {
         }).join('')}
       </tbody>
     </table>
-    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 쿠폰할인율은 정가 추정 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 총매출 0원 월 산출 제외' : ''}` : ` · ${hasCouponSourceData ? '총매출 미집계로 쿠폰할인율 산출 제외' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
+    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 쿠폰할인율은 정가 추정 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 실결제매출 0원 월 산출 제외' : ''}` : ` · ${hasCouponSourceData ? '실결제매출 미집계로 쿠폰할인율 산출 제외' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -1846,14 +1863,14 @@ function renderBridgeChart(ent) {
   const otherDeduction = Math.max(0, afterSaleDeduction - refundVal);
 
 
-  // ★ 절대값 6-bar 방식 — 쿠폰할인은 정가 추정 매출에서 총매출로 내려오는 차감으로 분리
+  // ★ 절대값 6-bar 방식 — 쿠폰할인은 정가 추정 매출에서 실결제매출로 내려오는 차감으로 분리
   //   Floating/Stack 방식의 Chart.js 렌더링 버그 완전 제거
   //   매장별 원천이 없는 경우 쿠폰할인은 0원으로 표시하고 임의 배분하지 않는다.
   const barData   = [listPriceRevenue, discount, gross, refundVal, otherDeduction, net];
   const barColors = [
     'rgba(90,63,140,.82)',   // violet — 정가 추정 매출
     'rgba(178,76,88,.82)',   // rose  — 쿠폰할인
-    'rgba(36,52,79,.85)',    // navy  — 총매출
+    'rgba(36,52,79,.85)',    // navy  — 실결제매출
     'rgba(192,110,80,.78)',  // amber — 환불
     'rgba(192,123,72,.75)',  // amber — 기타 차감
     'rgba(33,101,82,.88)'    // green — 순매출
@@ -1863,7 +1880,7 @@ function renderBridgeChart(ent) {
   const pctLabel = v => pctBase > 0 ? `${((v/pctBase)*100).toFixed(1)}%` : '';
 
   // 화살표 서브레이블 (X축 레이블 아래)
-  const arrowLabels = [c.hasDiscountData ? '정가 추정' : '총매출', '(−) 쿠폰할인', '총매출', '(−) 환불', '(−) 기타', '순매출'];
+  const arrowLabels = [c.hasDiscountData ? '정가 추정' : '실결제매출', '(−) 쿠폰할인', '실결제매출', '(−) 환불', '(−) 기타', '순매출'];
 
   mkChart('bridgeChart', {
     type:'bar',
@@ -1890,7 +1907,7 @@ function renderBridgeChart(ent) {
             label: ctx => {
               const v = +ctx.raw || 0;
               if (!v && ctx.dataIndex !== barData.length - 1) return ['해당 없음 (0원)'];
-              return [`금액: ${fmtS(v)}`, `${c.hasDiscountData ? '정가 추정' : '총매출'} 대비: ${pctLabel(v)}`];
+              return [`금액: ${fmtS(v)}`, `${c.hasDiscountData ? '정가 추정' : '실결제매출'} 대비: ${pctLabel(v)}`];
             }
           }
         },
@@ -1944,10 +1961,10 @@ function renderBridgeChart(ent) {
   const bridgeSub = document.querySelector('#bridgeTitle + .sub') ||
     document.querySelector('[id="bridgeTitle"]')?.closest('article')?.querySelector('.sub');
   if (bridgeSub) {
-    const netPct = pctBase > 0 ? ` (${c.hasDiscountData ? '정가 추정' : '총매출'} 대비 ${pctLabel(net)})` : '';
+    const netPct = pctBase > 0 ? ` (${c.hasDiscountData ? '정가 추정' : '실결제매출'} 대비 ${pctLabel(net)})` : '';
     bridgeSub.textContent = c.hasDiscountData
-      ? `정가 추정 ${fmtS(listPriceRevenue)} → 쿠폰할인 ${fmtS(discount)} → 총매출 ${fmtS(gross)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}${couponCoverageSuffix(c)}`
-      : `총매출 ${fmtS(gross)} → ${couponUnavailableLabel(c)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}`;
+      ? `정가 추정 ${fmtS(listPriceRevenue)} → 쿠폰할인 ${fmtS(discount)} → 실결제매출 ${fmtS(gross)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}${couponCoverageSuffix(c)}`
+      : `실결제매출 ${fmtS(gross)} → ${couponUnavailableLabel(c)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}`;
   }
 }
 
@@ -2073,7 +2090,7 @@ function renderQuarterChart(ent) {
     data:{
       labels:['Q1 누적','Q2 누적'],
       datasets:[
-        { label:'총매출',  data:[q1.gross||0,  q2.gross||0],  backgroundColor:['rgba(36,52,79,.7)','rgba(143,66,25,.7)'],   borderRadius:6 },
+        { label:'실결제매출',  data:[q1.gross||0,  q2.gross||0],  backgroundColor:['rgba(36,52,79,.7)','rgba(143,66,25,.7)'],   borderRadius:6 },
         { label:'순매출',  data:[q1.net||0,    q2.net||0],    backgroundColor:['rgba(33,101,82,.6)','rgba(33,101,82,.85)'], borderRadius:6 },
         { label:'순증감',  data:[q1.netAdds||0,q2.netAdds||0],backgroundColor:['rgba(192,123,72,.6)','rgba(192,123,72,.85)'],borderRadius:6 }
       ]
@@ -2144,10 +2161,10 @@ function renderScatterChart(ent) {
   });
   const periodText = positionMonths.length
     ? `${positionMonths[0]}월~${positionMonths[positionMonths.length-1]}월 매출 집계 기준`
-    : `${state.quarter === 'all' ? '선택 기간' : state.quarter} 총매출 미집계`;
+    : `${state.quarter === 'all' ? '선택 기간' : state.quarter} 실결제매출 미집계`;
   const positionSub = $('positionSub');
   if (positionSub) positionSub.textContent = stores.length
-    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (확정월)'} · 점선: 순매출 달성률 100% / 이탈률 10% · 버블 크기: 총매출`
+    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (확정월)'} · 점선: 순매출 달성률 100% / 이탈률 10% · 버블 크기: 실결제매출`
     : `${periodText}로 포지션 산출 제외`;
 
   const maxAchievement = Math.max(...stores.map(s=>s.achievement), 100);
@@ -2180,7 +2197,7 @@ function renderScatterChart(ent) {
         ctx.fillStyle = '#74695d';
         ctx.font = '600 12px Pretendard, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('총매출 집계 후 포지션을 표시합니다', (chartArea.left+chartArea.right)/2, (chartArea.top+chartArea.bottom)/2);
+        ctx.fillText('실결제매출 집계 후 포지션을 표시합니다', (chartArea.left+chartArea.right)/2, (chartArea.top+chartArea.bottom)/2);
         ctx.restore();
         return;
       }
@@ -2215,7 +2232,7 @@ function renderScatterChart(ent) {
         tooltip:{ callbacks:{
           label:(ctx)=>[
             ` ${ctx.dataset.label}: 순매출 달성률 ${fmtP(ctx.parsed.x)} · 이탈률 ${fmtP(ctx.parsed.y)}`,
-            ` 총매출 ${fmtS(ctx.dataset.gross)} · ${ctx.dataset.monthCount}개월 집계`,
+            ` 실결제매출 ${fmtS(ctx.dataset.gross)} · ${ctx.dataset.monthCount}개월 집계`,
             ` ${ctx.dataset.positionStatus}`
           ]
         } },
@@ -2367,8 +2384,8 @@ function renderMixChart(ent) {
   });
   $('mixTitle').textContent = ent.isAll ? '포트폴리오 구성 분석' : `${ent.name} 구성 분석`;
   $('mixSub').textContent   = total > 0
-    ? `${c.hasDiscountData ? '정가 추정' : '총매출'} 대비 순매출 ${total?((net/total)*100).toFixed(1):'—'}% | 환불 ${fmtS(refund)} · ${c.hasDiscountData ? `쿠폰할인 ${fmtS(discount)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)}`
-    : `총매출 ${fmtS(gross)} 기준 수익 구조`;
+    ? `${c.hasDiscountData ? '정가 추정' : '실결제매출'} 대비 순매출 ${total?((net/total)*100).toFixed(1):'—'}% | 환불 ${fmtS(refund)} · ${c.hasDiscountData ? `쿠폰할인 ${fmtS(discount)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)}`
+    : `실결제매출 ${fmtS(gross)} 기준 수익 구조`;
 }
 
 /* ── 15-A. 히어로 KPI 스트립 + 메타 바 ─────────────────────────── */
@@ -2377,7 +2394,7 @@ function renderHeroKpis(ent) {
   const el = $('heroKpiStrip');
   if (!el) return;
   const items = [
-    { label:'총매출', val: fmtS(c.gross), note: `총매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
+    { label:'실결제매출', val: fmtS(c.gross), note: `실결제매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
     { label:'MRR',   val: fmtS(c.mrr||0), note: `MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`, good: (c.mrrYoY||0)>=0 },
     { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}대 사용`, good: (c.utilization||0)>=70 },
     { label:'이탈률', val: fmtP(c.churn||0), note: `해지 ${fmtN(c.cancelSubs||0)}건`, good: (c.churn||0)<8, invert:true },
@@ -3268,15 +3285,15 @@ function renderPaymentPanel(ent) {
   const ltv   = c.ltv   || 0;
 
   // 단가 추정 (available data)
-  const revenuePerWash  = usage > 0 ? gross / usage : 0;    // 총매출 / 총사용 = 건당 매출
+  const revenuePerWash  = usage > 0 ? gross / usage : 0;    // 실결제매출 / 총사용 = 건당 매출
   const netPerWash      = usage > 0 ? net   / usage : 0;    // 순매출 / 총사용 = 건당 순매출
   const mrrPerSub       = retained > 0 ? mrr / retained : 0; // MRR / 유지 구독 = 구독 ARPU
 
   const items = [
     { label:'건당 매출', val:fmtS(revenuePerWash),
-      note:`총매출 ÷ ${fmtN(usage)}대`, color:'navy' },
+      note:`실결제매출 ÷ ${fmtN(usage)}대`, color:'navy' },
     { label:'건당 순매출', val:fmtS(netPerWash),
-      note:`총매출에서 환불·기타 차감 후`, color:'green' },
+      note:`실결제매출에서 환불·기타 차감 후`, color:'green' },
     { label:'구독 ARPU', val:arpu>0?fmtS(arpu):(mrrPerSub>0?fmtS(mrrPerSub):'—'),
       note:`MRR ÷ 유지 구독자`, color:'accent' },
     { label:'목표 실현 단가', val:`${fmtN(UNIT_PRICE_TARGET)}원`,
@@ -3345,7 +3362,7 @@ function renderHeatmap(ent) {
   const metricsExtra = [
     { key:'netAdds',  label:'순증감', fmt:fmtN,  inv:false },
     { key:'arpu',     label:'ARPU',   fmt:fmtS,  inv:false },
-    { key:'gross',    label:'총매출', fmt:fmtS,  inv:false }
+    { key:'gross',    label:'실결제매출', fmt:fmtS,  inv:false }
   ];
   const metrics = _hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore;
 
@@ -3618,8 +3635,8 @@ function renderDetail(ent) {
 
   // 기본 지표 그리드
   const items = [
-    { label:'총매출',    val:fmtS(c.gross),         sub:`총매출 달성 ${fmtP(c.grossAchievement||0)}` },
-    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `총매출−환불 · 쿠폰할인 정가 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `총매출−환불 · ${couponUnavailableLabel(c)}` },
+    { label:'실결제매출',    val:fmtS(c.gross),         sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}` },
+    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `실결제매출−환불 · 쿠폰할인 정가 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `실결제매출−환불 · ${couponUnavailableLabel(c)}` },
     { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
     { label:'순매출 달성률',   val:fmtP(c.achievement||0),  sub:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}` },
     { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
@@ -3632,7 +3649,7 @@ function renderDetail(ent) {
     { label:'이탈률',   val:fmtP(c.churn||0),        sub:`해지 ${fmtN(c.cancelSubs||0)}건` },
     (()=>{
       const dRefund   = c.refundRate||0;
-      return { label:'환불율', val:fmtP(dRefund), sub:'총매출 기준' };
+      return { label:'환불율', val:fmtP(dRefund), sub:'실결제매출 기준' };
     })(),
     { label:'순증감',   val:`${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}` },
     (()=>{
@@ -3641,7 +3658,7 @@ function renderDetail(ent) {
       const badge     = noData  ? ` <span style="font-size:9px;background:#f0ebe3;color:#7a6a50;padding:1px 4px;border-radius:3px;font-weight:700">${(c.couponSourceMonths||0) > 0 ? '산출 제외' : '미배분'}</span>`
                       : '';
       const dispVal   = noData  ? '—' : fmtP(dDiscount);
-      const dispSub   = noData  ? ((c.couponSourceMonths||0) > 0 ? `총매출 미집계 · 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 정가 대비 산출 제외` : `쿠폰 원천에 매장 ID 없음`)
+      const dispSub   = noData  ? ((c.couponSourceMonths||0) > 0 ? `실결제매출 미집계 · 쿠폰할인 ${fmtS(c.unmappedCouponDiscount||0)} 정가 대비 산출 제외` : `쿠폰 원천에 매장 ID 없음`)
                       : `정가 추정 대비 · ${fmtS(c.discountAmount||0)}${couponCoverageSuffix(c)}`;
       return { label:`쿠폰할인율${badge}`, val:dispVal, sub:dispSub };
     })(),
@@ -3709,7 +3726,7 @@ function renderDetail(ent) {
     const momGross = prevM.gross > 0 ? (lastM.gross - prevM.gross) / prevM.gross * 100 : 0;
     const momUtil  = lastM.utilization - prevM.utilization;
     const momChurn = lastM.churn - prevM.churn;
-    trends.push({ label:'총매출 MoM',  val:`${momGross>=0?'+':''}${momGross.toFixed(1)}%`, good: momGross >= 0 });
+    trends.push({ label:'실결제매출 MoM',  val:`${momGross>=0?'+':''}${momGross.toFixed(1)}%`, good: momGross >= 0 });
     trends.push({ label:'가동률 변화', val:`${momUtil>=0?'+':''}${momUtil.toFixed(1)}%p`, good: momUtil >= 0 });
     trends.push({ label:'이탈률 변화', val:`${momChurn>=0?'+':''}${momChurn.toFixed(1)}%p`, good: momChurn <= 0, invert:true });
     trends.push({ label:'순증감 변화', val:`${(lastM.netAdds||0)>=0?'+':''}${lastM.netAdds||0}건`, good: (lastM.netAdds||0) >= 0 });
@@ -4093,7 +4110,7 @@ function renderInlineStoreDetail(ent) {
     const momUtil  = (lastM.utilization||0) - (prevM.utilization||0);
     const momChurn = (lastM.churn||0) - (prevM.churn||0);
     const momNetA  = (lastM.netAdds||0) - (prevM.netAdds||0);
-    trends.push({ label:'총매출 MoM',  val:`${momGross>=0?'+':''}${momGross.toFixed(1)}%`,  good:momGross>=0 });
+    trends.push({ label:'실결제매출 MoM',  val:`${momGross>=0?'+':''}${momGross.toFixed(1)}%`,  good:momGross>=0 });
     trends.push({ label:'가동률 변화', val:`${momUtil>=0?'+':''}${momUtil.toFixed(1)}%p`,   good:momUtil>=0 });
     trends.push({ label:'이탈률 변화', val:`${momChurn>=0?'+':''}${momChurn.toFixed(1)}%p`, good:momChurn<=0 });
     trends.push({ label:'순증감 변화', val:`${momNetA>=0?'+':''}${momNetA}건`,              good:momNetA>=0 });
@@ -4122,7 +4139,7 @@ function renderInlineStoreDetail(ent) {
 
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">
       ${[
-        {l:'총매출',      v:fmtS(c.gross),        s:`총매출 달성 ${fmtP(c.grossAchievement||0)}`},
+        {l:'실결제매출',      v:fmtS(c.gross),        s:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}`},
         {l:'순매출 달성률',      v:fmtP(ach),             s:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`},
         {l:'운영 가동률', v:fmtP(util),            s:`기간 누적 유휴 Capacity ${fmtN(capRow.idleCount||0)}대`},
         {l:'이탈률',      v:fmtP(churn),           s:`해지 ${fmtN(c.cancelSubs||0)}건`},
