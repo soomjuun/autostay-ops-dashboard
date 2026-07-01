@@ -32,16 +32,31 @@ const GID = {
     anseong:     { gid: 1905150076, name: "안성"  }  // ★ 2026-05-15 오픈
   }
 };
-// ★ 현재 달까지만 포함 — 아직 시작하지 않은 달은 제외 (예: 4월 기준 → 5·6월 제외)
+// ★ 현재 달까지만 포함 — 아직 시작하지 않은 달은 제외
 const TODAY_MONTH = new Date().getMonth() + 1;   // 1-12
-const MONTH_SPECS = [
+const QUARTERS = ['Q1','Q2','Q3','Q4'];
+function quarterForMonth(monthNum) {
+  return `Q${Math.ceil((+monthNum || 1) / 3)}`;
+}
+function quarterEndMonth(q) {
+  const n = +String(q || '').replace('Q','') || 0;
+  return n >= 1 && n <= 4 ? n * 3 : null;
+}
+const ALL_MONTH_SPECS = [
   { month:"1월", quarter:"Q1", cur:1, prev:2, yoy:3, mom:4, num:1 },
   { month:"2월", quarter:"Q1", cur:5, prev:6, yoy:7, mom:8, num:2 },
   { month:"3월", quarter:"Q1", cur:9, prev:10,yoy:11,mom:12,num:3 },
   { month:"4월", quarter:"Q2", cur:1, prev:2, yoy:3, mom:4, num:4 },
   { month:"5월", quarter:"Q2", cur:5, prev:6, yoy:7, mom:8, num:5 },
-  { month:"6월", quarter:"Q2", cur:9, prev:10,yoy:11,mom:12,num:6 }
+  { month:"6월", quarter:"Q2", cur:9, prev:10,yoy:11,mom:12,num:6 },
+  { month:"7월", quarter:"Q3", cur:1, prev:2, yoy:3, mom:4, num:7 },
+  { month:"8월", quarter:"Q3", cur:5, prev:6, yoy:7, mom:8, num:8 },
+  { month:"9월", quarter:"Q3", cur:9, prev:10,yoy:11,mom:12,num:9 },
+  { month:"10월", quarter:"Q4", cur:1, prev:2, yoy:3, mom:4, num:10 },
+  { month:"11월", quarter:"Q4", cur:5, prev:6, yoy:7, mom:8, num:11 },
+  { month:"12월", quarter:"Q4", cur:9, prev:10,yoy:11,mom:12,num:12 }
 ].filter(s => s.num <= TODAY_MONTH);
+const MONTH_SPECS = ALL_MONTH_SPECS;
 const PALETTE = {
   accent:"#8f4219", navy:"#24344f", green:"#216552",
   amber:"#c07b48",  rose:"#b24c58", teal:"#1d7a8a",
@@ -165,7 +180,7 @@ function parseHash() {
   const p = new URLSearchParams(location.hash.replace(/^#/,''));
   const s = p.get('store'), q = p.get('quarter');
   if (s) state.store = s;
-  if (q && ['all','Q1','Q2'].includes(q)) state.quarter = q;
+  if (q && ['all', ...QUARTERS].includes(q)) state.quarter = q;
 }
 function syncHash() {
   const p = new URLSearchParams();
@@ -329,26 +344,34 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
 //    (매출/구독/MRR 시트 모두 Q1 헤더 행 없이 row 0 = 첫 지표)
 //    qIdx가 -1 → idx=-2 → mRows 시작 i=idx+2=0 (Q2 레이블에서 자동 중단)
 function q1Fallback(rows) { const i = qSectionIdx(rows,'Q1'); return i >= 0 ? i : -2; }
+function quarterRows(rows, quarter) {
+  return mRows(rows, quarter === 'Q1' ? q1Fallback(rows) : qSectionIdx(rows, quarter));
+}
+function quarterRowMaps(rows) {
+  return QUARTERS.reduce((acc, q) => {
+    acc[q] = quarterRows(rows, q);
+    return acc;
+  }, {});
+}
 
 function parseOverall(salesR, subR, mrrR) {
-  const sQ1 = mRows(salesR, q1Fallback(salesR)), sQ2 = mRows(salesR, qSectionIdx(salesR,'Q2'));
-  const bQ1 = mRows(subR,   q1Fallback(subR)),   bQ2 = mRows(subR,   qSectionIdx(subR,  'Q2'));
-  const mQ1 = mRows(mrrR,   q1Fallback(mrrR)),   mQ2 = mRows(mrrR,   qSectionIdx(mrrR,  'Q2'));
+  const salesByQuarter = quarterRowMaps(salesR);
+  const subsByQuarter = quarterRowMaps(subR);
+  const mrrByQuarter = quarterRowMaps(mrrR);
   return MONTH_SPECS.map(sp => buildMonth(
     sp.month, sp.quarter,
-    sp.quarter==='Q1'?sQ1:sQ2,
-    sp.quarter==='Q1'?bQ1:bQ2,
-    sp.quarter==='Q1'?mQ1:mQ2,
+    salesByQuarter[sp.quarter] || new Map(),
+    subsByQuarter[sp.quarter] || new Map(),
+    mrrByQuarter[sp.quarter] || new Map(),
     sp
   ));
 }
 
 function applyPortfolioCouponDiscounts(months, couponRows) {
-  const q1 = mRows(couponRows, q1Fallback(couponRows));
-  const q2 = mRows(couponRows, qSectionIdx(couponRows, 'Q2'));
+  const couponsByQuarter = quarterRowMaps(couponRows);
   months.forEach((m, i) => {
     const sp = MONTH_SPECS[i];
-    const source = sp.quarter === 'Q1' ? q1 : q2;
+    const source = couponsByQuarter[sp.quarter] || new Map();
     const hasCouponRow = source.has('쿠폰할인금액');
     const couponDiscount = mv(source, '쿠폰할인금액', sp.cur);
     const canMapToListPrice = hasCouponRow && m.gross > 0;
@@ -457,20 +480,17 @@ function parseStore(name, rows) {
   const snapIdx = ['당월 스냅샷','스냅샷','현황','Summary'].reduce((f,l)=>f>=0?f:qIdx(rows,l),-1);
   const snap = mRows(rows, snapIdx);
   // 분기 상세 섹션 레이블 유연 처리
-  const q1Idx = qSectionIdx(rows, 'Q1');
-  const q2Idx = qSectionIdx(rows, 'Q2');
-  const q1 = mRows(rows, q1Idx);
-  const q2 = mRows(rows, q2Idx);
+  const byQuarter = quarterRowMaps(rows);
   const curSpec = { cur:1, prev:2, yoy:3, mom:0, num:TODAY_MONTH };
   // ★ mrrM에 src(동일 섹션 맵) 전달 — 매장 개별 시트의 MRR 행을 직접 파싱
   //   gviz 확인: Q1 row35 'MRR' 컬럼 레이아웃이 MONTH_SPECS cur/prev/yoy와 완전 일치
   //   수정 전: em=new Map() 전달 → mrr/mrrPrev/mrrYoY 모두 0 (빈 맵)
   //   수정 후: src 전달 → 실제 MRR 데이터 파싱 (53,196,260원 등)
   const months = MONTH_SPECS.map(sp => {
-    const src = sp.quarter==='Q1'?q1:q2;
+    const src = byQuarter[sp.quarter] || new Map();
     return buildMonth(sp.month, sp.quarter, src, src, src, sp);
   });
-  const currentQuarter = TODAY_MONTH <= 3 ? 'Q1' : 'Q2';
+  const currentQuarter = quarterForMonth(TODAY_MONTH);
   return { name, current: buildMonth(`${TODAY_MONTH}월`,currentQuarter,snap,snap,snap,curSpec), months };
 }
 
@@ -681,7 +701,25 @@ function parseSummary(rows) {
 function isInformationalDataQualityCheck(c) {
   // 최신 원천의 "전년 비교 완전성=주의"는 2025년 1월 기준일 부재로 YoY를 공란 처리했다는 안내다.
   // 데이터 오류나 운영 리스크로 카운트하지 않는다.
-  return c?.name === '전년 비교 완전성' && c?.status === '주의';
+  if (c?.status !== '주의') return false;
+  if (c?.name === '전년 비교 완전성') return true;
+
+  const text = `${c?.name || ''} ${c?.value || ''} ${c?.note || ''}`;
+  const nonBlockingNames = new Set([
+    '참고 경고',
+    'YoY 비교 기준일',
+    '최신일 동기화',
+    '매장별 매출 최신일',
+    '매출 최신일'
+  ]);
+  return nonBlockingNames.has(c?.name) && (
+    text.includes('확인 불가') ||
+    text.includes('latest date missing') ||
+    text.includes('비교 기준일 없음') ||
+    text.includes('raw/_cfg/_overall 일치') ||
+    text.includes('전체 최신매출일 확인 불가') ||
+    text.includes('비차단')
+  );
 }
 
 function parseDataQuality(rows) {
@@ -840,10 +878,10 @@ function buildStoreSelect() {
 function getSelectedPeriodEndDate() {
   const now = new Date();
   const year = now.getFullYear();
-  if (state.quarter === 'Q1') return new Date(year, 2, 31, 23, 59, 59);
-  if (state.quarter === 'Q2') {
-    const q2End = new Date(year, 5, 30, 23, 59, 59);
-    return q2End > now ? now : q2End;
+  const endMonth = quarterEndMonth(state.quarter);
+  if (endMonth) {
+    const quarterEnd = new Date(year, endMonth, 0, 23, 59, 59);
+    return quarterEnd > now ? now : quarterEnd;
   }
   return now;
 }
@@ -1102,7 +1140,7 @@ function renderKpis(ent) {
   const monthProg = elapsed / daysInMon; // 0~1
 
   // 현재 달(마지막 달)이 진행 중이면 월말 예상 표시
-  const isCurrentMonth = lastM && (lastM.quarter === (TODAY_MONTH <= 3 ? 'Q1' : 'Q2'));
+  const isCurrentMonth = lastM && lastM.monthNum === TODAY_MONTH && lastM.status === 'mtd';
   const projGross  = (isCurrentMonth && lastM && monthProg > 0 && monthProg < 0.99)
     ? lastM.gross / monthProg : null;
 
@@ -2080,19 +2118,39 @@ function renderHealthChart(ent) {
 function renderQuarterChart(ent) {
   const isAll = ent.isAll;
   const source = isAll ? dashboard.overall : (ent.storeData?.months||ent.months);
-  const q1m = source.filter(m=>m.quarter==='Q1');
-  const q2m = source.filter(m=>m.quarter==='Q2');
   const agg = ms => aggMonths(ms)||{};
-  const q1 = agg(q1m), q2 = agg(q2m);
+  const visibleQuarters = QUARTERS.filter(q =>
+    source.some(m => m.quarter === q && ((m.gross || 0) > 0 || (m.net || 0) > 0 || (m.usage || 0) > 0 || (m.retained || 0) > 0 || (m.mrr || 0) > 0))
+  );
+  const chartQuarters = visibleQuarters.length ? visibleQuarters : QUARTERS.filter(q => MONTH_SPECS.some(m => m.quarter === q));
+  const quarterAggs = chartQuarters.map(q => agg(source.filter(m=>m.quarter===q)));
+  const colors = [
+    'rgba(36,52,79,.7)',
+    'rgba(143,66,25,.7)',
+    'rgba(33,101,82,.75)',
+    'rgba(192,123,72,.75)'
+  ];
+  const netColors = [
+    'rgba(33,101,82,.6)',
+    'rgba(33,101,82,.85)',
+    'rgba(36,52,79,.65)',
+    'rgba(36,52,79,.85)'
+  ];
+  const addColors = [
+    'rgba(192,123,72,.6)',
+    'rgba(192,123,72,.85)',
+    'rgba(143,66,25,.6)',
+    'rgba(143,66,25,.85)'
+  ];
 
   mkChart('quarterChart', {
     type:'bar',
     data:{
-      labels:['Q1 누적','Q2 누적'],
+      labels:chartQuarters.map(q=>`${q} 누적`),
       datasets:[
-        { label:'실결제매출',  data:[q1.gross||0,  q2.gross||0],  backgroundColor:['rgba(36,52,79,.7)','rgba(143,66,25,.7)'],   borderRadius:6 },
-        { label:'순매출',  data:[q1.net||0,    q2.net||0],    backgroundColor:['rgba(33,101,82,.6)','rgba(33,101,82,.85)'], borderRadius:6 },
-        { label:'순증감',  data:[q1.netAdds||0,q2.netAdds||0],backgroundColor:['rgba(192,123,72,.6)','rgba(192,123,72,.85)'],borderRadius:6 }
+        { label:'실결제매출', data:quarterAggs.map(q=>q.gross||0), backgroundColor:chartQuarters.map((_,i)=>colors[i % colors.length]), borderRadius:6 },
+        { label:'순매출', data:quarterAggs.map(q=>q.net||0), backgroundColor:chartQuarters.map((_,i)=>netColors[i % netColors.length]), borderRadius:6 },
+        { label:'순증감', data:quarterAggs.map(q=>q.netAdds||0), backgroundColor:chartQuarters.map((_,i)=>addColors[i % addColors.length]), borderRadius:6 }
       ]
     },
     options:{
