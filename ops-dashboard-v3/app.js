@@ -35,12 +35,22 @@ const GID = {
 // ★ 현재 달까지만 포함 — 아직 시작하지 않은 달은 제외
 const TODAY_MONTH = new Date().getMonth() + 1;   // 1-12
 const QUARTERS = ['Q1','Q2','Q3','Q4'];
+const PERIOD_FILTERS = ['all','H1', ...QUARTERS];
 function quarterForMonth(monthNum) {
   return `Q${Math.ceil((+monthNum || 1) / 3)}`;
 }
 function quarterEndMonth(q) {
   const n = +String(q || '').replace('Q','') || 0;
   return n >= 1 && n <= 4 ? n * 3 : null;
+}
+function periodMatchesMonth(period, month) {
+  if (period === 'all') return true;
+  if (period === 'H1') return (month.monthNum || month.num || 0) >= 1 && (month.monthNum || month.num || 0) <= 6;
+  return month.quarter === period;
+}
+function periodEndMonth(period) {
+  if (period === 'H1') return 6;
+  return quarterEndMonth(period);
 }
 const ALL_MONTH_SPECS = [
   { month:"1월", quarter:"Q1", cur:1, prev:2, yoy:3, mom:4, num:1 },
@@ -180,7 +190,7 @@ function parseHash() {
   const p = new URLSearchParams(location.hash.replace(/^#/,''));
   const s = p.get('store'), q = p.get('quarter');
   if (s) state.store = s;
-  if (q && ['all', ...QUARTERS].includes(q)) state.quarter = q;
+  if (q && PERIOD_FILTERS.includes(q)) state.quarter = q;
 }
 function syncHash() {
   const p = new URLSearchParams();
@@ -188,6 +198,14 @@ function syncHash() {
   if (state.quarter !== 'all') p.set('quarter', state.quarter);
   const h = p.toString();
   history.replaceState(null,'', h ? `#${h}` : location.pathname);
+}
+function syncPeriodToggleActive() {
+  const wrap = $('quarterToggle');
+  if (!wrap) return;
+  wrap.querySelectorAll('button').forEach(btn => {
+    const value = btn.dataset.q || btn.dataset.quarter;
+    btn.classList.toggle('active', value === state.quarter);
+  });
 }
 
 /* ── 5. JSONP 로더 ──────────────────────────────────────────── */
@@ -235,6 +253,14 @@ function qSectionIdx(rows, label) {
     const v = tx(r[0]);
     return v === normalized || v === `${normalized} 상세` || v === `${normalized}상세`;
   });
+}
+function qDetailSectionIdx(rows, label) {
+  const normalized = tx(label);
+  const detail = rows.findIndex(r => {
+    const v = tx(r[0]);
+    return v === `${normalized} 상세` || v === `${normalized}상세`;
+  });
+  return detail >= 0 ? detail : qSectionIdx(rows, label);
 }
 function mRows(rows, idx) {
   const m = new Map();
@@ -345,6 +371,8 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
 //    qIdx가 -1 → idx=-2 → mRows 시작 i=idx+2=0 (Q2 레이블에서 자동 중단)
 function q1Fallback(rows) { const i = qSectionIdx(rows,'Q1'); return i >= 0 ? i : -2; }
 function quarterRows(rows, quarter) {
+  const detailIdx = qDetailSectionIdx(rows, quarter);
+  if (detailIdx >= 0) return mRows(rows, detailIdx);
   return mRows(rows, quarter === 'Q1' ? q1Fallback(rows) : qSectionIdx(rows, quarter));
 }
 function quarterRowMaps(rows) {
@@ -563,7 +591,7 @@ function filterMonths(months) {
   const hasData = m => m.gross > 0 || m.retained > 0 || m.mrr > 0 || m.usage > 0;
   const active = months.filter(hasData);
   if (state.quarter === 'all') return active;
-  const qFiltered = active.filter(m => m.quarter === state.quarter);
+  const qFiltered = active.filter(m => periodMatchesMonth(state.quarter, m));
   return qFiltered;
 }
 
@@ -698,6 +726,13 @@ function parseSummary(rows) {
 }
 
 /* ── 8-B. 데이터 점검 시트 파싱 ──────────────────────────────── */
+function isSourceCheckPending(c) {
+  const text = `${c?.name || ''} ${c?.status || ''} ${c?.value || ''} ${c?.note || ''}`;
+  if (c?.name === '빌드 상태' && /재생성|진행 중|진행중|빌드/.test(text)) return true;
+  if (c?.name === '매출 최신일' && /점검중|미완료|중간에 중단|확인 불가/.test(text)) return true;
+  return /대시보드 재생성이 완료되지 않았|최종 점검 미완료/.test(text);
+}
+
 function isInformationalDataQualityCheck(c) {
   // 최신 원천의 "전년 비교 완전성=주의"는 2025년 1월 기준일 부재로 YoY를 공란 처리했다는 안내다.
   // 데이터 오류나 운영 리스크로 카운트하지 않는다.
@@ -747,10 +782,16 @@ function parseDataQuality(rows) {
   const dateMatch = salesCheck?.value?.match(/latest\s+(\d{4}-\d{2}-\d{2})/i);
   const salesLatestDate = dateMatch ? new Date(`${dateMatch[1]}T00:00:00`) : null;
   const nonNormalChecks = checks.filter(c => c.status && c.status !== '정상');
+  const pendingChecks = nonNormalChecks.filter(isSourceCheckPending);
+  const sourceCheckPending = pendingChecks.length > 0 ||
+    details.some(d => isSourceCheckPending({ name:d.location, value:d.message, note:'' }));
+  const actionableChecks = nonNormalChecks.filter(c => !isSourceCheckPending(c));
   return {
     checks,
-    warnings: nonNormalChecks.filter(c => !isInformationalDataQualityCheck(c)),
-    infos: nonNormalChecks.filter(isInformationalDataQualityCheck),
+    warnings: actionableChecks.filter(c => !isInformationalDataQualityCheck(c)),
+    infos: actionableChecks.filter(isInformationalDataQualityCheck),
+    pendingChecks,
+    sourceCheckPending,
     details,
     salesLatestDate,
     sheetUpdatedText: tx(rows.find(r => tx(r[0]).startsWith('업데이트'))?.[0] || '')
@@ -759,6 +800,9 @@ function parseDataQuality(rows) {
 
 function runDataQualityAudit(dataQuality) {
   if (!dataQuality) return [];
+  const pendingItems = dataQuality.sourceCheckPending
+    ? ['[점검보류] 원천 점검 결과 재생성 미완료: 데이터 점검 탭이 임시 상태입니다. 대시보드는 매출·구독·MRR·매장별 원천 탭 직접 조회값으로 표시 중']
+    : [];
   const warningItems = (dataQuality.warnings || []).map(c => {
     if (c.name === '검증 경고') {
       const detailCount = dataQuality.details?.length || num(c.value);
@@ -777,7 +821,7 @@ function runDataQualityAudit(dataQuality) {
   const infoItems = (dataQuality.infos || []).map(c =>
     `[정보] 원천 점검 ${c.name}: ${c.value || c.status}${c.note ? ` · ${c.note}` : ''}`
   );
-  return [...warningItems, ...infoItems];
+  return [...warningItems, ...pendingItems, ...infoItems];
 }
 
 /* ── 8-D. 데이터 로드 ─────────────────────────────────────────── */
@@ -878,10 +922,10 @@ function buildStoreSelect() {
 function getSelectedPeriodEndDate() {
   const now = new Date();
   const year = now.getFullYear();
-  const endMonth = quarterEndMonth(state.quarter);
+  const endMonth = periodEndMonth(state.quarter);
   if (endMonth) {
-    const quarterEnd = new Date(year, endMonth, 0, 23, 59, 59);
-    return quarterEnd > now ? now : quarterEnd;
+    const periodEnd = new Date(year, endMonth, 0, 23, 59, 59);
+    return periodEnd > now ? now : periodEnd;
   }
   return now;
 }
@@ -1372,7 +1416,7 @@ function renderInsights(ent) {
 
   // ── 정합성 — 문제·영향 지표·권장 조치 ──────────────────
   const al = dashboard.audit;
-  const alOp = al.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]'));  // 운영 리스크만
+  const alOp = al.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('[점검보류]'));  // 운영 리스크만
   $('auditList').innerHTML = al.length
     ? al.map(a => {
         if (a === '---') {
@@ -1380,13 +1424,16 @@ function renderInsights(ent) {
         }
         const isFmt = a.startsWith('[형식]');
         const isInfo = a.startsWith('[정보]');
-        const text  = isFmt ? a.replace('[형식] ', '') : isInfo ? a.replace('[정보] ', '') : a;
-        const icon  = isFmt ? '⚙' : isInfo ? 'ℹ' : '⚑';
-        const cls   = isFmt ? 'audit-action-item audit-fmt' : isInfo ? 'audit-action-item audit-fmt' : 'audit-action-item';
+        const isPending = a.startsWith('[점검보류]');
+        const text  = isFmt ? a.replace('[형식] ', '') : isInfo ? a.replace('[정보] ', '') : isPending ? a.replace('[점검보류] ', '') : a;
+        const icon  = isFmt ? '⚙' : isInfo ? 'ℹ' : isPending ? '⏳' : '⚑';
+        const cls   = isFmt || isInfo || isPending ? 'audit-action-item audit-fmt' : 'audit-action-item';
         const rec   = isFmt
           ? '→ 데이터 값은 계산 대체값으로 표시 중 · 시트 컬럼 형식 확인 권장'
           : isInfo
           ? '→ 참고 정보 · 원천 시트 정책에 따라 자동 제외'
+          : isPending
+          ? '→ 원천 점검 탭 재생성 완료 후 자동 해소 · 실적 원천 탭 직접 파싱은 유지'
           : '→ 원본 시트 대조 · 입력값 검토 필요';
         return `
         <div class="${cls}">
@@ -2166,7 +2213,7 @@ function renderScatterChart(ent) {
   // 선택 기간에 확정월이 없을 때만 MTD를 대체 사용한다.
   const selectedPeriodMonths = months => {
     const base = months.filter(m =>
-      (state.quarter === 'all' || m.quarter === state.quarter) && m.gross > 0 && m.target > 0
+      periodMatchesMonth(state.quarter, m) && m.gross > 0 && m.target > 0
     );
     const confirmed = base.filter(m => m.status === 'confirmed');
     return confirmed.length ? confirmed : base.filter(m => m.status === 'mtd');
@@ -2478,9 +2525,10 @@ function renderHeroKpis(ent) {
   const freshStr  = freshMin === null ? '—' : freshMin < 1 ? '방금 전' : `${freshMin}분 전`;
   const loadedStr = loadedAt ? loadedAt.toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'}) : '—';
   const sourceDate = dashboard.dataQuality?.salesLatestDate;
+  const sourcePending = dashboard.dataQuality?.sourceCheckPending;
   const sourceStr = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? sourceDate.toLocaleDateString('ko-KR', {month:'numeric', day:'numeric'})
-    : '확인 불가';
+    : sourcePending ? '점검 보류' : '확인 불가';
   const now = new Date();
   const sourceLagDays = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? Math.max(0, Math.round((
@@ -2488,7 +2536,7 @@ function renderHeroKpis(ent) {
         - new Date(sourceDate.getFullYear(), sourceDate.getMonth(), sourceDate.getDate())
       ) / 86400000))
     : null;
-  const sourceClass = sourceLagDays !== null && sourceLagDays > 1 ? 'warn' : 'ok';
+  const sourceClass = sourcePending ? 'info' : sourceLagDays !== null && sourceLagDays > 1 ? 'warn' : 'ok';
 
   // 분석 범위 요약
   const months    = ent.months;
@@ -2508,20 +2556,23 @@ function renderHeroKpis(ent) {
 
   // 정합성 — 운영 리스크만 카운트 (파싱 형식 오류는 별도)
   const auditAll    = dashboard.audit || [];
+  const auditPendingCnt = auditAll.filter(a => a.startsWith('[점검보류]')).length;
   const auditQualityCnt = auditAll.filter(a => a.startsWith('원천 ')).length;
   const auditInfoCnt = auditAll.filter(a => a.startsWith('[정보]')).length;
-  const auditOpCnt  = auditAll.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('원천 ')).length;
+  const auditOpCnt  = auditAll.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('[점검보류]') && !a.startsWith('원천 ')).length;
   const auditFmtCnt = auditAll.filter(a => a.startsWith('[형식]')).length;
-  const auditClass  = auditOpCnt || auditQualityCnt ? 'warn' : (auditFmtCnt ? 'info' : 'ok');
+  const auditClass  = auditOpCnt || auditQualityCnt ? 'warn' : (auditPendingCnt || auditFmtCnt ? 'info' : 'ok');
   const auditText   = auditQualityCnt
     ? `⚠ 데이터 품질 ${auditQualityCnt}건${auditOpCnt ? ` · 운영 ${auditOpCnt}건` : ''}${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}`
     : auditOpCnt
     ? `⚠ 운영 이슈 ${auditOpCnt}건${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}`
-    : auditFmtCnt
-      ? `⚙ 시트 형식 확인 ${auditFmtCnt}건`
-      : auditInfoCnt
-        ? `✓ 정합성 정상 · 안내 ${auditInfoCnt}건`
-        : '✓ 정합성 정상';
+    : auditPendingCnt
+      ? `⚙ 원천 점검 보류${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}${auditInfoCnt ? ` · 안내 ${auditInfoCnt}건` : ''}`
+      : auditFmtCnt
+        ? `⚙ 시트 형식 확인 ${auditFmtCnt}건`
+        : auditInfoCnt
+          ? `✓ 정합성 정상 · 안내 ${auditInfoCnt}건`
+          : '✓ 정합성 정상';
 
   // 연결 상태는 실제 로드 실패 여부, 데이터 최신성은 원천 매출 최신일로 별도 표시한다.
   const connectionIssue = _failedSheets.size > 0;
@@ -2553,7 +2604,7 @@ function renderAlerts(ent) {
   if ((c.refundRate||0) > 15)    alerts.push({ lvl:'warn',    msg: `△ 환불율 ${fmtP(c.refundRate||0)} — CS 이슈 점검 필요` });
   // ★ 정합성 — 알림 센터에는 요약만 (상세는 정합성 카드에서 확인)
   // 컬럼 매핑 관련 반복 경고를 건수 요약으로 통합
-  const auditOpItems = (dashboard.audit||[]).filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]'));
+  const auditOpItems = (dashboard.audit||[]).filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('[점검보류]'));
   if (auditOpItems.length) {
     const mappingItems = auditOpItems.filter(a => a.includes('컬럼 매핑') || a.includes('동일값'));
     const otherItems   = auditOpItems.filter(a => !a.includes('컬럼 매핑') && !a.includes('동일값'));
@@ -4307,12 +4358,12 @@ function bindEvents() {
   $('quarterToggle').querySelectorAll('button').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       state.quarter = btn.dataset.q || btn.dataset.quarter;
-      $('quarterToggle').querySelectorAll('button').forEach(b=>b.classList.remove('active'));
-      btn.classList.add('active');
+      syncPeriodToggleActive();
       renderAll();
       syncHash();
     });
   });
+  syncPeriodToggleActive();
 
   // 매장 선택
   $('storeSelect').addEventListener('change', e=>{
