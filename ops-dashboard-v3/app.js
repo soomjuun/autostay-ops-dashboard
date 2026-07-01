@@ -279,11 +279,28 @@ function mRows(rows, idx) {
 function mv(map, key, col, fn=num) {
   const r = map.get(key); return r ? fn(r[col]) : 0;
 }
+function fuzzyAliasMatch(actualKey, expectedKey) {
+  const actual = tx(actualKey);
+  const expected = tx(expectedKey);
+  if (!actual || !expected) return false;
+  const expectedGross = expected.includes('실결제매출') || expected.includes('총매출') || expected.includes('Gross') || expected.includes('Paid');
+  const actualGross = actual.startsWith('실결제매') && (actual.includes('총매출') || actual.includes('구 총매출'));
+  if (expectedGross && actualGross) return true;
+
+  const expectedGrossAchievement = expected.includes('실결제매출') && expected.includes('달성');
+  const actualGrossAchievement = actual.startsWith('실결제매') && actual.includes('달성');
+  return expectedGrossAchievement && actualGrossAchievement;
+}
 // 여러 키 별칭 시도 (시트 표기 불일치 대응: 이탈률/이탈율, 환불율/환불률 등)
 function mvAlias(map, keys, col, fn=num) {
   for (const k of keys) {
     const r = map.get(k);
     if (r !== undefined && r[col] !== undefined && String(r[col]).trim() !== '') return fn(r[col]);
+  }
+  for (const k of keys) {
+    for (const [actualKey, r] of map.entries()) {
+      if (fuzzyAliasMatch(actualKey, k) && r[col] !== undefined && String(r[col]).trim() !== '') return fn(r[col]);
+    }
   }
   return 0;
 }
