@@ -182,7 +182,7 @@
         <div class="chart-section-head" style="margin-bottom:6px">
           <div>
             <h2 style="font-size:13.5px;margin:0">① 가동률 추이</h2>
-            <p class="sub" style="margin:0">목표 75% 기준선 · 보정 Capacity 적용</p>
+            <p class="sub" style="margin:0">목표 75% 기준선 · 원천 MTD Capacity 적용</p>
           </div>
           <button class="collapse-toggle collapsed" data-target="opsUtilDetail" aria-label="상세 보기">
             <span class="arrow">▾</span><span class="toggle-label">상세</span>
@@ -216,7 +216,7 @@
         <div class="chart-section-head" style="margin-bottom:6px">
           <div>
             <h2 style="font-size:13.5px;margin:0">③ 쿠폰할인·ARPU 수익성</h2>
-            <p class="sub" style="margin:0">정가 추정 대비 쿠폰할인율 · ARPU</p>
+            <p class="sub" style="margin:0">쿠폰 적용 전 추정액 대비 할인율 · ARPU</p>
           </div>
           <button class="collapse-toggle collapsed" data-target="opsArpuDetail" aria-label="상세 보기">
             <span class="arrow">▾</span><span class="toggle-label">상세</span>
@@ -239,7 +239,7 @@
     </article>
     <article class="panel col-6">
       <div class="chart-section-head">
-        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">정가 추정 매출 → 쿠폰할인 → 실결제매출 → 환불 → 순매출</p></div>
+        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">쿠폰 적용 전 추정 결제액 → 쿠폰할인 → 실결제매출 → 환불 → 순매출</p></div>
         <button class="collapse-toggle" data-target="bridgeWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="bridgeWrap" class="collapsible-content">
@@ -300,7 +300,7 @@
     <div class="section-header">
       <div>
         <h2><span class="section-icon amber">⚙</span>가동률 심층 분석</h2>
-        <p class="sub" style="margin-bottom:0">매장별 설계·보정 Capacity · 유휴 대수 · 기회금액 상한 · 계절 지수</p>
+        <p class="sub" style="margin-bottom:0">매장별 원천 Capacity · 유휴 대수 · 기회금액 상한 · 계절 지수</p>
       </div>
       <span class="section-tag">OPS</span>
     </div>
@@ -337,7 +337,7 @@
           <thead><tr>
             <th style="text-align:left">매장</th>
             <th>실결제매출</th><th>순매출 달성률</th><th>순매출</th>
-            <th>총사용</th><th title="설계기준% (보정기준%)">가동률 설계(보정)</th><th>환불율</th>
+            <th>총사용</th><th title="총사용 ÷ 원천 MTD Capacity">가동률</th><th>환불율</th>
             <th>순증감</th><th>ARPU (원)</th><th>상태</th>
           </tr></thead>
           <tbody id="storeTableBody"></tbody>
