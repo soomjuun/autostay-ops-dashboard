@@ -1666,19 +1666,13 @@ function renderInsights(ent) {
     ? `${lastM_str} MTD`
     : lastM_str;
 
-  // FIX 5C — 기간 정보 헤드라인에 추가
   const periodRangeLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel}` : lastPeriodLabel;
-  const periodInfo = ms.length > 0 ? `[${periodRangeLabel} 기준] ` : '';
-  // ★ v3: 운영 중 매장 수 동적 (오픈 전 제외)
   const _insActiveN = getActiveOpsStores().length;
-  let summary = ent.isAll
-    ? `${periodInfo}${_insActiveN}개 직영점 합산 (오픈 중): 순매출 ${fmtS(c.net)} / 실결제매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)} ${mrrDir}. `
-    : `${periodInfo}${ent.name}: 순매출 ${fmtS(c.net)} / 실결제매출 ${fmtS(c.gross)} (순매출 ${achStatus} ${fmtP(c.achievement||0)}) · 운영 가동률 ${fmtP(c.utilization||0)} · 이탈률 ${fmtP(c.churn||0)} · MRR ${fmtS(c.mrr||0)}. `;
+  const summaryNotes = [];
 
   if (ent.isAll && topStore) {
-    // ★ v3: 기간 명시 — 누적 합산 기준임을 명확히
     const topPeriodLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel} 합산` : lastPeriodLabel;
-    summary += `${topPeriodLabel} 최고 매출: ${topStore.name} (${fmtS(topStore.gross)}).`;
+    summaryNotes.push(`<strong>최고 매출</strong><span>${topStore.name} · ${fmtS(topStore.gross)} (${topPeriodLabel})</span>`);
   }
   if (latestM && ms.length >= 2) {
     const prev = ms[ms.length-2];
@@ -1686,17 +1680,43 @@ function renderInsights(ent) {
     const latestIsMTD = (latestM.status || monthStatus(latestM.monthNum)) === 'mtd';
     if (Math.abs(momGross)>0.5) {
       if (latestIsMTD) {
-        // MTD월은 확정월과 직접 비교 부적절 → 비교 기준을 명시적으로 표기
         const prevLabel = prev.month || '전월';
-        summary += ` (최근월 ${latestM.month} MTD vs ${prevLabel} 확정 기준 ${momGross>=0?'+':''}${momGross.toFixed(1)}% — 경과일 차이 있음).`;
+        summaryNotes.push(`<strong>최신월 흐름</strong><span>${latestM.month} MTD는 ${prevLabel} 확정 대비 ${momGross>=0?'+':''}${momGross.toFixed(1)}% · 경과일 차이로 직접 비교 주의</span>`);
       } else if (ms.length === 2) {
-        // 2개월 비교일 때만 MoM 표기 (명확한 맥락)
-        summary += ` ${prev.month} 대비 ${latestM.month} 실결제매출 ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM.`;
+        summaryNotes.push(`<strong>매출 흐름</strong><span>${prev.month} 대비 ${latestM.month} ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM</span>`);
       }
-      // 3개월+ 누적 화면에서는 MoM 숫자 생략 — 월별 카드에서 확인
     }
   }
-  $('headline').textContent = summary;
+  if (!summaryNotes.length) {
+    summaryNotes.push(`<strong>분석 범위</strong><span>${ent.isAll ? `운영 ${_insActiveN}개 매장 합산` : `${ent.name} 단일 매장`} · ${periodRangeLabel}</span>`);
+  }
+  const gapValue = Math.max(0, (c.target||0) - (c.net||0));
+  const overValue = Math.max(0, (c.net||0) - (c.target||0));
+  const gapText = (c.achievement||0) >= 100
+    ? `목표 대비 ${fmtS(overValue)} 초과`
+    : `목표까지 ${fmtS(gapValue)}`;
+  const statusClass = (c.achievement||0) >= 100 ? 'good' : (c.achievement||0) >= 80 ? 'warn' : 'bad';
+  $('headline').innerHTML = `
+    <div class="summary-head">
+      <span class="summary-period">${periodRangeLabel || '선택 기간'} · ${ent.isAll ? `운영 ${_insActiveN}개 매장` : ent.name}</span>
+      <span class="summary-status ${statusClass}">${achStatus}</span>
+    </div>
+    <div class="summary-lead">
+      <div>
+        <span class="summary-lead-label">순매출</span>
+        <strong>${fmtS(c.net||0)}</strong>
+      </div>
+      <span>${fmtP(c.achievement||0)} 달성 · ${gapText}<br>실결제매출 ${fmtS(c.gross||0)}</span>
+    </div>
+    <div class="summary-metric-grid">
+      <div class="summary-metric"><span>가동률</span><strong>${fmtP(c.utilization||0)}</strong></div>
+      <div class="summary-metric"><span>이탈률</span><strong>${fmtP(c.churn||0)}</strong></div>
+      <div class="summary-metric"><span>MRR</span><strong>${fmtS(c.mrr||0)}</strong><small>${mrrDir}</small></div>
+    </div>
+    <div class="summary-note-list">
+      ${summaryNotes.map(note => `<div class="summary-note">${note}</div>`).join('')}
+    </div>
+  `;
 
   // ── 리스크 — 문제/영향/담당/조치 구조화 ──────────────────
   const risks = [];
@@ -3913,18 +3933,7 @@ function renderHeatmap(ent) {
   });
 }
 
-/* ── 17. 테이블 ─────────────────────────────────────────────── */
-// ★ Change 3: MoM delta 헬퍼 (invert=true → 낮을수록 좋음)
-function momDelta(cur, prev, suffix='%p', invert=false) {
-  if (prev == null || cur == null) return '';
-  const d = cur - prev;
-  if (Math.abs(d) < 0.01) return '';
-  const isGood = invert ? d < 0 : d > 0;
-  const cls = isGood ? 'delta-up' : 'delta-down';
-  const arrow = d > 0 ? '▲' : '▼';
-  return ` <span class="${cls}">${arrow}${Math.abs(d).toFixed(1)}${suffix}</span>`;
-}
-
+/* ── 17. 매장 스냅샷 ────────────────────────────────────────── */
 function renderTable(ent) {
   const selName = ent.isAll ? null : ent.name;
   // ★ 쿼터/매장 필터에 반응: 필터된 월 데이터 집계 사용
@@ -3941,13 +3950,6 @@ function renderTable(ent) {
     const agg    = aggMonths(filtMs) || {};
     const ops    = s.ops || {};
     // 기간별 원천 집계만 사용하며, 운영 시트의 현재 스냅샷은 상태 표시에만 사용한다.
-    // ★ Change 3: 이전 달 집계 계산
-    // 여러 달 누적값에는 MoM 화살표를 붙이지 않는다. 선택 결과가 1개월일 때만
-    // 해당 월과 직전 달의 월간 값을 비교한다.
-    const currentMonth = filtMs.length === 1 ? filtMs[0] : null;
-    const prevMonth = currentMonth
-      ? s.months.find(m => m.monthNum === currentMonth.monthNum - 1) || null
-      : null;
     const capMetric = capMetricMap[s.name] || {};
     const utilizationRaw = capMetric.capacity > 0 ? capMetric.utilization : 0;
     return {
@@ -3964,10 +3966,6 @@ function renderTable(ent) {
       arpu:        agg.arpu         || 0,
       lossEstimate: capMetric.lossEstimate || 0,
       opsStatus:   ops.status       || '—',   // 시트 원본 상태 (참고용)
-      // prev period for MoM arrows
-      prevUtil:    prevMonth ? (prevMonth.utilization || 0) : null,
-      prevRefund:  prevMonth ? (prevMonth.refundRate  || 0) : null,
-      prevAch:     prevMonth ? (prevMonth.achievement || 0) : null,
     };
   });
 
@@ -4028,42 +4026,34 @@ function renderTable(ent) {
     const achBg    = ach>=100?'var(--green-soft)':ach>=80?'var(--amber-soft)':'var(--rose-soft)';
     const achColor = ach>=100?'var(--green)':ach>=80?'var(--amber)':'var(--rose)';
     const achBold  = ach < 80 ? 'font-weight:900;' : '';
-    const achDelta = momDelta(ach, s.prevAch, '%p', false);
     const achCell  = `<div class="ach-wrap" style="background:${achBg};padding:3px 6px;border-radius:6px;display:inline-block">
-      <span style="color:${achColor};${achBold}">${fmtP(ach)}</span>${achDelta}
+      <span style="color:${achColor};${achBold}">${fmtP(ach)}</span>
       <div class="ach-bar-bg"><div class="ach-bar-fill" style="width:${Math.min(100,ach)}%;background:${ach>=100?'#216552':ach>=80?'#c07b48':'#b24c58'}"></div></div>
     </div>`;
 
-    // 원천 MTD Capacity 기준 가동률 + 기간 변화
+    // 원천 MTD Capacity 기준 가동률
     const util = s.utilization||0;
     const utilRaw = s.utilizationRaw||0;
-    const utilDelta = momDelta(util, s.prevUtil, '%p', false);
-    const utilCell = `${fmtP(utilRaw || util)}${utilDelta}`;
-
-    // ★ Change 3: 환불율 MoM (낮을수록 좋음 → invert)
-    const refundDelta = momDelta(s.refundRate||0, s.prevRefund, '%p', true);
+    const utilCell = fmtP(utilRaw || util);
 
     // ★ v3: 파생 상태 표시 (시트 판정 대신 실데이터 기반)
     const derivedSt = deriveStoreStatus(s);
 
     const selected = s.name===selName?'selected':'';
-    return `<tr class="${selected}" data-store="${s.name}">
-      <td>${s.name}</td>
-      <td>${fmtS(s.gross)}</td>
-      <td>${achCell}</td>
-      <td>${fmtS(s.net)}</td>
-      <td>${fmtN(s.usage)}</td>
-      <td>${utilCell}</td>
-      <td>${fmtP(s.refundRate||0)}${refundDelta}</td>
-      <td>${(s.netAdds||0)>=0?'+':''}${fmtN(s.netAdds||0)}</td>
-      <td style="white-space:nowrap">${fmtW(s.arpu||0)}</td>
-      <td><span class="verdict-chip ${derivedSt.cls}" title="시트 판정: ${s.opsStatus||'—'}">${derivedSt.text}</span></td>
+    return `<tr class="${selected}" data-store="${s.name}" role="button" tabindex="0"
+      aria-label="${s.name} 매장 선택 · 순매출 달성률 ${fmtP(ach)} · 가동률 ${fmtP(utilRaw || util)} · 이탈률 ${fmtP(s.churn||0)}">
+      <td data-label="매장">${s.name}</td>
+      <td data-label="순매출 달성률">${achCell}</td>
+      <td data-label="가동률">${utilCell}</td>
+      <td data-label="이탈률">${fmtP(s.churn||0)}</td>
+      <td data-label="순증감" class="${(s.netAdds||0)>=0?'snapshot-positive':'snapshot-negative'}">${(s.netAdds||0)>=0?'+':''}${fmtN(s.netAdds||0)}</td>
+      <td data-label="상태"><span class="verdict-chip ${derivedSt.cls}" title="선택 기간 실적 기반 판정">${derivedSt.text}</span></td>
     </tr>`;
   }).join('');
   $('storeTableBody').innerHTML = rows;
 
   $('storeTableBody').querySelectorAll('tr').forEach(tr=>{
-    tr.addEventListener('click', ()=>{
+    const selectStore = ()=>{
       const name = tr.dataset.store;
       const key = Object.keys(GID.stores).find(k=>GID.stores[k].name===name);
       if (key) {
@@ -4072,6 +4062,13 @@ function renderTable(ent) {
         renderAll();
         syncHash();
         setTimeout(() => $('inlineStoreDetail')?.scrollIntoView({ behavior:'smooth', block:'nearest' }), 80);
+      }
+    };
+    tr.addEventListener('click', selectStore);
+    tr.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectStore();
       }
     });
   });

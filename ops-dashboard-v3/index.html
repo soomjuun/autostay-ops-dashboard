@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20260724">
+  <link rel="stylesheet" href="./style.css?v=20260724-2">
   <!-- 인증 가드: 쿠키 없이 직접 접근 시 로그인 페이지로 이동 -->
   <script>
     (function() {
@@ -148,7 +148,7 @@
   <section class="insights">
     <article class="panel">
       <h2><span class="section-icon accent">📊</span>핵심 요약</h2>
-      <p id="headline" style="font-size:13px;line-height:1.75;color:#4a3f35">—</p>
+      <div id="headline" class="summary-content" aria-live="polite">—</div>
     </article>
     <article class="panel">
       <h2><span class="section-icon rose">⚠</span>우선 리스크</h2>
@@ -331,14 +331,22 @@
   <section class="grid equal-grid">
     <article class="panel">
       <h2>매장 스냅샷</h2>
-      <p class="sub">행 클릭 시 전체 차트 재계산</p>
-      <div class="table-wrap">
-        <table>
+      <p class="sub">선택 기간 핵심 운영지표 · 행을 선택하면 매장 상세로 이동</p>
+      <div class="table-wrap store-snapshot-wrap">
+        <table class="store-snapshot-table">
+          <caption class="sr-only">매장별 순매출 달성률, 가동률, 이탈률, 순증감 및 상태</caption>
+          <colgroup>
+            <col class="snapshot-col-store"><col class="snapshot-col-achievement">
+            <col class="snapshot-col-rate"><col class="snapshot-col-rate">
+            <col class="snapshot-col-adds"><col class="snapshot-col-status">
+          </colgroup>
           <thead><tr>
-            <th style="text-align:left">매장</th>
-            <th>실결제매출</th><th>순매출 달성률</th><th>순매출</th>
-            <th>총사용</th><th title="총사용 ÷ 원천 MTD Capacity">가동률</th><th>환불율</th>
-            <th>순증감</th><th>ARPU (원)</th><th>상태</th>
+            <th scope="col" style="text-align:left">매장</th>
+            <th scope="col">순매출 달성률</th>
+            <th scope="col" title="총사용 ÷ 원천 MTD Capacity">가동률</th>
+            <th scope="col">이탈률</th>
+            <th scope="col">순증감</th>
+            <th scope="col">상태</th>
           </tr></thead>
           <tbody id="storeTableBody"></tbody>
         </table>
@@ -351,6 +359,6 @@
     </article>
   </section>
 </div>
-<script src="./app.js?v=20260724"></script>
+<script src="./app.js?v=20260724-2"></script>
 </body>
 </html>
