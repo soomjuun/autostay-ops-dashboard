@@ -34,8 +34,20 @@ const GID = {
     anseong:     { gid: 1905150076, name: "안성"  }  // ★ 2026-05-15 오픈
   }
 };
-// ★ 현재 달까지만 포함 — 아직 시작하지 않은 달은 제외
-const TODAY_MONTH = new Date().getMonth() + 1;   // 1-12
+// ★ 한국 운영일 기준 현재 달까지만 포함 — 브라우저 로컬 시간대 영향 제거
+function getKstDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  return { year:+values.year, month:+values.month, day:+values.day };
+}
+const KST_TODAY  = getKstDateParts();
+const TODAY_YEAR = KST_TODAY.year;
+const TODAY_MONTH = KST_TODAY.month;   // 1-12
 const QUARTERS = ['Q1','Q2','Q3','Q4'];
 const PERIOD_FILTERS = ['all','H1', ...QUARTERS];
 function quarterForMonth(monthNum) {
@@ -119,9 +131,9 @@ const STORE_ANNUAL_2025 = {
 };
 
 // ★ MTD 계산용 상수 / 헬퍼 ────────────────────────────────────────
-const TODAY_DAY = new Date().getDate();   // 현재 경과 일수 (1~31)
+const TODAY_DAY = KST_TODAY.day;   // 한국시간 현재 경과 일수 (1~31)
 function daysInMonth(monthNum, yr) {      // 해당 월의 총 일수
-  return new Date(yr || new Date().getFullYear(), monthNum, 0).getDate();
+  return new Date(yr || TODAY_YEAR, monthNum, 0).getDate();
 }
 function monthStatus(mNum) {              // 월 상태 판정
   if (mNum < TODAY_MONTH)  return 'confirmed';   // 확정 (마감 완료)
@@ -136,7 +148,7 @@ const STATUS_TIP   = {
 };
 // ★ 차트 x축 레이블: "4월 CLOSED" / "5월 MTD" 구분 표시
 function chartMonthLabel(m) {
-  const st = monthStatus(m.num);
+  const st = m.status || monthStatus(m.monthNum || m.num);
   if (st === 'confirmed') return `${m.month} ✓`;
   if (st === 'mtd')       return `${m.month} MTD`;
   return m.month;
@@ -150,7 +162,7 @@ const charts = {};
 function getMtdDay() {
   const sourceDate = dashboard?.dataQuality?.salesLatestDate;
   if (sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
-      && sourceDate.getFullYear() === new Date().getFullYear()
+      && sourceDate.getFullYear() === TODAY_YEAR
       && sourceDate.getMonth() + 1 === TODAY_MONTH) {
     return sourceDate.getDate();
   }
@@ -166,6 +178,7 @@ const fmtA   = v => { const n=+v||0,a=Math.abs(n); return a>=1e8?`${(n/1e8).toFi
 const fmtN   = v => `${Math.round(+v||0).toLocaleString("ko-KR")}`;
 const fmtP   = v => `${(+v||0).toFixed(1)}%`;
 const fmtP1  = v => `${(+v||0).toFixed(1)}%`;
+const fmtYoY = (v, available=true) => available ? `${(+v||0)>0?'+':''}${fmtP(v||0)}` : '비교 없음';
 const tx     = v => String(v??'').replace(/\s+/g,' ').trim();
 const num    = v => typeof v==='number'?v:+(String(v??'').replace(/[^\d.-]/g,''))||0;
 // ★ pct() 핵심 로직:
@@ -332,19 +345,25 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
   const churn      = churnRaw > 0 ? churnRaw : (retained > 0 && cancelSubs > 0 ? cancelSubs / retained * 100 : 0);
   const target     = mv(salesM,'목표매출', spec.cur);
   const gross      = mvAlias(salesM, GROSS_REVENUE_KEYS, spec.cur);
+  const grossPrev  = mvAlias(salesM, GROSS_REVENUE_KEYS, spec.prev);
   const net        = mv(salesM,'순매출',   spec.cur);
+  const netPrev    = mv(salesM,'순매출',   spec.prev);
   const netAchievementRaw   = mvAlias(salesM,['달성률','달성율','달성률(순매출)','순매출 달성률','순매출달성률'], spec.cur, pct);
   const grossAchievementRaw = mvAlias(salesM, GROSS_ACHIEVEMENT_KEYS, spec.cur, pct);
+  const mrr        = mv(mrrM, 'MRR', spec.cur);
+  const mrrPrev    = mv(mrrM, 'MRR', spec.prev);
   return {
     month: label, quarter,
     target,
     gross,
-    grossPrev:    mvAlias(salesM, GROSS_REVENUE_KEYS, spec.prev),
+    grossPrev,
+    hasGrossYoY: grossPrev > 0,
     grossYoY:     mvAlias(salesM, GROSS_REVENUE_KEYS, spec.yoy, pct),
     achievement:  netAchievementRaw || (target ? net / target * 100 : 0),
     grossAchievement: grossAchievementRaw || (target ? gross / target * 100 : 0),
     net,
-    netPrev:      mv(salesM,'순매출',     spec.prev),
+    netPrev,
+    hasNetYoY: netPrev > 0,
     netYoY:       mv(salesM,'순매출',     spec.yoy, pct),
     usage:        mvAlias(salesM,['총사용','사용건수','총이용'],          spec.cur),
     // 할인은 전용 원천 행이 있을 때만 사용한다. 환불을 할인으로 대체하면
@@ -360,8 +379,9 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
     cancelSubs,
     netAdds:      mv(subM,  '순증감',     spec.cur),
     churn,
-    mrr:          mv(mrrM,  'MRR',        spec.cur),
-    mrrPrev:      mv(mrrM,  'MRR',        spec.prev),
+    mrr,
+    mrrPrev,
+    hasMrrYoY: mrrPrev > 0,
     mrrYoY:       mv(mrrM,  'MRR',        spec.yoy, pct),
     arr:          mv(mrrM,  'ARR',        spec.cur),
     arrPrev:      mv(mrrM,  'ARR',        spec.prev),
@@ -597,8 +617,10 @@ function parseFactMonthly(rows) {
       month, monthNum, quarter, status,
       target, targetFull,
       gross, grossPrev,
+      hasGrossYoY: grossPrev > 0,
       grossYoY: grossPrev > 0 ? (gross - grossPrev) / grossPrev * 100 : 0,
       net, netPrev,
+      hasNetYoY: netPrev > 0,
       netYoY: netPrev > 0 ? (net - netPrev) / netPrev * 100 : 0,
       achievement: achievementRaw || (target > 0 ? net / target * 100 : 0),
       grossAchievement: target > 0 ? gross / target * 100 : 0,
@@ -617,6 +639,7 @@ function parseFactMonthly(rows) {
       netAdds: factValue(row, headerIndex, ['순증감_2026']),
       churn: churnRaw || (retained > 0 ? cancelSubs / retained * 100 : 0),
       mrr, mrrPrev,
+      hasMrrYoY: mrrPrev > 0,
       mrrYoY: mrrPrev > 0 ? (mrr - mrrPrev) / mrrPrev * 100 : 0,
       arr: factValue(row, headerIndex, ['ARR_2026']),
       arrPrev: factValue(row, headerIndex, ['ARR_2025']),
@@ -699,6 +722,7 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
 
     m.mrr = finance.mrr || 0;
     m.mrrPrev = finance.mrrPrev || 0;
+    m.hasMrrYoY = m.mrrPrev > 0;
     m.mrrYoY = m.mrrPrev > 0 ? (m.mrr - m.mrrPrev) / m.mrrPrev * 100 : 0;
     m.arr = finance.arr || m.mrr * 12;
     m.arrPrev = finance.arrPrev || m.mrrPrev * 12;
@@ -755,8 +779,10 @@ function aggregatePortfolioMonths(stores) {
       month: spec.month, monthNum: spec.num, quarter: spec.quarter, status: monthStatus(spec.num),
       target, targetFull: sum('targetFull'),
       gross, grossPrev,
+      hasGrossYoY: grossPrev > 0,
       grossYoY: grossPrev > 0 ? (gross - grossPrev) / grossPrev * 100 : 0,
       net, netPrev,
+      hasNetYoY: netPrev > 0,
       netYoY: netPrev > 0 ? (net - netPrev) / netPrev * 100 : 0,
       achievement: target > 0 ? net / target * 100 : 0,
       grossAchievement: target > 0 ? gross / target * 100 : 0,
@@ -771,6 +797,7 @@ function aggregatePortfolioMonths(stores) {
       newSubs: sum('newSubs'), cancelSubs, netAdds: sum('netAdds'),
       churn: retained > 0 ? cancelSubs / retained * 100 : 0,
       mrr, mrrPrev,
+      hasMrrYoY: mrrPrev > 0,
       mrrYoY: mrrPrev > 0 ? (mrr - mrrPrev) / mrrPrev * 100 : 0,
       arr, arrPrev,
       arrYoY: arrPrev > 0 ? (arr - arrPrev) / arrPrev * 100 : 0,
@@ -817,18 +844,22 @@ function aggMonths(months) {
   // 최신 월(마지막 요소) 기준 스냅샷 값
   const last = months[months.length-1];
   return {
-    target:t.target, gross:t.gross, net:t.net,
+    target:t.target, gross:t.gross, grossPrev:t.grossPrev, net:t.net, netPrev:t.netPrev,
     grossYoY: t.comparableGrossPrev?(t.comparableGross-t.comparableGrossPrev)/t.comparableGrossPrev*100:0,
     netYoY:   t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
+    hasGrossYoY:t.comparableGrossPrev>0,
+    hasNetYoY:t.comparableNetPrev>0,
     achievement: t.target?t.net/t.target*100:0,
     grossAchievement: t.target?t.gross/t.target*100:0,
     usage:t.usage, retained:last.retained, retainedPrev:last.retainedPrev,
+    retainedExposure:t.retainedExposure,
     allPassRetained:last.allPassRetained||0, allPassRetainedPrev:last.allPassRetainedPrev||0,
     mrrSubscribers:last.mrrSubscribers||last.retained||0,
     mrrSubscribersPrev:last.mrrSubscribersPrev||last.retainedPrev||0,
     newSubs:t.newSubs,
     cancelSubs:t.cancelSubs, netAdds:t.netAdds, mrr:last.mrr,
     mrrPrev:last.mrrPrev,
+    hasMrrYoY:(last.mrrPrev||0)>0,
     mrrYoY: last.mrrPrev?(last.mrr-last.mrrPrev)/last.mrrPrev*100:0,
     churn:   t.retainedExposure?t.cancelSubs/t.retainedExposure*100:0,
     utilization: t.cap?t.usage/t.cap*100:0,
@@ -935,7 +966,7 @@ function runAudit(months, opsStores) {
     if (s._churnParseFlag) {
       fmtIssues.push(`${s.name}: 이탈률 컬럼 형식 확인 필요 (시트값이 건수로 저장됨 — 해지/유지 비율로 대체 표시 중)`);
     } else if (s.churn > 25) {
-      opIssues.push(`${s.name}: 이탈률 ${fmtP(s.churn)} — 이상치 확인 필요`);
+      opIssues.push(`${s.name}: 이탈률 ${fmtP(s.churn)} — 운영 원인 집중 점검 필요`);
     }
 
     // ── ARPU ─────────────────────────────────────────────────────
@@ -1001,7 +1032,7 @@ function parseSummary(rows) {
 /* ── 8-B. 데이터 점검 시트 파싱 ──────────────────────────────── */
 function isSourceCheckPending(c) {
   const text = `${c?.name || ''} ${c?.status || ''} ${c?.value || ''} ${c?.note || ''}`;
-  if (c?.name === '빌드 상태' && /재생성|진행 중|진행중|빌드/.test(text)) return true;
+  if (['빌드 상태', '대시보드 빌드 상태'].includes(c?.name) && /재생성|진행 중|진행중|빌드/.test(text)) return true;
   if (c?.name === '매출 최신일' && /점검중|미완료|중간에 중단|확인 불가/.test(text)) return true;
   return /대시보드 재생성이 완료되지 않았|최종 점검 미완료/.test(text);
 }
@@ -1053,6 +1084,7 @@ function parseDataQuality(rows) {
       const action = hasGradedDetails ? tx(rows[i][3]) : '';
       if (!loc && !msg) continue;
       if (loc === '위치' && msg === '메시지') continue;
+      if (grade === '정상' && (loc === '-' || !loc) && (!msg || msg === '오류 없음')) continue;
       details.push({ grade, location: loc, message: msg || loc, action });
     }
   }
@@ -1365,7 +1397,8 @@ function renderGauges(ent) {
   const ach  = Math.min(100, achRaw);
   const util = Math.min(100, utilRaw);
   const churnH = Math.max(0, 100 - ((c.churn||0)/12)*100);
-  const mrrM = Math.max(0, Math.min(100, 50 + (c.mrrYoY||0)));
+  const hasMrrYoY = Boolean(c.hasMrrYoY);
+  const mrrM = hasMrrYoY ? Math.max(0, Math.min(100, 50 + (c.mrrYoY||0))) : 50;
 
   // 100% 초과 시 배지 추가
   const achLabel  = achRaw  > 100 ? `${fmtP(achRaw)} ★`  : fmtP(achRaw);
@@ -1380,18 +1413,6 @@ function renderGauges(ent) {
   const momCtxLabel = lastIsMTD
     ? ` (${lastM.month} MTD↔${prevM?.month||'전월'} 확정, 직접비교 주의)`
     : ' MoM';
-  function gaugeDeltaHtml(cur, prev, invert=false) {
-    if (!prevM || prev == null) return '';
-    const d = cur - prev;
-    if (Math.abs(d) < 0.05) return '';
-    const isGood = invert ? d < 0 : d > 0;
-    const arrow = d > 0 ? '▲' : '▼';
-    const color = isGood ? '#6ce8b0' : '#ff8fa0';
-    return ` <span style="font-size:11px;font-weight:700;color:${color}">${arrow}${Math.abs(d).toFixed(1)}%p${momCtxLabel}</span>`;
-  }
-  const achDelta   = gaugeDeltaHtml(lastM?.achievement||0, prevM?.achievement||0, false);
-  const utilDelta  = gaugeDeltaHtml(lastM?.utilization||0, prevM?.utilization||0, false);
-  const churnDelta = gaugeDeltaHtml(lastM?.churn||0, prevM?.churn||0, true);
   // ★ MRR 게이지 delta: YoY율의 전월 변화(▲53.9%p)는 사용자에게 불투명 → 실제 MRR MoM 변화율로 교체
   //   게이지 face는 MRR YoY%, sub에는 "MoM MRR ▲X%" 형태로 기준 명시
   const mrrMoMPct = (lastM && prevM && prevM.mrr > 0)
@@ -1420,18 +1441,20 @@ function renderGauges(ent) {
   // MRR 게이지: 개별 매장 MRR 시트 미연결 시 YoY = 0 → 값 대신 "—" 표시 (fleet proxy 오해 방지)
   const mrrValText = c._mrrNoSheet
     ? '—'
-    : `${(c.mrrYoY||0)>0?'+':''}${fmtP(c.mrrYoY||0)}`;
+    : fmtYoY(c.mrrYoY, hasMrrYoY);
   const mrrSubText = c._mrrNoSheet
     ? `MRR ${fmtS(c.mrr||0)}${arpuSub} · YoY 시트 미연결${periodLabel}`
-    : `MRR ${fmtS(c.mrr||0)}${arpuSub}${mrrDelta}${periodLabel}`;
+    : `MRR ${fmtS(c.mrr||0)}${arpuSub}${hasMrrYoY ? mrrDelta : ' · 전년 동기 운영 이력 없음'}${periodLabel}`;
 
   // HTML의 element ID와 일치: gsvg-*, gval-*, gsub-*
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
-    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubNet}${achDelta}${periodLabel}`);
+    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubNet}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}대${utilDelta}${periodLabel}`);
+    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}대${periodLabel}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
-    churnH, fmtP(c.churn||0), `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${churnDelta}${periodLabel}`);
+    churnH, fmtP(c.churn||0), ms.length > 1
+      ? `기간 이탈 ${fmtN(c.cancelSubs||0)}명 · 월별 유지 합계 ${fmtN(c.retainedExposure||0)}명${periodLabel}`
+      : `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${periodLabel}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
     mrrM, mrrValText, mrrSubText);
 
@@ -1471,7 +1494,7 @@ const KPI_TOOLTIPS = {
   '순매출':  { formula:'순매출 = 실결제매출 − 환불 · 쿠폰 적용 전 추정 결제액 = 실결제매출 + 쿠폰할인', benchmark:'정상가 GMV는 원천 미보유 · 환불율 < 5%' },
   'MRR':    { formula:'활성 구독 기반 반복매출 런레이트. 전체는 단일 PASS+ALL PASS, 매장별은 단일 PASS 기준', benchmark:'YoY +10% 이상 = 성장 안정' },
   '가동률':  { formula:'총사용 ÷ 원천 MTD Capacity\n마감월은 월 Capacity, 미마감월은 유효 경과일 기준 MTD Capacity 사용', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
-  '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
+  '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100 (복수월 선택 시 월별 유지 구독자 합계)', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
   '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' },
   'ARR':    { formula:'MRR × 12 (연간 반복 매출)', benchmark:'YoY +20% 이상 = 고성장' },
   'LTV':    { formula:'ARPU ÷ 월 이탈률 (고객 생애 가치 추정)', benchmark:'LTV ÷ CAC ≥ 3 = 건전' }
@@ -1498,17 +1521,11 @@ function renderKpis(ent) {
   const churnTrend = ms.map(m=>m.churn||0);
   const addsTrend  = ms.map(m=>m.netAdds||0);
 
-  // 최신 달과 직전 달로 MoM 계산
+  // 최신 달은 MTD 월말 예상의 원천 기준으로만 사용한다.
   const lastM = ms.length ? ms[ms.length-1] : null;
-  const prevM = ms.length >= 2 ? ms[ms.length-2] : null;
-  const momUtil  = (lastM&&prevM&&prevM.utilization>0) ? lastM.utilization - prevM.utilization : null;
-  const momChurn = (lastM&&prevM&&prevM.churn>0)       ? lastM.churn - prevM.churn             : null;
-  const momAdds  = (lastM&&prevM)                       ? lastM.netAdds - prevM.netAdds         : null;
-
-  // 월말 예상 (최신 달 run-rate 기반) ───────────────────────
-  // 오늘이 몇 일째인지 기반으로 월 진행률 추산 (단순화: 오늘 날짜/30)
-  const todayDay  = getMtdDay();
-  const daysInMon = new Date(new Date().getFullYear(), new Date().getMonth()+1, 0).getDate();
+  // 월말 예상 (최신 달 원천 경과일·월일수 기반) ──────────────
+  const todayDay  = lastM?.elapsedDays || getMtdDay();
+  const daysInMon = lastM?.daysInSourceMonth || daysInMonth(lastM?.monthNum || TODAY_MONTH, TODAY_YEAR);
   const elapsed   = Math.max(1, Math.min(todayDay, daysInMon));
   const monthProg = elapsed / daysInMon; // 0~1
 
@@ -1519,43 +1536,50 @@ function renderKpis(ent) {
 
   const kpis = [
     { label:'실결제매출',  val:fmtS(c.gross),
-      delta:c.grossYoY,   sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)} · 순매출 달성 ${fmtP(c.achievement||0)}`,
+      delta:c.hasGrossYoY ? c.grossYoY : null,   sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)} · 순매출 달성 ${fmtP(c.achievement||0)}`,
+      deltaContext:'YoY',
       prog:c.grossAchievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
-      projection: projGross ? `월말 예상 ${fmtS(projGross)}` : null },
+      projection: projGross ? `${lastM.month} 월말 예상 ${fmtS(projGross)}` : null },
     { label:'순매출',  val:fmtS(c.net),
-      delta:c.netYoY,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}`,
+      delta:c.hasNetYoY ? c.netYoY : null,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}`,
+      deltaContext:'YoY',
       color:'navy',  spark:netTrend, sparkColor:'#24344f' },
     { label:'MRR',    val:fmtS(c.mrr||0),
-      delta:c.mrrYoY,     sub:`MRR YoY · 전월 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`,
+      delta:c.hasMrrYoY ? c.mrrYoY : null,
+      sub:c.hasMrrYoY
+        ? `MRR YoY · 전년 동기 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`
+        : `MRR YoY 비교 없음 · 전년 동기 운영 이력 없음${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`,
+      deltaContext:'YoY',
       color:'green', spark:mrrTrend, sparkColor:'#216552' },
     { label:'가동률',  val:fmtP(c.utilization||0),
-      delta:momUtil!==null?momUtil:null, deltaSuffix:'%p',
-      sub:`총사용 ${fmtN(c.usage||0)}대`,
+      delta:null, deltaSuffix:'%p',
+      sub:`${ms.length > 1 ? '기간 ' : ''}총사용 ${fmtN(c.usage||0)}대`,
       color:'amber', spark:utilTrend, sparkColor:'#c07b48',
       projection: (c.achievement||0)>0 && (c.achievement||0)<100
         ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(c.utilization||0) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
     { label:'이탈률',  val:fmtP(c.churn||0),
-      delta:momChurn!==null?momChurn:null, deltaSuffix:'%p', invert:true,
-      sub:`해지 ${fmtN(c.cancelSubs||0)}건 · 유지 ${fmtN(c.retained||0)}건`,
-      color:'rose', spark:churnTrend, sparkColor:'#b24c58',
-      projection: (c.churn||0) > 6 ? `월말 예상 해지 ${fmtN(Math.round((c.churn||0)/100*(c.retained||0)))}명` : null },
+      delta:null, deltaSuffix:'%p', invert:true,
+      sub:ms.length > 1
+        ? `기간 해지 ${fmtN(c.cancelSubs||0)}건 · 월별 유지 합계 ${fmtN(c.retainedExposure||0)}건`
+        : `해지 ${fmtN(c.cancelSubs||0)}건 · 유지 ${fmtN(c.retained||0)}건`,
+      color:'rose', spark:churnTrend, sparkColor:'#b24c58' },
     { label:'순증감',  val:(c.netAdds||0)>=0?`+${fmtN(c.netAdds)}`:fmtN(c.netAdds||0),
-      delta:momAdds!==null?momAdds:null, deltaSuffix:'건', isRaw:true,
-      sub:`신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`,
+      delta:null, deltaSuffix:'건', isRaw:true,
+      sub:`${ms.length > 1 ? '기간 ' : ''}신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)}`,
       color:'teal', spark:addsTrend, sparkColor:'#1d7a8a',
       projection: (c.netAdds||0) < 0
-        ? `현 추세 유지 시 월 구독 ${c.netAdds||0}건 감소` : null }
+        ? `선택 기간 순감 ${fmtN(Math.abs(c.netAdds||0))}건` : null }
   ];
   // ★ Priority 4: 최신 달 MTD 여부로 MoM 라벨 분기
   const _kpiLastM = ms.length ? ms[ms.length-1] : null;
-  const _kpiMomCtx = (_kpiLastM && monthStatus(_kpiLastM.num) === 'mtd') ? 'MTD기준' : 'MoM';
+  const _kpiMomCtx = (_kpiLastM && (_kpiLastM.status || monthStatus(_kpiLastM.monthNum)) === 'mtd') ? '전월 확정 대비(MTD)' : 'MoM';
   $('kpiGrid').innerHTML = kpis.map(k => {
     const hasDelta = k.delta != null && !isNaN(k.delta);
     const deltaClass = hasDelta ? (k.invert ? (k.delta<=0?'up':'down') : (k.delta>=0?'up':'down')) : 'neutral';
     const suffix = k.deltaSuffix || '%';
     const absD   = Math.abs(k.delta||0);
     const deltaText = hasDelta
-      ? `${(k.delta||0)>=0?'▲':'▼'} ${k.isRaw ? fmtN(absD) : absD.toFixed(1)}${suffix} ${_kpiMomCtx}`
+      ? `${(k.delta||0)>=0?'▲':'▼'} ${k.isRaw ? fmtN(absD) : absD.toFixed(1)}${suffix} ${k.deltaContext || _kpiMomCtx}`
       : '';
     const prog = k.prog != null ? `<div class="kpi-progress"><div class="kpi-bar ${k.color}" style="width:${Math.min(100,k.prog||0)}%"></div></div>` : '';
     const spark = k.spark && k.spark.some(v=>v>0) && k.spark.length>=2 ? `<div class="kpi-spark">${sparkline(k.spark, k.sparkColor)}</div>` : '';
@@ -1610,7 +1634,8 @@ function renderSignals(ent) {
 
   // MRR
   const mrrYoY = c.mrrYoY||0;
-  if (mrrYoY >= 10)    signals.push({type:'ok',  title:'MRR 고성장', text:`YoY +${fmtP(mrrYoY)} · ${fmtS(c.mrr||0)}`});
+  if (!c.hasMrrYoY)    signals.push({type:'warn', title:'MRR 비교 제외', text:`전년 동기 운영 이력 없음 · ${fmtS(c.mrr||0)}`});
+  else if (mrrYoY >= 10) signals.push({type:'ok', title:'MRR 고성장', text:`YoY +${fmtP(mrrYoY)} · ${fmtS(c.mrr||0)}`});
   else if (mrrYoY >= 0) signals.push({type:'ok', title:'MRR 성장', text:`YoY +${fmtP(mrrYoY)}`});
   else                  signals.push({type:'warn', title:'MRR 감소', text:`YoY ${fmtP(mrrYoY)} — 구독 확대 필요`});
 
@@ -1633,13 +1658,17 @@ function renderInsights(ent) {
         .sort((a,b) => b.gross - a.gross)[0]
     : null;
   const achStatus = (c.achievement||0)>=100?'목표 초과 달성':(c.achievement||0)>=80?'목표 근접':'목표 미달';
-  const mrrDir    = (c.mrrYoY||0)>=0?'성장 중':'감소 중';
+  const mrrDir    = !c.hasMrrYoY ? '전년 비교 제외' : (c.mrrYoY||0)>=0?'성장 중':'감소 중';
   const latestM   = ms.length ? ms[ms.length-1] : null;
   const firstM    = ms.length ? ms[0].month : '';
   const lastM_str = ms.length ? ms[ms.length-1].month : '';
+  const lastPeriodLabel = latestM && (latestM.status || monthStatus(latestM.monthNum)) === 'mtd'
+    ? `${lastM_str} MTD`
+    : lastM_str;
 
   // FIX 5C — 기간 정보 헤드라인에 추가
-  const periodInfo = ms.length > 0 ? `[${firstM}~${lastM_str} 기준] ` : '';
+  const periodRangeLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel}` : lastPeriodLabel;
+  const periodInfo = ms.length > 0 ? `[${periodRangeLabel} 기준] ` : '';
   // ★ v3: 운영 중 매장 수 동적 (오픈 전 제외)
   const _insActiveN = getActiveOpsStores().length;
   let summary = ent.isAll
@@ -1648,13 +1677,13 @@ function renderInsights(ent) {
 
   if (ent.isAll && topStore) {
     // ★ v3: 기간 명시 — 누적 합산 기준임을 명확히
-    const topPeriodLabel = ms.length > 1 ? `${firstM}~${lastM_str} 합산` : firstM;
+    const topPeriodLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel} 합산` : lastPeriodLabel;
     summary += `${topPeriodLabel} 최고 매출: ${topStore.name} (${fmtS(topStore.gross)}).`;
   }
   if (latestM && ms.length >= 2) {
     const prev = ms[ms.length-2];
     const momGross = prev.gross>0?(latestM.gross-prev.gross)/prev.gross*100:0;
-    const latestIsMTD = monthStatus(latestM.num) === 'mtd';
+    const latestIsMTD = (latestM.status || monthStatus(latestM.monthNum)) === 'mtd';
     if (Math.abs(momGross)>0.5) {
       if (latestIsMTD) {
         // MTD월은 확정월과 직접 비교 부적절 → 비교 기준을 명시적으로 표기
@@ -1780,8 +1809,8 @@ function renderInsights(ent) {
   // ★ v3: 오픈 전 제외한 운영 중 매장 수 표시
   const _focusActiveN = getActiveOpsStores().length;
   $('focusSub').textContent = ent.isAll
-    ? `${ms.length}개월 합산 · 운영 ${_focusActiveN}개 매장`
-    : `${ms.length}개월 추적 중`;
+    ? `${ms.length}개월 합산${ms[ms.length-1]?.status === 'mtd' ? ' · 최신월 MTD' : ''} · 운영 ${_focusActiveN}개 매장`
+    : `${ms.length}개월 추적 중${ms[ms.length-1]?.status === 'mtd' ? ' · 최신월 MTD' : ''}`;
 
   if (!ent.isAll) {
     const sc = computeScore(c);
@@ -2242,7 +2271,7 @@ function renderMrrTrendChart(ent) {
           borderColor:PALETTE.teal, borderWidth:2.5, pointRadius:4,
           pointBackgroundColor:PALETTE.teal,
           fill:false, tension:0.4, yAxisID:'subs' },
-        { type:'line', label:'MRR YoY %', data:ms.map(m=>m.mrrYoY||0),
+        { type:'line', label:'MRR YoY %', data:ms.map(m=>m.hasMrrYoY ? m.mrrYoY : null),
           borderColor:PALETTE.navy, borderWidth:1.5, pointRadius:2,
           borderDash:[5,3], fill:false, tension:0.4, yAxisID:'pct' }
       ]
@@ -2835,7 +2864,7 @@ function renderHeroKpis(ent) {
   if (!el) return;
   const items = [
     { label:'실결제매출', val: fmtS(c.gross), note: `실결제매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
-    { label:'MRR',   val: fmtS(c.mrr||0), note: `MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`, good: (c.mrrYoY||0)>=0 },
+    { label:'MRR',   val: fmtS(c.mrr||0), note: `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)}`, good: c.hasMrrYoY ? (c.mrrYoY||0)>=0 : null },
     { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}대 사용`, good: (c.utilization||0)>=70 },
     { label:'이탈률', val: fmtP(c.churn||0), note: `해지 ${fmtN(c.cancelSubs||0)}건`, good: (c.churn||0)<8, invert:true },
     { label:'순증감', val: `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}`, note: `신규 ${fmtN(c.newSubs||0)} − 해지 ${fmtN(c.cancelSubs||0)}`, good: (c.netAdds||0)>=0 },
@@ -2864,20 +2893,29 @@ function renderHeroKpis(ent) {
   const sourceStr = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? sourceDate.toLocaleDateString('ko-KR', {month:'numeric', day:'numeric'})
     : sourcePending ? '점검 보류' : '확인 불가';
-  const now = new Date();
-  const sourceLagDays = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
+  const sourceAgeDays = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? Math.max(0, Math.round((
-        new Date(now.getFullYear(), now.getMonth(), now.getDate())
-        - new Date(sourceDate.getFullYear(), sourceDate.getMonth(), sourceDate.getDate())
+        Date.UTC(TODAY_YEAR, TODAY_MONTH - 1, TODAY_DAY)
+        - Date.UTC(sourceDate.getFullYear(), sourceDate.getMonth(), sourceDate.getDate())
       ) / 86400000))
     : null;
-  const sourceClass = sourcePending ? 'info' : sourceLagDays !== null && sourceLagDays > 1 ? 'warn' : 'ok';
+  // 전일 마감 원천은 정상 SLA다. 이틀 이상 차이부터 실제 지연일로 표시한다.
+  const sourceLagDays = sourceAgeDays === null ? null : Math.max(0, sourceAgeDays - 1);
+  const sourceFreshness = sourceAgeDays === 0
+    ? ' · 당일까지 반영'
+    : sourceAgeDays === 1
+      ? ' · 전일까지 반영'
+      : sourceLagDays > 0 ? ` · ${sourceLagDays}일 지연` : '';
+  const sourceClass = sourcePending ? 'info' : sourceLagDays !== null && sourceLagDays > 0 ? 'warn' : 'ok';
 
   // 분석 범위 요약
   const months    = ent.months;
   const firstM    = months.length ? months[0].month : '—';
-  const lastM_    = months.length ? months[months.length-1].month : '—';
-  const rangeStr  = months.length > 1 ? `${firstM}~${lastM_} (${months.length}개월)` : firstM;
+  const lastMonthObj = months.length ? months[months.length-1] : null;
+  const lastM_    = lastMonthObj
+    ? `${lastMonthObj.month}${(lastMonthObj.status || monthStatus(lastMonthObj.monthNum)) === 'mtd' ? ' MTD' : ''}`
+    : '—';
+  const rangeStr  = months.length > 1 ? `${firstM}~${lastM_} (${months.length}개월)` : lastM_;
 
   // 현재 필터 상태
   // ★ v3: 운영 중 / 오픈 예정 동적 카운트
@@ -2918,7 +2956,7 @@ function renderHeroKpis(ent) {
     <span class="meta-pill">📊 ${storeStr} · ${qStr}</span>
     <span class="meta-pill">📅 ${rangeStr}</span>
     <span class="meta-pill ${connClass}">● 시트 연결 ${connectionIssue ? '일부 실패' : '정상'}</span>
-    <span class="meta-pill ${sourceClass}">🗂 원천 매출 ${sourceStr}${sourceLagDays ? ` · ${sourceLagDays}일 지연` : ''}</span>
+    <span class="meta-pill ${sourceClass}">🗂 원천 매출 ${sourceStr}${sourceFreshness}</span>
     <span class="meta-pill ${auditClass}" id="auditBadge">${auditText}</span>
     <span class="meta-pill">↻ 자동갱신 5분</span>
   `;
@@ -3626,89 +3664,55 @@ function renderSubscriptionPipeline(ent) {
   }
 }
 
-/* ── 15-D2. 이탈 원인 분류 (자발/비자발) ──────────────────────── */
-// ★ Change 7: 이탈 원인 분류 분석 섹션
+/* ── 15-D2. 이탈 사유 데이터 상태 ─────────────────────────────── */
 function renderChurnClassification(ent) {
   const el = $('churnClassPanel');
   if (!el) return;
   const c  = ent.current;
   const ms = ent.months;
-
-  const cancelSubs = c.cancelSubs || 0;
-  const voluntary  = Math.round(cancelSubs * 0.70);
-  const involuntary= cancelSubs - voluntary;
-  const churnRate  = c.churn || 0;
-  const volRate    = churnRate * 0.70;
-  const invRate    = churnRate * 0.30;
-
-  // 트렌드 — 최근 달 이탈 합계
-  const totalCancelAll = ms.reduce((s,m)=>s+(m.cancelSubs||0),0);
-  const totalVolAll    = Math.round(totalCancelAll * 0.70);
-  const totalInvAll    = totalCancelAll - totalVolAll;
+  const latest = ms.length ? ms[ms.length - 1] : null;
+  const periodCancel = c.cancelSubs || 0;
+  const latestCancel = latest?.cancelSubs || 0;
+  const latestChurn = latest?.retained > 0 ? latestCancel / latest.retained * 100 : 0;
+  const periodLabel = ms.length > 1
+    ? `${ms[0].month}~${latest?.month || ''}`
+    : latest?.month || '선택 기간';
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
       <div>
-        <h2 style="font-size:14px;font-weight:800;margin:0 0 3px">이탈 원인 분류 분석</h2>
-        <p class="sub" style="margin:0">자발적 이탈 vs 비자발적 이탈 (결제실패) 추정 분류</p>
+        <h2 style="font-size:14px;font-weight:800;margin:0 0 3px">이탈 사유 데이터 상태</h2>
+        <p class="sub" style="margin:0">확정 해지 건수와 사유 데이터 연결 여부</p>
       </div>
       <span class="section-tag" style="background:var(--rose-soft);color:var(--rose)">구독 엔진</span>
     </div>
 
-    <!-- ★ v3: 강화된 추정치 경고 배너 (섹션 최상단, 눈에 띄게) -->
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 14px;background:rgba(192,123,72,.12);border:1.5px solid rgba(192,123,72,.45);border-radius:var(--r-md);margin-bottom:12px">
-      <span style="font-size:16px;line-height:1.2">⚠</span>
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 14px;background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--r-md);margin-bottom:12px">
       <div>
-        <div style="font-size:12px;font-weight:900;color:var(--amber);margin-bottom:3px">추정치 — 실데이터 미연결</div>
+        <div style="font-size:12px;font-weight:900;color:var(--text);margin-bottom:3px">해지 사유 원천 미연결</div>
         <div style="font-size:11.5px;color:var(--text-2);line-height:1.55">
-          아래 수치는 <strong>업계 평균 비율(자발 70% / 결제실패 30%)</strong>을 적용한 통계적 추정값입니다.
-          실제 해지 원인 데이터(CRM·결제 실패 로그)가 연결되지 않은 상태로,
-          의사결정 참고용으로만 사용하세요.
+          현재 시트에는 자발 해지·결제 실패를 구분하는 컬럼이 없습니다.
+          확인되지 않은 비율 추정은 표시하지 않으며, 아래에는 원천에서 확인되는 해지 합계만 제공합니다.
         </div>
       </div>
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-      <!-- 자발적 이탈 -->
-      <div style="background:var(--surface-soft);border:1px solid var(--border);border-left:3px solid var(--amber);border-radius:var(--r-md);padding:14px 16px">
-        <div style="font-size:10.5px;font-weight:700;color:var(--amber);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">자발적 이탈 <span style="font-weight:500;opacity:.7">(추정)</span></div>
-        <div style="font-size:22px;font-weight:900;color:var(--text);margin-bottom:2px">${fmtN(voluntary)}명<sup style="font-size:10px;color:var(--amber);font-weight:700"> 추정</sup></div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${fmtP(volRate)} · 전체 해지의 70%</div>
-        <div style="height:6px;background:var(--bg2);border-radius:99px;overflow:hidden;margin-bottom:8px">
-          <div style="height:100%;width:70%;background:var(--amber);border-radius:99px"></div>
-        </div>
-        <div style="font-size:11.5px;color:var(--text-2);font-weight:600">→ 서비스 품질 점검 · 혜택 강화</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px">기간 합산: ${fmtN(totalVolAll)}명 추정</div>
-      </div>
-      <!-- 비자발적 이탈 -->
+    <div class="churn-status-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
       <div style="background:var(--surface-soft);border:1px solid var(--border);border-left:3px solid var(--rose);border-radius:var(--r-md);padding:14px 16px">
-        <div style="font-size:10.5px;font-weight:700;color:var(--rose);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">비자발적 이탈 (결제실패) <span style="font-weight:500;opacity:.7">(추정)</span></div>
-        <div style="font-size:22px;font-weight:900;color:var(--text);margin-bottom:2px">${fmtN(involuntary)}명<sup style="font-size:10px;color:var(--rose);font-weight:700"> 추정</sup></div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${fmtP(invRate)} · 전체 해지의 30%</div>
-        <div style="height:6px;background:var(--bg2);border-radius:99px;overflow:hidden;margin-bottom:8px">
-          <div style="height:100%;width:30%;background:var(--rose);border-radius:99px"></div>
-        </div>
-        <div style="font-size:11.5px;color:var(--text-2);font-weight:600">→ 결제 재시도 자동화 · 문자 알림 강화</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px">기간 합산: ${fmtN(totalInvAll)}명 추정</div>
+        <div style="font-size:10.5px;font-weight:700;color:var(--rose);letter-spacing:.05em;margin-bottom:6px">최근월 해지</div>
+        <div style="font-size:22px;font-weight:900;color:var(--text);margin-bottom:2px">${fmtN(latestCancel)}명</div>
+        <div style="font-size:11px;color:var(--muted)">${latest?.month || '최근월'} · 유지 대비 ${fmtP(latestChurn)}</div>
+      </div>
+      <div style="background:var(--surface-soft);border:1px solid var(--border);border-left:3px solid var(--navy);border-radius:var(--r-md);padding:14px 16px">
+        <div style="font-size:10.5px;font-weight:700;color:var(--navy);letter-spacing:.05em;margin-bottom:6px">선택 기간 해지 합계</div>
+        <div style="font-size:22px;font-weight:900;color:var(--text);margin-bottom:2px">${fmtN(periodCancel)}명</div>
+        <div style="font-size:11px;color:var(--muted)">${periodLabel} 원천 합계</div>
       </div>
     </div>
 
-    <!-- 시각적 비율 바 -->
-    <div style="margin-bottom:10px">
-      <div style="display:flex;height:18px;border-radius:99px;overflow:hidden;gap:2px">
-        <div style="width:70%;background:var(--amber);display:flex;align-items:center;justify-content:center">
-          <span style="font-size:10px;font-weight:800;color:#fff">자발 70% (추정)</span>
-        </div>
-        <div style="width:30%;background:var(--rose);display:flex;align-items:center;justify-content:center">
-          <span style="font-size:10px;font-weight:800;color:#fff">결제 30% (추정)</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 실데이터 연결 안내 -->
     <div style="padding:8px 12px;background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--muted);line-height:1.6">
-      💡 <strong>실데이터 연결 방법:</strong> CRM 해지 사유 분류 + PG사 결제 실패 로그를 연동하면
-      이 섹션이 실제 수치로 자동 업데이트됩니다 (담당: 사업운영팀).
+      <strong>필요 원천:</strong> CRM 해지 사유 코드와 PG 결제 실패 로그가 시트에 연결되면
+      자발·비자발 이탈을 실제 수치로 분류할 수 있습니다.
     </div>
   `;
 }
@@ -4084,7 +4088,7 @@ function renderDetail(ent) {
   const items = [
     { label:'실결제매출',    val:fmtS(c.gross),         sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}` },
     { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `실결제매출−환불 · 쿠폰할인 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `실결제매출−환불 · ${couponUnavailableLabel(c)}` },
-    { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}` },
+    { label:'MRR',      val:fmtS(c.mrr||0),         sub:`MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)}` },
     { label:'순매출 달성률',   val:fmtP(c.achievement||0),  sub:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}` },
     { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
         const capAll = buildCapacityData(ent);
@@ -4587,7 +4591,7 @@ function renderInlineStoreDetail(ent) {
       <button class="inline-detail-close" id="inlineDetailClose">✕ 닫기</button>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">
+    <div class="inline-kpi-grid inline-kpi-grid-primary" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">
       ${[
         {l:'실결제매출',      v:fmtS(c.gross),        s:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}`},
         {l:'순매출 달성률',      v:fmtP(ach),             s:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`},
@@ -4601,9 +4605,9 @@ function renderInlineStoreDetail(ent) {
           <div class="d-sub">${i.s}</div>
         </div>`).join('')}
     </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+    <div class="inline-kpi-grid inline-kpi-grid-secondary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
       ${[
-        {l:'MRR',         v:fmtS(c.mrr||0),      s:`MRR YoY ${(c.mrrYoY||0)>=0?'+':''}${fmtP(c.mrrYoY||0)}`},
+        {l:'MRR',         v:fmtS(c.mrr||0),      s:`MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)}`},
         {l:'ARPU',        v:(c.arpu||0)>0?fmtS(c.arpu):'—', s:arpuBasisLabel(c)},
         {l:'ARR',         v:(c.arr||0)>0?fmtS(c.arr):'—', s:`ARR YoY ${c.arrYoY?(c.arrYoY>0?'+':'')+fmtP(c.arrYoY):'—'}`},
         {l:'LTV(추정)',    v:(c.ltv||0)>0?fmtW(c.ltv):'—', s:`ARPU ÷ 이탈률 추정`},
@@ -4615,7 +4619,7 @@ function renderInlineStoreDetail(ent) {
         </div>`).join('')}
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+    <div class="inline-analysis-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
       <div>
         <div class="drilldown-section-title" style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">⚠ 점검 포인트</div>
         ${issues.map(i=>`
@@ -4662,7 +4666,7 @@ function renderAll() {
   renderAlerts(ent);
   renderActionCenter(ent);   // ★ 액션 커맨드 센터 — 상단 우선 노출
   renderGauges(ent);
-  // renderKpis(ent);  // ★ [Change 2] KPI 카드 레이어 비활성화 — 게이지에 필수 정보 통합됨
+  renderKpis(ent);
   renderSignals(ent);
   renderInsights(ent);
   renderPerformanceChart(ent);

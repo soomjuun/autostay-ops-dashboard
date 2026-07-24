@@ -6,6 +6,7 @@ const appPath = path.join(__dirname, 'app.js');
 const sheetId = '1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo';
 
 const gids = {
+  summary: 446178451,
   ops: 638953343,
   sales: 1760990535,
   subs: 625947534,
@@ -33,7 +34,7 @@ function createDashboardApi() {
       parseFactMonthly, parseOverallMonthly, applyPortfolioFinancials,
       mergeStoreWithFact, aggregatePortfolioMonths,
       parseStore, parseOps, parseOverall, applyPortfolioCouponDiscounts,
-      aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
+      parseSummary, aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
       runAudit, buildCapacityData,
       setDashboard: value => { dashboard = value; },
       setState: value => { state = value; }
@@ -92,10 +93,34 @@ function closeEnough(actual, expected) {
   return Math.abs(actual - expected) <= Math.max(1, Math.abs(expected) * 1e-9);
 }
 
+function metricClose(actual, expected, percentage = false) {
+  const absTolerance = percentage ? 0.05 : 1;
+  const relativeTolerance = percentage ? 1e-5 : 1e-7;
+  return Math.abs(Number(actual || 0) - Number(expected || 0)) <=
+    Math.max(absTolerance, Math.abs(Number(expected || 0)) * relativeTolerance);
+}
+
+function rawPercent(value) {
+  const number = Number(value || 0);
+  return Math.abs(number) <= 3 ? number * 100 : number;
+}
+
+function kstDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return { year:Number(values.year), month:Number(values.month), day:Number(values.day) };
+}
+
 async function main() {
   const api = createDashboardApi();
   const storeNames = Object.keys(gids.stores);
   const entries = await Promise.all([
+    loadSheet(gids.summary),
     loadSheet(gids.ops),
     loadSheet(gids.sales),
     loadSheet(gids.subs),
@@ -106,13 +131,13 @@ async function main() {
     loadSheet(gids.overallMonthly, true),
     ...storeNames.map(name => loadSheet(gids.stores[name]))
   ]);
-  const [opsRows, salesRows, subsRows, mrrRows, couponRows, dataCheckRows, factRows, overallMonthlyRows, ...storeRows] = entries;
+  const [summaryRows, opsRows, salesRows, subsRows, mrrRows, couponRows, dataCheckRows, factRows, overallMonthlyRows, ...storeRows] = entries;
 
   const factByStore = api.parseFactMonthly(factRows);
-  const stores = storeNames.map((name, index) =>
-    api.mergeStoreWithFact(api.parseStore(name, storeRows[index]), factByStore)
-  );
+  const parsedStores = storeNames.map((name, index) => api.parseStore(name, storeRows[index]));
+  const stores = parsedStores.map(store => api.mergeStoreWithFact(store, factByStore));
   const opsStores = api.parseOps(opsRows);
+  const summaryKpis = api.parseSummary(summaryRows);
   const dataQuality = api.parseDataQuality(dataCheckRows);
   const legacyOverall = api.parseOverall(salesRows, subsRows, mrrRows);
   const financialOverall = api.applyPortfolioFinancials(
@@ -132,13 +157,133 @@ async function main() {
   const header = factRows[0];
   const index = Object.fromEntries(header.map((name, col) => [name, col]));
   const rawNumber = (row, key) => Number(row[index[key]] || 0);
+  const rawText = (row, key) => String(row[index[key]] ?? '').trim();
   const rawByMonth = new Map();
-  factRows.slice(1).forEach(row => {
+  const rawRows = factRows.slice(1).filter(row => row.some(value => String(value ?? '').trim() !== ''));
+  rawRows.forEach(row => {
     const month = rawNumber(row, '월번호');
     if (!rawByMonth.has(month)) rawByMonth.set(month, []);
     rawByMonth.get(month).push(row);
   });
   const canonicalFinanceByMonth = api.parseOverallMonthly(overallMonthlyRows);
+
+  const requiredFactHeaders = [
+    '분기', '월번호', '월라벨', '매장', 'Capacity', '목표매출',
+    '총매출_2026', '환불_2026', '순매출_2026', '총사용_2026',
+    '신규_2026', '해지_2026', '유지_2026', '순증감_2026',
+    '달성률_2026', '이탈률_2026', '환불율_2026', '가동률_2026',
+    'MRR_2026', 'MTD_Capacity_2026', 'ARR_2026'
+  ];
+  const requiredOverallHeaders = [
+    '월번호', 'MRR_2026', 'MRR_2025', '유지_2026', '올패스유지_2026', 'ARR_2026'
+  ];
+  const overallHeaders = overallMonthlyRows[0] || [];
+  const schemaIssues = [
+    ...requiredFactHeaders.filter(name => !header.includes(name)).map(name => ({ source:'fact_monthly', missingHeader:name })),
+    ...requiredOverallHeaders.filter(name => !overallHeaders.includes(name)).map(name => ({ source:'_overall_monthly', missingHeader:name }))
+  ];
+
+  const grainIssues = [];
+  const factKeys = new Set();
+  const maxFactMonth = Math.max(0, ...rawRows.map(row => rawNumber(row, '월번호')));
+  rawRows.forEach(row => {
+    const store = rawText(row, '매장');
+    const month = rawNumber(row, '월번호');
+    const key = `${store}|${month}`;
+    if (!storeNames.includes(store) || month < 1 || month > 12) {
+      grainIssues.push({ key, issue:'invalid store or month' });
+    } else if (factKeys.has(key)) {
+      grainIssues.push({ key, issue:'duplicate store-month key' });
+    }
+    factKeys.add(key);
+  });
+  storeNames.forEach(store => {
+    const startMonth = store === '안성' ? 5 : 1;
+    for (let month = startMonth; month <= maxFactMonth; month++) {
+      const key = `${store}|${month}`;
+      if (!factKeys.has(key)) grainIssues.push({ key, issue:'missing active store-month row' });
+    }
+  });
+
+  const formulaIssues = [];
+  const recordFormulaIssue = (row, formula, actual, expected, percentage = false) => {
+    if (!metricClose(actual, expected, percentage)) {
+      formulaIssues.push({
+        key:`${rawText(row, '매장')}|${rawNumber(row, '월번호')}`,
+        formula,
+        actual:Number(actual || 0),
+        expected:Number(expected || 0)
+      });
+    }
+  };
+  rawRows.forEach(row => {
+    const month = rawNumber(row, '월번호');
+    const gross = rawNumber(row, '총매출_2026');
+    const refund = rawNumber(row, '환불_2026');
+    const net = rawNumber(row, '순매출_2026');
+    const usage = rawNumber(row, '총사용_2026');
+    const retained = rawNumber(row, '유지_2026');
+    const newSubs = rawNumber(row, '신규_2026');
+    const cancels = rawNumber(row, '해지_2026');
+    const netAdds = rawNumber(row, '순증감_2026');
+    const capacity = rawNumber(row, 'Capacity');
+    const mtdCapacity = rawNumber(row, 'MTD_Capacity_2026');
+    const targetFull = rawNumber(row, '목표매출');
+    const effectiveTarget = month === maxFactMonth && capacity > 0
+      ? targetFull * Math.max(0, Math.min(1, mtdCapacity / capacity))
+      : targetFull;
+    const nonNegative = {
+      gross, refund, net, usage, retained, newSubs, cancels,
+      capacity, mtdCapacity,
+      mrr:rawNumber(row, 'MRR_2026'),
+      arr:rawNumber(row, 'ARR_2026')
+    };
+    Object.entries(nonNegative).forEach(([field, value]) => {
+      if (value < 0) formulaIssues.push({
+        key:`${rawText(row, '매장')}|${month}`,
+        formula:`${field} nonnegative`,
+        actual:value,
+        expected:0
+      });
+    });
+    recordFormulaIssue(row, 'net = gross - refund', net, gross - refund);
+    recordFormulaIssue(row, 'net adds = new - cancels', netAdds, newSubs - cancels);
+    recordFormulaIssue(row, 'utilization = usage / MTD capacity',
+      rawPercent(rawNumber(row, '가동률_2026')),
+      mtdCapacity > 0 ? usage / mtdCapacity * 100 : 0,
+      true
+    );
+    recordFormulaIssue(row, 'refund rate = refund / gross',
+      rawPercent(rawNumber(row, '환불율_2026')),
+      gross > 0 ? refund / gross * 100 : 0,
+      true
+    );
+    recordFormulaIssue(row, 'churn = cancels / retained',
+      rawPercent(rawNumber(row, '이탈률_2026')),
+      retained > 0 ? cancels / retained * 100 : 0,
+      true
+    );
+    recordFormulaIssue(row, 'net achievement = net / elapsed target',
+      rawPercent(rawNumber(row, '달성률_2026')),
+      effectiveTarget > 0 ? net / effectiveTarget * 100 : 0,
+      true
+    );
+    recordFormulaIssue(row, 'ARR = MRR x 12',
+      rawNumber(row, 'ARR_2026'),
+      rawNumber(row, 'MRR_2026') * 12
+    );
+    if (mtdCapacity > capacity + 1) {
+      formulaIssues.push({
+        key:`${rawText(row, '매장')}|${month}`,
+        formula:'MTD capacity <= full capacity',
+        actual:mtdCapacity,
+        expected:capacity
+      });
+    }
+    if (month < maxFactMonth) {
+      recordFormulaIssue(row, 'closed month MTD capacity = full capacity', mtdCapacity, capacity);
+    }
+  });
 
   const discrepancies = [];
   overall.forEach(month => {
@@ -156,6 +301,58 @@ async function main() {
     Object.entries(checks).forEach(([key, expected]) => {
       const actual = Number(month[key] || 0);
       if (!closeEnough(actual, expected)) discrepancies.push({ month: month.month, key, actual, expected });
+    });
+  });
+
+  const storeTabDiscrepancies = [];
+  const storeFields = [
+    ['gross', false], ['net', false], ['usage', false], ['retained', false],
+    ['newSubs', false], ['cancelSubs', false], ['netAdds', false], ['mrr', false],
+    ['utilization', true], ['refundRate', true], ['achievement', true]
+  ];
+  parsedStores.forEach(store => {
+    const canonicalMonths = factByStore.get(store.name) || [];
+    canonicalMonths.forEach(expected => {
+      const actual = store.months.find(month => month.monthNum === expected.monthNum);
+      if (!actual) {
+        storeTabDiscrepancies.push({ key:`${store.name}|${expected.monthNum}`, issue:'missing month in store detail tab' });
+        return;
+      }
+      storeFields.forEach(([field, percentage]) => {
+        if (!metricClose(actual[field], expected[field], percentage)) {
+          storeTabDiscrepancies.push({
+            key:`${store.name}|${expected.monthNum}`,
+            field,
+            actual:Number(actual[field] || 0),
+            expected:Number(expected[field] || 0)
+          });
+        }
+      });
+    });
+  });
+
+  const opsDiscrepancies = [];
+  const opsFields = [
+    ['target', false], ['gross', false], ['net', false], ['usage', false],
+    ['retained', false], ['newSubs', false], ['cancelSubs', false], ['netAdds', false],
+    ['utilization', true], ['refundRate', true], ['churn', true], ['achievement', true]
+  ];
+  opsStores.forEach(actual => {
+    const canonicalMonths = factByStore.get(actual.name) || [];
+    const expected = canonicalMonths[canonicalMonths.length - 1];
+    if (!expected) {
+      opsDiscrepancies.push({ store:actual.name, issue:'missing canonical current month' });
+      return;
+    }
+    opsFields.forEach(([field, percentage]) => {
+      if (!metricClose(actual[field], expected[field], percentage)) {
+        opsDiscrepancies.push({
+          store:actual.name,
+          field,
+          actual:Number(actual[field] || 0),
+          expected:Number(expected[field] || 0)
+        });
+      }
     });
   });
 
@@ -189,6 +386,41 @@ async function main() {
     };
   }
 
+  const summaryDiscrepancies = [];
+  // Summary 탭은 누적 보드가 아니라 최신월 스냅샷이다.
+  const latestPortfolioMonth = overall[overall.length - 1] || {};
+  [
+    ['totalGross', 'gross'],
+    ['totalNet', 'net'],
+    ['totalMrr', 'mrr']
+  ].forEach(([summaryField, periodField]) => {
+    const actual = summaryKpis[summaryField];
+    const expected = latestPortfolioMonth[periodField];
+    if (actual !== null && actual > 0 && !metricClose(actual, expected)) {
+      summaryDiscrepancies.push({ field:summaryField, actual, expected });
+    }
+  });
+
+  const sourceHealthIssues = [];
+  if (dataQuality.sourceCheckPending) {
+    sourceHealthIssues.push({ issue:'data quality build is pending' });
+  }
+  (dataQuality.warnings || []).forEach(check => {
+    sourceHealthIssues.push({ issue:'data quality warning', name:check.name, value:check.value || check.status });
+  });
+  const sourceDate = dataQuality.salesLatestDate;
+  let sourceAgeDays = null;
+  if (sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())) {
+    const today = kstDateParts();
+    sourceAgeDays = Math.max(0, Math.round((
+      Date.UTC(today.year, today.month - 1, today.day) -
+      Date.UTC(sourceDate.getFullYear(), sourceDate.getMonth(), sourceDate.getDate())
+    ) / 86400000));
+    if (sourceAgeDays > 1) sourceHealthIssues.push({ issue:'sales source beyond previous-day SLA', sourceAgeDays });
+  } else {
+    sourceHealthIssues.push({ issue:'sales latest date unavailable' });
+  }
+
   api.setState({ quarter: 'all', store: 'all' });
   const capacityRows = api.buildCapacityData({ isAll: true, months: overall });
   const mtdCapacity = capacityRows.reduce((total, row) => total + Number(row.mtdDesignCap || 0), 0);
@@ -213,6 +445,14 @@ async function main() {
     legacyAggregateMismatchMonths,
     portfolioFinanceSource: overall.find(month => month.portfolioFinanceSource)?.portfolioFinanceSource || 'store_sum',
     sourceCheckPending: dataQuality.sourceCheckPending,
+    sourceAgeDays,
+    sourceHealthIssues,
+    schemaIssues,
+    grainIssues,
+    formulaIssues,
+    storeTabDiscrepancies,
+    opsDiscrepancies,
+    summaryDiscrepancies,
     couponCoverage: overall.map(month => ({
       month: month.month,
       amount: month.discountAmount || 0,
@@ -229,7 +469,19 @@ async function main() {
     audit: dashboard.audit
   };
   console.log(JSON.stringify(result, null, 2));
-  if (factByStore.size !== storeNames.length || discrepancies.length) process.exitCode = 1;
+  const blockingIssues = [
+    ...schemaIssues,
+    ...grainIssues,
+    ...formulaIssues,
+    ...discrepancies,
+    ...storeTabDiscrepancies,
+    ...opsDiscrepancies,
+    ...summaryDiscrepancies,
+    ...sourceHealthIssues
+  ];
+  if (factByStore.size !== storeNames.length || legacyAggregateMismatchMonths || blockingIssues.length) {
+    process.exitCode = 1;
+  }
 }
 
 main().catch(error => {
