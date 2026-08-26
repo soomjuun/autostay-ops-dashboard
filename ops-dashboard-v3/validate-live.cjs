@@ -73,8 +73,9 @@ function createDashboardApi() {
   return sandbox.__qa;
 }
 
-async function loadSheet(gid, includeColumnHeaders = false) {
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&gid=${gid}&headers=${includeColumnHeaders ? 1 : 0}`;
+async function loadSheet(gid, includeColumnHeaders = false, range = '') {
+  const rangeQuery = range ? `&range=${encodeURIComponent(range)}` : '';
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&gid=${gid}&headers=${includeColumnHeaders ? 1 : 0}${rangeQuery}`;
   const response = await fetch(url, { headers: { 'user-agent': 'autostay-dashboard-validator/1.0' } });
   if (!response.ok) throw new Error(`sheet ${gid}: HTTP ${response.status}`);
   const text = await response.text();
@@ -120,7 +121,7 @@ async function main() {
   const api = createDashboardApi();
   const storeNames = Object.keys(gids.stores);
   const entries = await Promise.all([
-    loadSheet(gids.summary),
+    loadSheet(gids.summary, false, 'A1:B14'),
     loadSheet(gids.ops),
     loadSheet(gids.sales),
     loadSheet(gids.subs),
@@ -170,12 +171,16 @@ async function main() {
   const requiredFactHeaders = [
     '분기', '월번호', '월라벨', '매장', 'Capacity', '목표매출',
     '총매출_2026', '환불_2026', '순매출_2026', '총사용_2026',
+    '단일구독매출_2026', '매장PASS_ARPU_2026',
     '신규_2026', '해지_2026', '유지_2026', '순증감_2026',
     '달성률_2026', '이탈률_2026', '환불율_2026', '가동률_2026',
-    'MRR_2026', 'MTD_Capacity_2026', 'ARR_2026'
+    'MRR_2026', '경과일수_2026', '월일수_2026', 'MTD_Capacity_2026', 'ARR_2026'
   ];
   const requiredOverallHeaders = [
-    '월번호', 'MRR_2026', 'MRR_2025', '유지_2026', '올패스유지_2026', 'ARR_2026'
+    '월번호', 'MRR_2026', 'MRR_2025', '유지_2026', '유지_2025',
+    '신규_2026', '해지_2026', '올패스유지_2026', '올패스유지_2025',
+    '경과일수_2026', '월일수_2026', '단일구독매출_2026',
+    '매장PASS_ARPU_2026', 'ARR_2026'
   ];
   const overallHeaders = overallMonthlyRows[0] || [];
   const schemaIssues = [
@@ -223,6 +228,12 @@ async function main() {
     const net = rawNumber(row, '순매출_2026');
     const usage = rawNumber(row, '총사용_2026');
     const retained = rawNumber(row, '유지_2026');
+    const elapsedDays = rawNumber(row, '경과일수_2026');
+    const sourceMonthDays = rawNumber(row, '월일수_2026');
+    const exposureFactor = month === maxFactMonth && sourceMonthDays > 0
+      ? Math.max(0, Math.min(1, elapsedDays / sourceMonthDays))
+      : 1;
+    const retainedExposure = retained * exposureFactor;
     const newSubs = rawNumber(row, '신규_2026');
     const cancels = rawNumber(row, '해지_2026');
     const netAdds = rawNumber(row, '순증감_2026');
@@ -258,10 +269,14 @@ async function main() {
       gross > 0 ? refund / gross * 100 : 0,
       true
     );
-    recordFormulaIssue(row, 'churn = cancels / retained',
+    recordFormulaIssue(row, 'churn = cancels / subscriber-month exposure',
       rawPercent(rawNumber(row, '이탈률_2026')),
-      retained > 0 ? cancels / retained * 100 : 0,
+      retainedExposure > 0 ? cancels / retainedExposure * 100 : 0,
       true
+    );
+    recordFormulaIssue(row, 'store PASS ARPU = store PASS revenue / subscriber-month exposure',
+      rawNumber(row, '매장PASS_ARPU_2026'),
+      retainedExposure > 0 ? rawNumber(row, '단일구독매출_2026') / retainedExposure : 0
     );
     recordFormulaIssue(row, 'net achievement = net / elapsed target',
       rawPercent(rawNumber(row, '달성률_2026')),
@@ -289,13 +304,17 @@ async function main() {
   overall.forEach(month => {
     const rows = rawByMonth.get(month.monthNum) || [];
     const sum = key => rows.reduce((total, row) => total + rawNumber(row, key), 0);
+    const canonical = canonicalFinanceByMonth.get(month.monthNum);
     const checks = {
       gross: sum('총매출_2026'),
       net: sum('순매출_2026'),
       usage: sum('총사용_2026'),
-      retained: sum('유지_2026'),
-      mrr: canonicalFinanceByMonth.get(month.monthNum)?.mrr || 0,
-      mrrSubscribers: canonicalFinanceByMonth.get(month.monthNum)?.mrrSubscribers || 0,
+      retained: canonical?.retained || 0,
+      newSubs: canonical?.newSubs || 0,
+      cancelSubs: canonical?.cancelSubs || 0,
+      netAdds: (canonical?.newSubs || 0) - (canonical?.cancelSubs || 0),
+      mrr: canonical?.mrr || 0,
+      mrrSubscribers: canonical?.mrrSubscribers || 0,
       mtdCapacity: sum('MTD_Capacity_2026')
     };
     Object.entries(checks).forEach(([key, expected]) => {
@@ -308,7 +327,8 @@ async function main() {
   const storeFields = [
     ['gross', false], ['net', false], ['usage', false], ['retained', false],
     ['newSubs', false], ['cancelSubs', false], ['netAdds', false], ['mrr', false],
-    ['utilization', true], ['refundRate', true], ['achievement', true]
+    ['utilization', true], ['refundRate', true], ['churn', true], ['achievement', true],
+    ['arpu', false]
   ];
   parsedStores.forEach(store => {
     const canonicalMonths = factByStore.get(store.name) || [];
@@ -377,7 +397,11 @@ async function main() {
       gross: portfolio.gross || 0,
       net: portfolio.net || 0,
       achievement: portfolio.achievement || 0,
+      grossAchievement: portfolio.grossAchievement || 0,
+      sameStoreNetYoY: portfolio.netYoY || 0,
+      totalNetGrowth: portfolio.totalNetGrowth || 0,
       utilization: portfolio.utilization || 0,
+      churn: portfolio.churn || 0,
       mrr: portfolio.mrr || 0,
       retained: portfolio.retained || 0,
       allPassRetained: portfolio.allPassRetained || 0,
@@ -387,26 +411,52 @@ async function main() {
   }
 
   const summaryDiscrepancies = [];
-  // Summary 탭은 누적 보드가 아니라 최신월 스냅샷이다.
+  // Summary 상단은 기간 누적 Flow와 최신월 Stock이 혼합된 공식 요약 보드다.
+  const cumulativePortfolio = api.aggMonths(overall) || {};
   const latestPortfolioMonth = overall[overall.length - 1] || {};
-  [
-    ['totalGross', 'gross'],
-    ['totalNet', 'net'],
-    ['totalMrr', 'mrr']
-  ].forEach(([summaryField, periodField]) => {
+  const requiredSummaryChecks = [
+    ['totalTarget', cumulativePortfolio.target, false],
+    ['totalGross', cumulativePortfolio.gross, false],
+    ['totalNet', cumulativePortfolio.net, false],
+    ['achievement', cumulativePortfolio.achievement, true],
+    ['grossAchievement', cumulativePortfolio.grossAchievement, true],
+    ['refundRate', cumulativePortfolio.refundRate, true],
+    ['sameStoreNetYoY', cumulativePortfolio.netYoY, true],
+    ['totalNetGrowth', cumulativePortfolio.totalNetGrowth, true],
+    ['totalNewSubs', cumulativePortfolio.newSubs, false],
+    ['totalCancelSubs', cumulativePortfolio.cancelSubs, false],
+    ['retained', latestPortfolioMonth.retained, false]
+  ];
+  requiredSummaryChecks.forEach(([summaryField, expected, percentage]) => {
     const actual = summaryKpis[summaryField];
-    const expected = latestPortfolioMonth[periodField];
-    if (actual !== null && actual > 0 && !metricClose(actual, expected)) {
+    if (actual === null || actual === undefined) {
+      summaryDiscrepancies.push({ field:summaryField, issue:'missing required Summary value', expected });
+    } else if (!metricClose(actual, expected, percentage)) {
       summaryDiscrepancies.push({ field:summaryField, actual, expected });
     }
   });
+  if (summaryKpis.totalMrr !== null && summaryKpis.totalMrr !== undefined &&
+      !metricClose(summaryKpis.totalMrr, latestPortfolioMonth.mrr, false)) {
+    summaryDiscrepancies.push({
+      field:'totalMrr',
+      actual:summaryKpis.totalMrr,
+      expected:latestPortfolioMonth.mrr
+    });
+  }
 
   const sourceHealthIssues = [];
+  const sourceBlockingIssues = [];
   if (dataQuality.sourceCheckPending) {
-    sourceHealthIssues.push({ issue:'data quality build is pending' });
+    const issue = { issue:'data quality build is pending' };
+    sourceHealthIssues.push(issue);
+    sourceBlockingIssues.push(issue);
   }
   (dataQuality.warnings || []).forEach(check => {
-    sourceHealthIssues.push({ issue:'data quality warning', name:check.name, value:check.value || check.status });
+    const issue = { issue:'data quality warning', name:check.name, value:check.value || check.status };
+    sourceHealthIssues.push(issue);
+    if (check.name === '차단 오류' || /차단|오류|실패/.test(check.status || '')) {
+      sourceBlockingIssues.push(issue);
+    }
   });
   const sourceDate = dataQuality.salesLatestDate;
   let sourceAgeDays = null;
@@ -416,9 +466,15 @@ async function main() {
       Date.UTC(today.year, today.month - 1, today.day) -
       Date.UTC(sourceDate.getFullYear(), sourceDate.getMonth(), sourceDate.getDate())
     ) / 86400000));
-    if (sourceAgeDays > 1) sourceHealthIssues.push({ issue:'sales source beyond previous-day SLA', sourceAgeDays });
+    if (sourceAgeDays > 1) {
+      const issue = { issue:'sales source beyond previous-day SLA', sourceAgeDays };
+      sourceHealthIssues.push(issue);
+      sourceBlockingIssues.push(issue);
+    }
   } else {
-    sourceHealthIssues.push({ issue:'sales latest date unavailable' });
+    const issue = { issue:'sales latest date unavailable' };
+    sourceHealthIssues.push(issue);
+    sourceBlockingIssues.push(issue);
   }
 
   api.setState({ quarter: 'all', store: 'all' });
@@ -432,9 +488,11 @@ async function main() {
   );
   const legacyAggregateMismatchMonths = legacyOverall.reduce((count, legacy, index) => {
     const derived = overall[index] || {};
-    const differs = ['gross', 'net', 'usage'].some(key =>
+    const differs = [
+      ['gross', 1], ['net', 1], ['usage', 1], ['churn', 0.05], ['arpu', 1]
+    ].some(([key, absoluteTolerance]) =>
       Math.abs(Number(legacy[key] || 0) - Number(derived[key] || 0)) >
-      Math.max(1, Math.abs(Number(derived[key] || 0)) * 0.001)
+      Math.max(absoluteTolerance, Math.abs(Number(derived[key] || 0)) * 0.001)
     );
     return count + (differs ? 1 : 0);
   }, 0);
@@ -447,6 +505,7 @@ async function main() {
     sourceCheckPending: dataQuality.sourceCheckPending,
     sourceAgeDays,
     sourceHealthIssues,
+    sourceBlockingIssues,
     schemaIssues,
     grainIssues,
     formulaIssues,
@@ -466,6 +525,17 @@ async function main() {
       usage: mtdUsage,
       utilization: mtdCapacity > 0 ? mtdUsage / mtdCapacity * 100 : 0
     },
+    currentKpis: {
+      month: latestPortfolioMonth.month || null,
+      gross: latestPortfolioMonth.gross || 0,
+      net: latestPortfolioMonth.net || 0,
+      achievement: latestPortfolioMonth.achievement || 0,
+      utilization: latestPortfolioMonth.utilization || 0,
+      churn: latestPortfolioMonth.churn || 0,
+      arpu: latestPortfolioMonth.arpu || 0,
+      mrr: latestPortfolioMonth.mrr || 0,
+      retained: latestPortfolioMonth.retained || 0
+    },
     audit: dashboard.audit
   };
   console.log(JSON.stringify(result, null, 2));
@@ -477,7 +547,7 @@ async function main() {
     ...storeTabDiscrepancies,
     ...opsDiscrepancies,
     ...summaryDiscrepancies,
-    ...sourceHealthIssues
+    ...sourceBlockingIssues
   ];
   if (factByStore.size !== storeNames.length || legacyAggregateMismatchMonths || blockingIssues.length) {
     process.exitCode = 1;

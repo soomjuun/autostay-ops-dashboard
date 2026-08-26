@@ -221,7 +221,7 @@ function syncPeriodToggleActive() {
 // ★ Change 6: 시트 실패 추적
 const _failedSheets = new Set();
 
-function loadSheet(gid, includeColumnHeaders=false) {
+function loadSheet(gid, includeColumnHeaders=false, range='') {
   return new Promise((resolve, reject) => {
     const cb = `cb_${gid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const sc = document.createElement('script');
@@ -240,7 +240,8 @@ function loadSheet(gid, includeColumnHeaders=false) {
       }
     };
     sc.onerror = ()=>{ cleanup(); _failedSheets.add(gid); reject(new Error(`load:${gid}`)); };
-    sc.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=responseHandler:${cb};out:json&gid=${gid}&headers=${includeColumnHeaders?1:0}`;
+    const rangeQuery = range ? `&range=${encodeURIComponent(range)}` : '';
+    sc.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=responseHandler:${cb};out:json&gid=${gid}&headers=${includeColumnHeaders?1:0}${rangeQuery}`;
     document.body.appendChild(sc);
   });
 }
@@ -341,8 +342,11 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
   const retained   = mv(subM, '유지', spec.cur);
   const cancelSubs = mv(subM, '해지', spec.cur);
   // 이탈률: 시트에 직접 기재된 값 우선, 없으면 해지/유지로 계산
-  const churnRaw   = mvAlias(subM, ['이탈률','이탈율','이탈율(%)','이탈률(%)'], spec.cur, pct);
+  const churnRaw   = mvAlias(subM, ['이탈률(월환산)','이탈률','이탈율','이탈율(%)','이탈률(%)'], spec.cur, pct);
   const churn      = churnRaw > 0 ? churnRaw : (retained > 0 && cancelSubs > 0 ? cancelSubs / retained * 100 : 0);
+  const retainedExposure = churn > 0 && cancelSubs > 0
+    ? cancelSubs / (churn / 100)
+    : retained;
   const target     = mv(salesM,'목표매출', spec.cur);
   const gross      = mvAlias(salesM, GROSS_REVENUE_KEYS, spec.cur);
   const grossPrev  = mvAlias(salesM, GROSS_REVENUE_KEYS, spec.prev);
@@ -352,6 +356,9 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
   const grossAchievementRaw = mvAlias(salesM, GROSS_ACHIEVEMENT_KEYS, spec.cur, pct);
   const mrr        = mv(mrrM, 'MRR', spec.cur);
   const mrrPrev    = mv(mrrM, 'MRR', spec.prev);
+  const storePassRevenue = mvAlias(mrrM, ['단일구독매출','매장PASS 매출'], spec.cur) ||
+    mvAlias(salesM, ['단일구독매출','매장PASS 매출'], spec.cur);
+  const storePassArpu = mvAlias(mrrM, ['매장PASS ARPU(월환산)','매장PASS ARPU','ARPU'], spec.cur);
   return {
     month: label, quarter,
     target,
@@ -365,7 +372,7 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
     netPrev,
     hasNetYoY: netPrev > 0,
     netYoY:       mv(salesM,'순매출',     spec.yoy, pct),
-    usage:        mvAlias(salesM,['총사용','사용건수','총이용'],          spec.cur),
+    usage:        mvAlias(salesM,['총사용량','총사용','사용건수','총이용'], spec.cur),
     // 할인은 전용 원천 행이 있을 때만 사용한다. 환불을 할인으로 대체하면
     // 환불이 이중 집계되어 수익 구성 비중이 왜곡된다.
     discountAmount: mv(salesM,'할인금액', spec.cur),
@@ -374,7 +381,7 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
     refundAmount: mvAlias(salesM,['환불금액','환불액'], spec.cur),
     refundRate:   mvAlias(salesM,['환불율','환불률','환불비율'],           spec.cur, pct),
     utilization:  mvAlias(salesM,['가동률','가동율','이용률'],             spec.cur, pct),
-    retained, retainedPrev: mv(subM, '유지', spec.prev),
+    retained, retainedPrev: mv(subM, '유지', spec.prev), retainedExposure,
     newSubs:      mv(subM,  '신규',       spec.cur),
     cancelSubs,
     netAdds:      mv(subM,  '순증감',     spec.cur),
@@ -388,15 +395,9 @@ function buildMonth(label, quarter, salesM, subM, mrrM, spec) {
     arrYoY:       mv(mrrM,  'ARR',        spec.yoy, pct),
     ltv:          mv(mrrM,  'LTV(추정)',   spec.cur),
     ltvPrev:      mv(mrrM,  'LTV(추정)',   spec.prev),
-    // ★ 월별 ARPU: MRR/유지 우선, 없으면 순매출/총사용 역산
-    arpu: (()=>{
-      const mrrVal = mv(mrrM, 'MRR', spec.cur);
-      const retVal = mv(subM, '유지', spec.cur);
-      if (mrrVal > 0 && retVal > 0) return mrrVal / retVal;
-      const nVal = net;
-      const uVal = mvAlias(salesM, ['총사용','사용건수','총이용'], spec.cur);
-      return (nVal > 0 && uVal > 0) ? nVal / uVal : 0;
-    })(),
+    storePassRevenue,
+    arpu: storePassArpu || (retainedExposure > 0 ? storePassRevenue / retainedExposure : 0),
+    arpuBasis: 'store_pass_sales_exposure',
     // ★ 월 상태 (confirmed/mtd/projected) — Capacity·계절지수 계산 정합성 기준
     monthNum: spec.num || 0,
     status:   spec.num ? monthStatus(spec.num) : 'confirmed',
@@ -603,6 +604,14 @@ function parseFactMonthly(rows) {
     const retained = factValue(row, headerIndex, ['유지_2026']);
     const retainedPrev = factValue(row, headerIndex, ['유지_2025']);
     const cancelSubs = factValue(row, headerIndex, ['해지_2026']);
+    const elapsedDays = factValue(row, headerIndex, ['경과일수_2026']);
+    const daysInSourceMonth = factValue(row, headerIndex, ['월일수_2026']);
+    const exposureFactor = status === 'mtd' && daysInSourceMonth > 0
+      ? Math.max(0, Math.min(1, elapsedDays / daysInSourceMonth))
+      : 1;
+    const retainedExposure = retained * exposureFactor;
+    const storePassRevenue = factValue(row, headerIndex, ['단일구독매출_2026']);
+    const storePassArpuRaw = factValue(row, headerIndex, ['매장PASS_ARPU_2026']);
     const mrr = factValue(row, headerIndex, ['MRR_2026']);
     const mrrPrev = factValue(row, headerIndex, ['MRR_2025']);
     const achievementRaw = factValue(row, headerIndex, ['달성률_2026'], pct);
@@ -631,13 +640,13 @@ function parseFactMonthly(rows) {
       utilizationRaw: utilizationRaw || (mtdCapacity > 0 ? usage / mtdCapacity * 100 : 0),
       capacity: fullCapacity,
       mtdCapacity,
-      elapsedDays: factValue(row, headerIndex, ['경과일수_2026']),
-      daysInSourceMonth: factValue(row, headerIndex, ['월일수_2026']),
-      retained, retainedPrev,
+      elapsedDays,
+      daysInSourceMonth,
+      retained, retainedPrev, retainedExposure,
       newSubs: factValue(row, headerIndex, ['신규_2026']),
       cancelSubs,
       netAdds: factValue(row, headerIndex, ['순증감_2026']),
-      churn: churnRaw || (retained > 0 ? cancelSubs / retained * 100 : 0),
+      churn: churnRaw || (retainedExposure > 0 ? cancelSubs / retainedExposure * 100 : 0),
       mrr, mrrPrev,
       hasMrrYoY: mrrPrev > 0,
       mrrYoY: mrrPrev > 0 ? (mrr - mrrPrev) / mrrPrev * 100 : 0,
@@ -645,7 +654,9 @@ function parseFactMonthly(rows) {
       arrPrev: factValue(row, headerIndex, ['ARR_2025']),
       ltv: factValue(row, headerIndex, ['LTV_추정_2026']),
       ltvPrev: factValue(row, headerIndex, ['LTV_추정_2025']),
-      arpu: factValue(row, headerIndex, ['매장PASS_ARPU_2026']),
+      storePassRevenue,
+      arpu: storePassArpuRaw || (retainedExposure > 0 ? storePassRevenue / retainedExposure : 0),
+      arpuBasis: 'store_pass_sales_exposure',
       discountAmount: 0,
       discountShare: 0,
       hasDiscountData: false,
@@ -688,8 +699,19 @@ function parseOverallMonthly(rows) {
     if (monthNum < 1 || monthNum > TODAY_MONTH) return;
     const retained = factValue(row, headerIndex, ['유지_2026']);
     const retainedPrev = factValue(row, headerIndex, ['유지_2025']);
+    const newSubs = factValue(row, headerIndex, ['신규_2026']);
+    const cancelSubs = factValue(row, headerIndex, ['해지_2026']);
+    const netAdds = headerIndex.has('순증감_2026')
+      ? factValue(row, headerIndex, ['순증감_2026'])
+      : newSubs - cancelSubs;
     const allPassRetained = factValue(row, headerIndex, ['올패스유지_2026']);
     const allPassRetainedPrev = factValue(row, headerIndex, ['올패스유지_2025']);
+    const elapsedDays = factValue(row, headerIndex, ['경과일수_2026']);
+    const daysInSourceMonth = factValue(row, headerIndex, ['월일수_2026']);
+    const status = monthStatus(monthNum);
+    const exposureFactor = status === 'mtd' && daysInSourceMonth > 0
+      ? Math.max(0, Math.min(1, elapsedDays / daysInSourceMonth))
+      : 1;
     byMonth.set(monthNum, {
       mrr: factValue(row, headerIndex, ['MRR_2026']),
       mrrPrev: factValue(row, headerIndex, ['MRR_2025']),
@@ -699,8 +721,15 @@ function parseOverallMonthly(rows) {
       ltvPrev: factValue(row, headerIndex, ['LTV_추정_2025']),
       retained,
       retainedPrev,
+      newSubs,
+      cancelSubs,
+      netAdds,
       allPassRetained,
       allPassRetainedPrev,
+      retainedExposure: retained * exposureFactor,
+      storePassRevenue: factValue(row, headerIndex, ['단일구독매출_2026']),
+      storePassArpu: factValue(row, headerIndex, ['매장PASS_ARPU_2026']),
+      allPassArpu: factValue(row, headerIndex, ['올패스_ARPU_2026']),
       mrrSubscribers: retained + allPassRetained,
       mrrSubscribersPrev: retainedPrev + allPassRetainedPrev,
       source: '_overall_monthly'
@@ -714,9 +743,22 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
   months.forEach((m, i) => {
     const canonical = overallByMonth.get(m.monthNum);
     const fallback = legacyMonths[i] || {};
+
+    if (canonical) {
+      m.retained = canonical.retained;
+      m.retainedPrev = canonical.retainedPrev;
+      m.retainedExposure = canonical.retainedExposure;
+      m.newSubs = canonical.newSubs;
+      m.cancelSubs = canonical.cancelSubs;
+      m.netAdds = canonical.netAdds;
+      m.churn = canonical.retainedExposure > 0
+        ? canonical.cancelSubs / canonical.retainedExposure * 100
+        : 0;
+    }
+
     const finance = canonical?.mrr > 0 ? canonical : fallback;
     if (!(finance.mrr > 0)) {
-      m.mrrSubscribers = m.retained || 0;
+      m.mrrSubscribers = canonical?.mrrSubscribers ?? m.retained ?? 0;
       return;
     }
 
@@ -729,11 +771,17 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
     m.arrYoY = m.arrPrev > 0 ? (m.arr - m.arrPrev) / m.arrPrev * 100 : 0;
     m.ltv = finance.ltv || 0;
     m.ltvPrev = finance.ltvPrev || 0;
-    m.allPassRetained = canonical?.allPassRetained || 0;
-    m.allPassRetainedPrev = canonical?.allPassRetainedPrev || 0;
-    m.mrrSubscribers = canonical?.mrrSubscribers || m.retained || 0;
-    m.mrrSubscribersPrev = canonical?.mrrSubscribersPrev || m.retainedPrev || 0;
-    m.arpu = m.mrrSubscribers > 0 ? m.mrr / m.mrrSubscribers : 0;
+    m.allPassRetained = canonical?.allPassRetained ?? 0;
+    m.allPassRetainedPrev = canonical?.allPassRetainedPrev ?? 0;
+    m.mrrSubscribers = canonical?.mrrSubscribers ?? m.retained ?? 0;
+    m.mrrSubscribersPrev = canonical?.mrrSubscribersPrev ?? m.retainedPrev ?? 0;
+    m.storePassRevenue = canonical?.storePassRevenue ?? m.storePassRevenue ?? 0;
+    m.retainedExposure = canonical?.retainedExposure ?? m.retainedExposure ?? m.retained ?? 0;
+    m.arpu = canonical?.storePassArpu || m.arpu ||
+      (m.retainedExposure > 0 ? m.storePassRevenue / m.retainedExposure : 0);
+    m.allPassArpu = canonical?.allPassArpu || 0;
+    m.mrrPerSubscriber = m.mrrSubscribers > 0 ? m.mrr / m.mrrSubscribers : 0;
+    m.arpuBasis = 'store_pass_sales_exposure';
     m.portfolioFinanceSource = canonical?.source || 'analysis_tabs';
   });
   return months;
@@ -758,11 +806,17 @@ function aggregatePortfolioMonths(stores) {
     const grossPrev = sum('grossPrev');
     const net = sum('net');
     const netPrev = sum('netPrev');
+    const comparableGross = records.reduce((total, row) => total + (row.grossPrev > 0 ? (+row.gross || 0) : 0), 0);
+    const comparableGrossPrev = records.reduce((total, row) => total + (row.grossPrev > 0 ? (+row.grossPrev || 0) : 0), 0);
+    const comparableNet = records.reduce((total, row) => total + (row.netPrev > 0 ? (+row.net || 0) : 0), 0);
+    const comparableNetPrev = records.reduce((total, row) => total + (row.netPrev > 0 ? (+row.netPrev || 0) : 0), 0);
     const usage = sum('usage');
     const refundAmount = sum('refundAmount');
     const retained = sum('retained');
     const retainedPrev = sum('retainedPrev');
+    const retainedExposure = sum('retainedExposure');
     const cancelSubs = sum('cancelSubs');
+    const storePassRevenue = sum('storePassRevenue');
     const mrr = sum('mrr');
     const mrrPrev = sum('mrrPrev');
     const capacity = records.reduce((total, row) => total + (+row.capacity || 0), 0);
@@ -779,9 +833,11 @@ function aggregatePortfolioMonths(stores) {
       month: spec.month, monthNum: spec.num, quarter: spec.quarter, status: monthStatus(spec.num),
       target, targetFull: sum('targetFull'),
       gross, grossPrev,
+      comparableGross, comparableGrossPrev,
       hasGrossYoY: grossPrev > 0,
       grossYoY: grossPrev > 0 ? (gross - grossPrev) / grossPrev * 100 : 0,
       net, netPrev,
+      comparableNet, comparableNetPrev,
       hasNetYoY: netPrev > 0,
       netYoY: netPrev > 0 ? (net - netPrev) / netPrev * 100 : 0,
       achievement: target > 0 ? net / target * 100 : 0,
@@ -792,17 +848,21 @@ function aggregatePortfolioMonths(stores) {
       utilization: mtdCapacity > 0 ? usage / mtdCapacity * 100 : 0,
       utilizationRaw: mtdCapacity > 0 ? usage / mtdCapacity * 100 : 0,
       capacity, mtdCapacity,
-      retained, retainedPrev, allPassRetained:0, allPassRetainedPrev:0,
+      retained, retainedPrev, retainedExposure, allPassRetained:0, allPassRetainedPrev:0,
       mrrSubscribers:retained, mrrSubscribersPrev:retainedPrev,
       newSubs: sum('newSubs'), cancelSubs, netAdds: sum('netAdds'),
-      churn: retained > 0 ? cancelSubs / retained * 100 : 0,
+      churn: retainedExposure > 0 ? cancelSubs / retainedExposure * 100 : 0,
       mrr, mrrPrev,
       hasMrrYoY: mrrPrev > 0,
       mrrYoY: mrrPrev > 0 ? (mrr - mrrPrev) / mrrPrev * 100 : 0,
       arr, arrPrev,
       arrYoY: arrPrev > 0 ? (arr - arrPrev) / arrPrev * 100 : 0,
       ltv: cancelSubs > 0 ? mrr / cancelSubs : 0,
-      arpu: retained > 0 ? mrr / retained : 0,
+      storePassRevenue,
+      arpu: retainedExposure > 0 ? storePassRevenue / retainedExposure : 0,
+      arpuBasis: 'store_pass_sales_exposure',
+      elapsedDays: Math.max(0, ...records.map(row => +row.elapsedDays || 0)),
+      daysInSourceMonth: Math.max(0, ...records.map(row => +row.daysInSourceMonth || 0)),
       discountAmount: 0, discountShare: 0, hasDiscountData: false,
       listPriceRevenue: gross,
       seasonBase,
@@ -819,11 +879,12 @@ function aggMonths(months) {
     target:        a.target+m.target,   gross:        a.gross+m.gross,
     grossPrev:     a.grossPrev+m.grossPrev, net:      a.net+m.net,
     netPrev:       a.netPrev+m.netPrev, usage:        a.usage+m.usage,
-    comparableGross:a.comparableGross+(m.grossPrev>0?m.gross:0),
-    comparableGrossPrev:a.comparableGrossPrev+(m.grossPrev>0?m.grossPrev:0),
-    comparableNet:a.comparableNet+(m.netPrev>0?m.net:0),
-    comparableNetPrev:a.comparableNetPrev+(m.netPrev>0?m.netPrev:0),
-    retainedExposure:a.retainedExposure+m.retained,
+    comparableGross:a.comparableGross+(m.comparableGross ?? (m.grossPrev>0?m.gross:0)),
+    comparableGrossPrev:a.comparableGrossPrev+(m.comparableGrossPrev ?? (m.grossPrev>0?m.grossPrev:0)),
+    comparableNet:a.comparableNet+(m.comparableNet ?? (m.netPrev>0?m.net:0)),
+    comparableNetPrev:a.comparableNetPrev+(m.comparableNetPrev ?? (m.netPrev>0?m.netPrev:0)),
+    retainedExposure:a.retainedExposure+(m.retainedExposure ?? m.retained ?? 0),
+    storePassRevenue:a.storePassRevenue+(m.storePassRevenue||0),
     newSubs:       a.newSubs+m.newSubs, cancelSubs:   a.cancelSubs+m.cancelSubs,
     netAdds:       a.netAdds+m.netAdds,
     discountAmount:a.discountAmount+m.discountAmount,
@@ -838,7 +899,7 @@ function aggMonths(months) {
     cap:           a.cap+(m.utilization>0?m.usage/(m.utilization/100):0),
   }), {target:0,gross:0,grossPrev:0,net:0,netPrev:0,usage:0,
        comparableGross:0,comparableGrossPrev:0,comparableNet:0,comparableNetPrev:0,
-       retainedExposure:0,newSubs:0,cancelSubs:0,netAdds:0,discountAmount:0,
+       retainedExposure:0,storePassRevenue:0,newSubs:0,cancelSubs:0,netAdds:0,discountAmount:0,
        hasDiscountData:false,portfolioCouponData:false,couponSheetMonths:0,couponSourceMonths:0,couponMappedMonths:0,
        unmappedCouponDiscount:0,refundVal:0,cap:0});
   // 최신 월(마지막 요소) 기준 스냅샷 값
@@ -847,6 +908,9 @@ function aggMonths(months) {
     target:t.target, gross:t.gross, grossPrev:t.grossPrev, net:t.net, netPrev:t.netPrev,
     grossYoY: t.comparableGrossPrev?(t.comparableGross-t.comparableGrossPrev)/t.comparableGrossPrev*100:0,
     netYoY:   t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
+    sameStoreNetYoY:t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
+    totalNetGrowth:t.netPrev?(t.net-t.netPrev)/t.netPrev*100:0,
+    hasTotalNetGrowth:t.netPrev>0,
     hasGrossYoY:t.comparableGrossPrev>0,
     hasNetYoY:t.comparableNetPrev>0,
     achievement: t.target?t.net/t.target*100:0,
@@ -876,8 +940,10 @@ function aggMonths(months) {
     unmappedCouponDiscount:t.unmappedCouponDiscount,
     retainedYoY: last.retainedPrev?(last.retained-last.retainedPrev)/last.retainedPrev*100:0,
     // 스냅샷형 지표는 선택 기간의 최신 월 기준
-    arpu: (last.mrrSubscribers||last.retained)>0 && last.mrr>0 ? last.mrr/(last.mrrSubscribers||last.retained)
-         : t.usage>0 ? t.net/t.usage : 0,
+    storePassRevenue:t.storePassRevenue,
+    arpu: t.retainedExposure>0 && t.storePassRevenue>0 ? t.storePassRevenue/t.retainedExposure
+         : (last.arpu||0),
+    arpuBasis:'store_pass_sales_exposure',
     arr:    last.arr    || 0,
     ltv:    last.ltv    || 0,
     arrYoY: last.arrYoY || 0
@@ -998,7 +1064,9 @@ function runAudit(months, opsStores) {
 function parseSummary(rows) {
   // Summary 시트에서 전체 포트폴리오 KPI (키-값 형식) 파싱
   const map = new Map();
-  rows.forEach(r => {
+  const sectionEnd = rows.findIndex(r => tx(r[0]) === 'H1 KPI');
+  const summaryRows = sectionEnd >= 0 ? rows.slice(0, sectionEnd) : rows.slice(0, 14);
+  summaryRows.forEach(r => {
     const k = tx(r[0]);
     if (k) map.set(k, r);
   });
@@ -1018,9 +1086,25 @@ function parseSummary(rows) {
     return null;
   };
   const updatedRow = rows.find(r => tx(r[0]).startsWith('업데이트'));
+  const subscriptionSummaryRow = [
+    '누적 신규 / 누적 해지 / 현재 유지',
+    '누적 신규 / 해지 / 유지'
+  ].map(key => map.get(key)).find(Boolean);
+  const subscriptionSummary = tx(subscriptionSummaryRow?.[1])
+    .split('/')
+    .map(num);
   return {
+    totalTarget:  get(['누적 목표매출','목표매출 합계']),
     totalGross:   get(['누적 실결제매출(구 총매출)','누적 실결제매출','실결제매출(구 총매출)','실결제매출','누적 총매출','총매출','매출합계','Total Revenue','total_gross']),
     totalNet:     get(['누적 순매출','순매출','Net Revenue']),
+    achievement:  getPct(['누적 순매출 달성률(대표)','누적 달성률(순매출)','누적 순매출 달성률']),
+    grossAchievement: getPct(['누적 실결제매출 달성률(보조)','누적 실결제매출 달성률']),
+    refundRate: getPct(['누적 환불율','누적 환불률']),
+    sameStoreNetYoY: getPct(['동일점 순매출 YoY(안성 제외)']),
+    totalNetGrowth: getPct(['전체 순매출 성장(안성 포함)']),
+    totalNewSubs: subscriptionSummary[0] || null,
+    totalCancelSubs: subscriptionSummary[1] || null,
+    retained: subscriptionSummary[2] || null,
     totalMrr:     get(['MRR','월정기매출']),
     avgUtilization: getPct(['가동률','평균가동률','Utilization']),
     avgChurn:       getPct(['이탈률','평균이탈률','Churn Rate']),
@@ -1042,6 +1126,7 @@ function isInformationalDataQualityCheck(c) {
   // 데이터 오류나 운영 리스크로 카운트하지 않는다.
   if (c?.status !== '주의') return false;
   if (c?.name === '전년 비교 완전성') return true;
+  if (['참고 경고', '가동률 상한 검토', '빌드 실행시간'].includes(c?.name)) return true;
 
   const text = `${c?.name || ''} ${c?.value || ''} ${c?.note || ''}`;
   const nonBlockingNames = new Set([
@@ -1155,32 +1240,44 @@ async function loadData() {
   const markDone   = id => { const el=$(id); if(el){el.classList.remove('active');el.classList.add('done');} };
   const markActive = id => { const el=$(id); if(el) el.classList.add('active'); };
 
-  setProgress(8, '매출 · 구독 · MRR 시트 연결 중…');
+  setProgress(8, '공식 월별 원천 연결 중…');
   markActive('lstep-sheets');
   startSlowLoadTimer();
 
   const storeKeys = Object.keys(GID.stores);
 
-  // summary·dataCheck 시트는 실패해도 핵심 지표 로드는 계속한다.
-  const summaryPromise   = loadSheet(GID.summary).catch(() => []);
-  const dataCheckPromise = loadSheet(GID.dataCheck).catch(() => []);
-  const couponPromise    = loadSheet(GID.coupon).catch(() => []);
-  const factPromise      = loadSheet(GID.factMonthly, true).catch(() => []);
-  const overallMonthlyPromise = loadSheet(GID.overallMonthly, true).catch(() => []);
-
-  // ① 핵심 4개 시트 먼저 로드 (진행 표시)
-  const [salesR, subR, mrrR, opsR] = await Promise.all([
-    loadSheet(GID.sales), loadSheet(GID.subs), loadSheet(GID.mrr), loadSheet(GID.ops)
+  // 보조 시트는 실패해도 공식 월별 원천으로 핵심 지표 로드는 계속한다.
+  // Summary 전체 범위 조회 시 Google Visualization API가 상단 수식형 문자열을
+  // 생략하는 경우가 있어 핵심 요약 범위를 명시적으로 고정한다.
+  const safeLoad = (...args) => loadSheet(...args).catch(() => []);
+  const [summaryR, dataCheckR, couponR, factR, overallMonthlyR, opsR] = await Promise.all([
+    safeLoad(GID.summary, false, 'A1:B14'),
+    safeLoad(GID.dataCheck),
+    safeLoad(GID.coupon),
+    safeLoad(GID.factMonthly, true),
+    safeLoad(GID.overallMonthly, true),
+    safeLoad(GID.ops)
   ]);
 
+  const factByStore = parseFactMonthly(factR);
+  const hasPortfolioFinance = parseOverallMonthly(overallMonthlyR).size > 0;
+  const needsStoreFallback = factByStore.size < storeKeys.length;
+  const needsLegacyFinance = !hasPortfolioFinance;
+
   markDone('lstep-sheets');
-  setProgress(48, '매장별 상세 데이터 로드 중…');
+  setProgress(48, needsStoreFallback || needsLegacyFinance
+    ? '보조 분석 탭으로 누락 원천 복구 중…'
+    : '공식 원천 연결 완료 · 데이터 구조 확인 중…');
   markActive('lstep-stores');
 
-  // ② 매장별 시트 + 보조 시트
-  const [summaryR, dataCheckR, couponR, factR, overallMonthlyR, ...storeRaws] = await Promise.all([
-    summaryPromise, dataCheckPromise, couponPromise, factPromise, overallMonthlyPromise,
-    ...storeKeys.map(k => loadSheet(GID.stores[k].gid))
+  // 공식 원천이 누락된 경우에만 표시용 분석·매장 탭을 복구 경로로 조회한다.
+  const [salesR, subR, mrrR, ...storeRaws] = await Promise.all([
+    needsLegacyFinance ? safeLoad(GID.sales) : Promise.resolve([]),
+    needsLegacyFinance ? safeLoad(GID.subs) : Promise.resolve([]),
+    needsLegacyFinance ? safeLoad(GID.mrr) : Promise.resolve([]),
+    ...storeKeys.map(k => needsStoreFallback
+      ? safeLoad(GID.stores[k].gid)
+      : Promise.resolve([]))
   ]);
 
   markDone('lstep-stores');
@@ -1190,18 +1287,20 @@ async function loadData() {
   const opsStores     = parseOps(opsR);
   const summaryKpis   = parseSummary(summaryR);
   const dataQuality   = parseDataQuality(dataCheckR);
-  const factByStore   = parseFactMonthly(factR);
   const stores        = storeKeys.map((k,i) =>
     mergeStoreWithFact(parseStore(GID.stores[k].name, storeRaws[i]), factByStore)
   );
-  const legacyOverall = parseOverall(salesR, subR, mrrR);
+  const legacyOverall = needsLegacyFinance ? parseOverall(salesR, subR, mrrR) : [];
   const derivedOverall = aggregatePortfolioMonths(stores);
   const financialOverall = applyPortfolioFinancials(derivedOverall, overallMonthlyR, legacyOverall);
   const overall       = applyPortfolioCouponDiscounts(financialOverall, couponR);
-  const legacyAggregateEmpty = legacyOverall.every(m =>
+  if (!overall.some(m => (m.gross || 0) > 0 || (m.net || 0) > 0 || (m.usage || 0) > 0)) {
+    throw new Error('공식 월별 원천과 보조 매장 탭에서 표시 가능한 데이터를 찾지 못했습니다.');
+  }
+  const legacyAggregateEmpty = needsLegacyFinance && legacyOverall.every(m =>
     (m.gross || 0) === 0 && (m.net || 0) === 0 && (m.usage || 0) === 0 && (m.mrr || 0) === 0
   ) && overall.some(m => (m.gross || 0) > 0 || (m.net || 0) > 0);
-  const legacyAggregateMismatchMonths = legacyOverall.reduce((count, legacy, i) => {
+  const legacyAggregateMismatchMonths = needsLegacyFinance ? legacyOverall.reduce((count, legacy, i) => {
     const derived = overall[i] || {};
     // 전사 MRR은 ALL PASS를 포함하므로 매장 합계와 다른 것이 정상이다.
     const differs = ['gross','net','usage'].some(key => {
@@ -1210,7 +1309,7 @@ async function loadData() {
       return Math.abs(actual - expected) > Math.max(1, Math.abs(expected) * 0.001);
     });
     return count + (differs ? 1 : 0);
-  }, 0);
+  }, 0) : 0;
   const sourceStatus = {
     primary: factByStore.size ? 'fact_monthly' : 'store_detail',
     legacyAggregateEmpty,
@@ -1254,9 +1353,9 @@ function buildStoreSelect() {
   const sel = $('storeSelect');
   // ★ v3: 운영 중 / 오픈 예정 동적 카운트
   const allOpsStores   = dashboard?.opsStores || [];
-  const activeCount    = allOpsStores.filter(s => s.status !== '오픈 전').length;
-  const openingCount   = allOpsStores.filter(s => s.status === '오픈 전').length;
   const totalCount     = Object.keys(GID.stores).length;
+  const activeCount    = getActiveStores().length;
+  const openingCount   = Math.max(0, totalCount - activeCount);
   const labelSuffix    = openingCount > 0
     ? `운영 ${activeCount}개 + 오픈예정 ${openingCount}개`
     : `${totalCount}개 매장 합산`;
@@ -1292,7 +1391,11 @@ function isStoreActiveForSelectedPeriod(storeName) {
   return ops?.status !== '오픈 전';
 }
 function getActiveOpsStores() {
-  return (dashboard?.opsStores || []).filter(s => isStoreActiveForSelectedPeriod(s.name));
+  const opsStores = dashboard?.opsStores || [];
+  if (opsStores.length) return opsStores.filter(s => isStoreActiveForSelectedPeriod(s.name));
+  return (dashboard?.stores || [])
+    .filter(s => isStoreActiveForSelectedPeriod(s.name))
+    .map(s => ({ name:s.name, status:'운영 중' }));
 }
 function getOpeningOpsStores() {
   return (dashboard?.opsStores || []).filter(s => !isStoreActiveForSelectedPeriod(s.name));
@@ -1324,11 +1427,7 @@ function getEntity() {
     const capRow = buildCapacityData({ name:s.name, isAll:false, months:filtered })[0];
     if (capRow?.capacity > 0) agg.utilizationRaw = capRow.utilization;
   }
-  // MRR: parseStore() 수정으로 이제 매장 개별 시트에서 직접 파싱됨
-  // mrr=0인 경우만 arpu×retained로 fallback (시트에 MRR 행 없는 경우 대비)
-  if (agg.mrr === 0 && (agg.retained || 0) > 0 && (agg.arpu || 0) > 0) {
-    agg.mrr = agg.retained * agg.arpu; // MRR 추정값 fallback
-  }
+  // 매장PASS ARPU는 실결제매출 기준이므로 MRR 역산에 사용하지 않는다.
   // _mrrNoSheet: mrr과 mrrPrev 모두 0이면 시트 미연결 상태 — 게이지에 "—" 표시
   agg._mrrNoSheet = (agg.mrrYoY === 0 && agg.mrrPrev === 0 && agg.mrr === 0);
   return { name: s.name, months: filtered, current: agg, ops: [s.ops||{}], isAll: false, storeData: s };
@@ -1436,7 +1535,7 @@ function renderGauges(ent) {
     : (capArrForGauge[0]?.idleCount || 0);
   // 이탈건전성: 이탈 N명 · 유지 M명
   // MRR YoY: MRR X억 · ARPU Y만원
-  const arpuSub = (c.arpu||0) > 0 ? ` · ARPU ${fmtS(c.arpu)}` : '';
+  const arpuSub = (c.arpu||0) > 0 ? ` · 매장PASS ARPU ${fmtS(c.arpu)}` : '';
 
   // MRR 게이지: 개별 매장 MRR 시트 미연결 시 YoY = 0 → 값 대신 "—" 표시 (fleet proxy 오해 방지)
   const mrrValText = c._mrrNoSheet
@@ -1453,8 +1552,8 @@ function renderGauges(ent) {
     util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}대${periodLabel}`);
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, fmtP(c.churn||0), ms.length > 1
-      ? `기간 이탈 ${fmtN(c.cancelSubs||0)}명 · 월별 유지 합계 ${fmtN(c.retainedExposure||0)}명${periodLabel}`
-      : `이탈 ${fmtN(c.cancelSubs||0)}명 · 유지 ${fmtN(c.retained||0)}명${periodLabel}`);
+      ? `기간 이탈 ${fmtN(c.cancelSubs||0)}명 · 구독자-월 노출 ${fmtN(c.retainedExposure||0)}명${periodLabel}`
+      : `이탈 ${fmtN(c.cancelSubs||0)}명 · 구독자-월 노출 ${fmtN(c.retainedExposure||c.retained||0)}명${periodLabel}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
     mrrM, mrrValText, mrrSubText);
 
@@ -1484,9 +1583,9 @@ function couponUnavailableLabel(c) {
 }
 
 function arpuBasisLabel(c) {
-  return (c?.allPassRetained||0) > 0
-    ? 'MRR ÷ 전체 활성 구독자(매장PASS+ALL PASS)'
-    : 'MRR ÷ 유지 구독자';
+  return c?.arpuBasis === 'store_pass_sales_exposure'
+    ? '매장PASS 실결제매출 ÷ 구독자-월 노출량'
+    : '매장PASS 실결제매출 ÷ 유지 구독자';
 }
 
 const KPI_TOOLTIPS = {
@@ -1494,10 +1593,10 @@ const KPI_TOOLTIPS = {
   '순매출':  { formula:'순매출 = 실결제매출 − 환불 · 쿠폰 적용 전 추정 결제액 = 실결제매출 + 쿠폰할인', benchmark:'정상가 GMV는 원천 미보유 · 환불율 < 5%' },
   'MRR':    { formula:'활성 구독 기반 반복매출 런레이트. 전체는 단일 PASS+ALL PASS, 매장별은 단일 PASS 기준', benchmark:'YoY +10% 이상 = 성장 안정' },
   '가동률':  { formula:'총사용 ÷ 원천 MTD Capacity\n마감월은 월 Capacity, 미마감월은 유효 경과일 기준 MTD Capacity 사용', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
-  '이탈률':  { formula:'해지 건수 ÷ 유지 구독자 수 × 100 (복수월 선택 시 월별 유지 구독자 합계)', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
+  '이탈률':  { formula:'해지 건수 ÷ 구독자-월 노출량 × 100. 진행월은 경과일/월일수로 월환산', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
   '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' },
   'ARR':    { formula:'MRR × 12 (연간 반복 매출)', benchmark:'YoY +20% 이상 = 고성장' },
-  'LTV':    { formula:'ARPU ÷ 월 이탈률 (고객 생애 가치 추정)', benchmark:'LTV ÷ CAC ≥ 3 = 건전' }
+  'LTV':    { formula:'MRR ÷ 월환산 해지수 (단순 추정)', benchmark:'고객 코호트·원가를 반영하지 않은 운영용 proxy' }
 };
 
 function kpiTooltipIcon(label) {
@@ -1541,14 +1640,14 @@ function renderKpis(ent) {
       prog:c.grossAchievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
       projection: projGross ? `${lastM.month} 월말 예상 ${fmtS(projGross)}` : null },
     { label:'순매출',  val:fmtS(c.net),
-      delta:c.hasNetYoY ? c.netYoY : null,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}`,
-      deltaContext:'YoY',
+      delta:c.hasNetYoY ? c.netYoY : null,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}${ent.isAll && c.hasTotalNetGrowth ? ` · 안성 포함 전체 성장 ${c.totalNetGrowth>=0?'+':''}${fmtP(c.totalNetGrowth)}` : ''}`,
+      deltaContext:ent.isAll ? '동일점 YoY' : 'YoY',
       color:'navy',  spark:netTrend, sparkColor:'#24344f' },
     { label:'MRR',    val:fmtS(c.mrr||0),
       delta:c.hasMrrYoY ? c.mrrYoY : null,
       sub:c.hasMrrYoY
-        ? `MRR YoY · 전년 동기 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`
-        : `MRR YoY 비교 없음 · 전년 동기 운영 이력 없음${(c.arpu||0)>0?' · ARPU '+fmtS(c.arpu):''}`,
+        ? `MRR YoY · 전년 동기 ${fmtS(c.mrrPrev||0)}${(c.arpu||0)>0?' · 매장PASS ARPU '+fmtS(c.arpu):''}`
+        : `MRR YoY 비교 없음 · 전년 동기 운영 이력 없음${(c.arpu||0)>0?' · 매장PASS ARPU '+fmtS(c.arpu):''}`,
       deltaContext:'YoY',
       color:'green', spark:mrrTrend, sparkColor:'#216552' },
     { label:'가동률',  val:fmtP(c.utilization||0),
@@ -1560,8 +1659,8 @@ function renderKpis(ent) {
     { label:'이탈률',  val:fmtP(c.churn||0),
       delta:null, deltaSuffix:'%p', invert:true,
       sub:ms.length > 1
-        ? `기간 해지 ${fmtN(c.cancelSubs||0)}건 · 월별 유지 합계 ${fmtN(c.retainedExposure||0)}건`
-        : `해지 ${fmtN(c.cancelSubs||0)}건 · 유지 ${fmtN(c.retained||0)}건`,
+        ? `기간 해지 ${fmtN(c.cancelSubs||0)}건 · 구독자-월 노출 ${fmtN(c.retainedExposure||0)}명`
+        : `해지 ${fmtN(c.cancelSubs||0)}건 · 구독자-월 노출 ${fmtN(c.retainedExposure||c.retained||0)}명`,
       color:'rose', spark:churnTrend, sparkColor:'#b24c58' },
     { label:'순증감',  val:(c.netAdds||0)>=0?`+${fmtN(c.netAdds)}`:fmtN(c.netAdds||0),
       delta:null, deltaSuffix:'건', isRaw:true,
@@ -1673,6 +1772,9 @@ function renderInsights(ent) {
   if (ent.isAll && topStore) {
     const topPeriodLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel} 합산` : lastPeriodLabel;
     summaryNotes.push(`<strong>최고 매출</strong><span>${topStore.name} · ${fmtS(topStore.gross)} (${topPeriodLabel})</span>`);
+  }
+  if (ent.isAll && c.hasNetYoY && c.hasTotalNetGrowth) {
+    summaryNotes.push(`<strong>순매출 성장</strong><span>동일점 ${c.netYoY>=0?'+':''}${fmtP(c.netYoY)} · 안성 포함 전체 ${c.totalNetGrowth>=0?'+':''}${fmtP(c.totalNetGrowth)}</span>`);
   }
   if (latestM && ms.length >= 2) {
     const prev = ms[ms.length-2];
@@ -2207,8 +2309,8 @@ function renderOpsArpuChart(ent) {
   if (arpuArt) {
     const h2 = arpuArt.querySelector('h2');
     const sub = arpuArt.querySelector('.sub');
-    if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·ARPU 수익성' : `③ ARPU 수익성 · ${hasCouponSourceData ? '쿠폰할인율 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음' : '매장별 쿠폰할인 미배분'}`;
-    if (sub) sub.textContent = hasDiscountData ? '쿠폰 적용 전 추정액 대비 할인율(%) · ARPU(원)' : `ARPU 월별 추이 · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계' : hasCouponSheetRows ? '쿠폰 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`;
+    if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·매장PASS ARPU 수익성' : `③ 매장PASS ARPU 수익성 · ${hasCouponSourceData ? '쿠폰할인율 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음' : '매장별 쿠폰할인 미배분'}`;
+    if (sub) sub.textContent = hasDiscountData ? '쿠폰 적용 전 추정액 대비 할인율(%) · 구독자-월 노출 기준 ARPU(원)' : `매장PASS ARPU 월별 추이 · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계' : hasCouponSheetRows ? '쿠폰 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`;
   }
   mkChart('opsArpuChart', {
     data:{
@@ -2217,7 +2319,7 @@ function renderOpsArpuChart(ent) {
         ...(hasDiscountData ? [{ type:'bar', label:'쿠폰할인율 %', data:ms.map(m=>m.hasDiscountData ? (m.discountShare||0) : null),
           backgroundColor:makeGrad(null,90,63,140,.55,.2),
           borderColor:PALETTE.violet, borderWidth:0, borderRadius:4, yAxisID:'pct' }] : []),
-        { type:'line', label:'ARPU (원)', data:ms.map(m=>m.arpu||0),
+        { type:'line', label:'매장PASS ARPU (원)', data:ms.map(m=>m.arpu||0),
           borderColor:PALETTE.navy, borderWidth:2.5, pointRadius:4,
           fill:false, tension:0.4, yAxisID:'arpu' }
       ]
@@ -2252,7 +2354,7 @@ function renderOpsArpuStats(ent) {
         <tr style="border-bottom:1px solid var(--border)">
           <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
           <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--violet,#5a3f8c);font-size:10.5px">쿠폰할인율</th>
-          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--navy,#24344f);font-size:10.5px">ARPU</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--navy,#24344f);font-size:10.5px">매장PASS ARPU</th>
           <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">vs 평균</th>
         </tr>
       </thead>
@@ -2272,7 +2374,7 @@ function renderOpsArpuStats(ent) {
         }).join('')}
       </tbody>
     </table>
-    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 쿠폰할인율은 적용 전 추정액 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 실결제매출 0원 월 산출 제외' : ''}` : ` · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계로 쿠폰할인율 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음 · 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
+    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 매장PASS ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 쿠폰할인율은 적용 전 추정액 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 실결제매출 0원 월 산출 제외' : ''}` : ` · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계로 쿠폰할인율 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음 · 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -3640,11 +3742,11 @@ function renderSubscriptionPipeline(ent) {
   const cancelSubs = last.cancelSubs || 0;
   const netAdds    = last.netAdds != null ? last.netAdds : newSubs - cancelSubs;
   const flowBase   = Math.max(newSubs, cancelSubs, Math.abs(netAdds), 1);
-  const churnPct   = retained > 0 ? cancelSubs / retained * 100 : 0;
+  const churnPct   = last.churn || 0;
   const acquisitionPct = retained > 0 ? newSubs / retained * 100 : 0;
   const flowRows = [
-    { label:'월중 신규', val: newSubs, color:'#1d7a8a', note:`유지 대비 ${fmtP(acquisitionPct)}` },
-    { label:'월중 해지', val: cancelSubs, color:'#b24c58', note:`유지 대비 ${fmtP(churnPct)}` },
+    { label:'월중 신규', val: newSubs, color:'#1d7a8a', note:`유지 대비 단순비율 ${fmtP(acquisitionPct)}` },
+    { label:'월중 해지', val: cancelSubs, color:'#b24c58', note:`월환산 이탈률 ${fmtP(churnPct)}` },
     { label:'순증감', val: netAdds, color:netAdds>=0?'#216552':'#b24c58', note:newSubs >= cancelSubs ? '신규 우위' : '해지 우위' }
   ];
 
@@ -3693,7 +3795,7 @@ function renderChurnClassification(ent) {
   const latest = ms.length ? ms[ms.length - 1] : null;
   const periodCancel = c.cancelSubs || 0;
   const latestCancel = latest?.cancelSubs || 0;
-  const latestChurn = latest?.retained > 0 ? latestCancel / latest.retained * 100 : 0;
+  const latestChurn = latest?.churn || 0;
   const periodLabel = ms.length > 1
     ? `${ms[0].month}~${latest?.month || ''}`
     : latest?.month || '선택 기간';
@@ -3721,7 +3823,7 @@ function renderChurnClassification(ent) {
       <div style="background:var(--surface-soft);border:1px solid var(--border);border-left:3px solid var(--rose);border-radius:var(--r-md);padding:14px 16px">
         <div style="font-size:10.5px;font-weight:700;color:var(--rose);letter-spacing:.05em;margin-bottom:6px">최근월 해지</div>
         <div style="font-size:22px;font-weight:900;color:var(--text);margin-bottom:2px">${fmtN(latestCancel)}명</div>
-        <div style="font-size:11px;color:var(--muted)">${latest?.month || '최근월'} · 유지 대비 ${fmtP(latestChurn)}</div>
+        <div style="font-size:11px;color:var(--muted)">${latest?.month || '최근월'} · 월환산 이탈률 ${fmtP(latestChurn)}</div>
       </div>
       <div style="background:var(--surface-soft);border:1px solid var(--border);border-left:3px solid var(--navy);border-radius:var(--r-md);padding:14px 16px">
         <div style="font-size:10.5px;font-weight:700;color:var(--navy);letter-spacing:.05em;margin-bottom:6px">선택 기간 해지 합계</div>
@@ -3756,14 +3858,13 @@ function renderPaymentPanel(ent) {
   // 단가 추정 (available data)
   const revenuePerWash  = usage > 0 ? gross / usage : 0;    // 실결제매출 / 총사용 = 건당 매출
   const netPerWash      = usage > 0 ? net   / usage : 0;    // 순매출 / 총사용 = 건당 순매출
-  const mrrPerSub       = retained > 0 ? mrr / retained : 0; // MRR / 유지 구독 = 구독 ARPU
 
   const items = [
     { label:'건당 매출', val:fmtS(revenuePerWash),
       note:`실결제매출 ÷ ${fmtN(usage)}대`, color:'navy' },
     { label:'건당 순매출', val:fmtS(netPerWash),
       note:`실결제매출에서 환불·기타 차감 후`, color:'green' },
-    { label:'구독 ARPU', val:arpu>0?fmtS(arpu):(mrrPerSub>0?fmtS(mrrPerSub):'—'),
+    { label:'매장PASS ARPU', val:arpu>0?fmtS(arpu):'—',
       note:arpuBasisLabel(c), color:'accent' },
     { label:'목표 실현 단가', val:`${fmtN(UNIT_PRICE_TARGET)}원`,
       note:`Capacity 기회금액 상한 기준 단가`, color:'amber' }
@@ -3784,7 +3885,7 @@ function renderPaymentPanel(ent) {
     <div class="pay-item navy">
       <div class="pay-label">LTV (추정)${kpiTooltipIcon('LTV')}</div>
       <div class="pay-val">${ltv > 0 ? fmtW(ltv) : '—'}</div>
-      <div class="pay-note">ARPU ÷ 월 이탈률 추정</div>
+      <div class="pay-note">MRR ÷ 월환산 해지수</div>
     </div>
   </div>`;
 }
@@ -3830,7 +3931,7 @@ function renderHeatmap(ent) {
   ];
   const metricsExtra = [
     { key:'netAdds',  label:'순증감', fmt:fmtN,  inv:false },
-    { key:'arpu',     label:'ARPU',   fmt:fmtS,  inv:false },
+    { key:'arpu',     label:'매장PASS ARPU', fmt:fmtS, inv:false },
     { key:'gross',    label:'실결제매출', fmt:fmtS,  inv:false }
   ];
   const metrics = _hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore;
@@ -4113,9 +4214,9 @@ function renderDetail(ent) {
                       : `쿠폰 적용 전 추정액 대비 · ${fmtS(c.discountAmount||0)}${couponCoverageSuffix(c)}`;
       return { label:`쿠폰할인율${badge}`, val:dispVal, sub:dispSub };
     })(),
-    { label:'ARPU',     val:c.arpu>0?fmtS(c.arpu):'—', sub:arpuBasisLabel(c) },
+    { label:'매장PASS ARPU', val:c.arpu>0?fmtS(c.arpu):'—', sub:arpuBasisLabel(c) },
     { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`ARR YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'} (연간 반복매출)` },
-    { label:'LTV(추정)', val: (c.ltv||0) > 0 ? fmtW(c.ltv) : '—', sub:`ARPU ÷ 이탈률 추정` }
+    { label:'LTV(추정)', val: (c.ltv||0) > 0 ? fmtW(c.ltv) : '—', sub:`MRR ÷ 월환산 해지수` }
   ];
   $('detailGrid').innerHTML = items.map(i=>
     `<div class="d-item">
@@ -4607,7 +4708,7 @@ function renderInlineStoreDetail(ent) {
         {l:'MRR',         v:fmtS(c.mrr||0),      s:`MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)}`},
         {l:'ARPU',        v:(c.arpu||0)>0?fmtS(c.arpu):'—', s:arpuBasisLabel(c)},
         {l:'ARR',         v:(c.arr||0)>0?fmtS(c.arr):'—', s:`ARR YoY ${c.arrYoY?(c.arrYoY>0?'+':'')+fmtP(c.arrYoY):'—'}`},
-        {l:'LTV(추정)',    v:(c.ltv||0)>0?fmtW(c.ltv):'—', s:`ARPU ÷ 이탈률 추정`},
+        {l:'LTV(추정)',    v:(c.ltv||0)>0?fmtW(c.ltv):'—', s:`MRR ÷ 월환산 해지수`},
       ].map(i=>`
         <div class="d-item">
           <div class="d-label">${i.l}</div>

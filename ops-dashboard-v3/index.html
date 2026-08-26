@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20260724-2">
+  <link rel="stylesheet" href="./style.css?v=20260825">
   <!-- 인증 가드: 쿠키 없이 직접 접근 시 로그인 페이지로 이동 -->
   <script>
     (function() {
@@ -211,12 +211,12 @@
         </div>
       </div>
 
-      <!-- ③ 쿠폰할인 및 ARPU 수익성 -->
+      <!-- ③ 쿠폰할인 및 매장PASS ARPU 수익성 -->
       <div class="ops-sub-section" style="margin-top:18px">
         <div class="chart-section-head" style="margin-bottom:6px">
           <div>
-            <h2 style="font-size:13.5px;margin:0">③ 쿠폰할인·ARPU 수익성</h2>
-            <p class="sub" style="margin:0">쿠폰 적용 전 추정액 대비 할인율 · ARPU</p>
+            <h2 style="font-size:13.5px;margin:0">③ 쿠폰할인·매장PASS ARPU 수익성</h2>
+            <p class="sub" style="margin:0">쿠폰 적용 전 추정액 대비 할인율 · 구독자-월 노출 기준 ARPU</p>
           </div>
           <button class="collapse-toggle collapsed" data-target="opsArpuDetail" aria-label="상세 보기">
             <span class="arrow">▾</span><span class="toggle-label">상세</span>
@@ -314,8 +314,8 @@
       <div class="chart lg"><canvas id="seasonChart"></canvas></div>
     </article>
     <article class="panel col-4">
-      <h2>결제 단가 · ARPU 요약</h2>
-      <p class="sub">건당 매출·순매출·구독 ARPU·목표 단가</p>
+      <h2>결제 단가 · 매장PASS ARPU 요약</h2>
+      <p class="sub">건당 매출·순매출·구독자-월 노출 기준 ARPU·목표 단가</p>
       <div id="paymentPanel" class="payment-panel"></div>
     </article>
   </div>
@@ -359,6 +359,6 @@
     </article>
   </section>
 </div>
-<script src="./app.js?v=20260724-2"></script>
+<script src="./app.js?v=20260825"></script>
 </body>
 </html>
