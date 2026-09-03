@@ -301,6 +301,7 @@ async function main() {
   });
 
   const discrepancies = [];
+  const missingnessIssues = [];
   overall.forEach(month => {
     const rows = rawByMonth.get(month.monthNum) || [];
     const sum = key => rows.reduce((total, row) => total + rawNumber(row, key), 0);
@@ -321,6 +322,17 @@ async function main() {
       const actual = Number(month[key] || 0);
       if (!closeEnough(actual, expected)) discrepancies.push({ month: month.month, key, actual, expected });
     });
+    const subscriptionFields = ['retained','newSubs','cancelSubs','netAdds','churn','mrr','arpu','arr','ltv'];
+    if (canonical?.hasSubscriptionData === false) {
+      if (month.hasSubscriptionData !== false) {
+        missingnessIssues.push({ month:month.month, issue:'missing subscription source not marked unavailable' });
+      }
+      subscriptionFields.forEach(field => {
+        if (month[field] !== null) {
+          missingnessIssues.push({ month:month.month, field, issue:'missing subscription source coerced to a value', actual:month[field] });
+        }
+      });
+    }
   });
 
   const storeTabDiscrepancies = [];
@@ -422,11 +434,15 @@ async function main() {
     ['grossAchievement', cumulativePortfolio.grossAchievement, true],
     ['refundRate', cumulativePortfolio.refundRate, true],
     ['sameStoreNetYoY', cumulativePortfolio.netYoY, true],
-    ['totalNetGrowth', cumulativePortfolio.totalNetGrowth, true],
-    ['totalNewSubs', cumulativePortfolio.newSubs, false],
-    ['totalCancelSubs', cumulativePortfolio.cancelSubs, false],
-    ['retained', latestPortfolioMonth.retained, false]
+    ['totalNetGrowth', cumulativePortfolio.totalNetGrowth, true]
   ];
+  if (summaryKpis.subscriptionAvailable !== false) {
+    requiredSummaryChecks.push(
+      ['totalNewSubs', cumulativePortfolio.newSubs, false],
+      ['totalCancelSubs', cumulativePortfolio.cancelSubs, false],
+      ['retained', cumulativePortfolio.retained, false]
+    );
+  }
   requiredSummaryChecks.forEach(([summaryField, expected, percentage]) => {
     const actual = summaryKpis[summaryField];
     if (actual === null || actual === undefined) {
@@ -509,6 +525,7 @@ async function main() {
     schemaIssues,
     grainIssues,
     formulaIssues,
+    missingnessIssues,
     storeTabDiscrepancies,
     opsDiscrepancies,
     summaryDiscrepancies,
@@ -531,10 +548,12 @@ async function main() {
       net: latestPortfolioMonth.net || 0,
       achievement: latestPortfolioMonth.achievement || 0,
       utilization: latestPortfolioMonth.utilization || 0,
-      churn: latestPortfolioMonth.churn || 0,
-      arpu: latestPortfolioMonth.arpu || 0,
-      mrr: latestPortfolioMonth.mrr || 0,
-      retained: latestPortfolioMonth.retained || 0
+      subscriptionAvailable: latestPortfolioMonth.hasSubscriptionData !== false,
+      subscriptionSnapshotMonth: cumulativePortfolio.subscriptionSnapshotMonth || null,
+      churn: latestPortfolioMonth.churn,
+      arpu: latestPortfolioMonth.arpu,
+      mrr: latestPortfolioMonth.mrr,
+      retained: latestPortfolioMonth.retained
     },
     audit: dashboard.audit
   };
@@ -543,6 +562,7 @@ async function main() {
     ...schemaIssues,
     ...grainIssues,
     ...formulaIssues,
+    ...missingnessIssues,
     ...discrepancies,
     ...storeTabDiscrepancies,
     ...opsDiscrepancies,
