@@ -1,4 +1,4 @@
-const { createSign } = require('node:crypto');
+const { createSign, createHash } = require('node:crypto');
 
 const SHEET_ID = '1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo';
 const SOURCES = {
@@ -26,6 +26,25 @@ function buildState(rows) {
 
 let tokenCache;
 async function googleToken(env, fetchImpl) {
+  const oauth=[env.GOOGLE_OAUTH_CLIENT_ID,env.GOOGLE_OAUTH_CLIENT_SECRET,env.GOOGLE_OAUTH_REFRESH_TOKEN];
+  if (oauth.some(Boolean)) {
+    if (!oauth.every(Boolean)) throw new SourceError('SOURCE_AUTH_REQUIRED','Google OAuth 서버 인증 설정이 일부 누락됐습니다.');
+    const cacheKey=createHash('sha256').update(JSON.stringify(oauth)).digest('hex');
+    if (tokenCache?.cacheKey===cacheKey && tokenCache.expires>Date.now()+60000) return tokenCache.token;
+    const response=await fetchImpl('https://oauth2.googleapis.com/token',{method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({grant_type:'refresh_token',client_id:oauth[0],client_secret:oauth[1],refresh_token:oauth[2]}),
+      signal:AbortSignal.timeout(10000)});
+    const payload=await response.json();
+    if (!response.ok || !payload.access_token) throw new SourceError('SOURCE_AUTH_INVALID',
+      payload.error==='invalid_grant' ? 'Google 조회 승인이 만료되거나 취소됐습니다. 관리자 계정으로 다시 연결해야 합니다.' : 'Google OAuth 서버 인증에 실패했습니다.');
+    const scopes=String(payload.scope||'').split(' ');
+    const allowed=new Set(['https://www.googleapis.com/auth/spreadsheets.readonly','openid','email','https://www.googleapis.com/auth/userinfo.email']);
+    if (!scopes.includes('https://www.googleapis.com/auth/spreadsheets.readonly') || scopes.some(scope=>!allowed.has(scope)))
+      throw new SourceError('SOURCE_AUTH_INVALID','Google OAuth 권한이 승인된 읽기 전용 범위와 다릅니다. 다시 연결해야 합니다.');
+    tokenCache={cacheKey,token:payload.access_token,expires:Date.now()+Number(payload.expires_in||3600)*1000};
+    return tokenCache.token;
+  }
   const email=env.GOOGLE_CLIENT_EMAIL;
   const privateKey=env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
   if (!email || !privateKey) throw new SourceError('SOURCE_AUTH_REQUIRED',
