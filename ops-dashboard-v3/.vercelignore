@@ -1,0 +1,7 @@
+.qa/
+.env*
+service-account*.json
+test-sync.cjs
+dev-server.cjs
+validate-live.cjs
+SYNC_SETUP.md
