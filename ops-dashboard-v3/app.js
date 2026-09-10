@@ -160,6 +160,8 @@ let dashboard = null;
 const charts = {};
 
 function getMtdDay() {
+  const current = dashboard?.overall?.find(month => month.monthNum === TODAY_MONTH);
+  if (current?.elapsedDays > 0) return current.elapsedDays;
   const sourceDate = dashboard?.dataQuality?.salesLatestDate;
   if (sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
       && sourceDate.getFullYear() === TODAY_YEAR
@@ -185,7 +187,7 @@ function subscriptionMonthsFor(months) {
 function subscriptionBasisLabel(summary) {
   if (!summary?.hasSubscriptionData) return '구독 원천 미수신';
   const monthLabel = summary.subscriptionSnapshotMonth || '최근 수신월';
-  return `${monthLabel} 구독 수신 기준${summary.subscriptionLagged ? ' / 매출 최신월보다 지연' : ''}`;
+  return `${summary.subscriptionSourceDate || monthLabel} 구독 수신 기준${summary.subscriptionLagged ? ' / 매출 기준일과 다름' : ''}`;
 }
 const tx     = v => String(v??'').replace(/\s+/g,' ').trim();
 const num    = v => typeof v==='number'?v:+(String(v??'').replace(/[^\d.-]/g,''))||0;
@@ -225,33 +227,27 @@ function syncPeriodToggleActive() {
   });
 }
 
-/* ── 5. JSONP 로더 ──────────────────────────────────────────── */
-// ★ Change 6: 시트 실패 추적
+/* Server-backed source loading */
 const _failedSheets = new Set();
+let sourceSnapshot = null;
+let sourceRefreshFailed = false;
+
+async function fetchDashboardSnapshot() {
+  const response = await fetch('/api/data', { cache:'no-store', credentials:'same-origin', signal:AbortSignal.timeout(60000) });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.sheets) {
+    if (response.status === 401) throw new Error('인증이 만료됐습니다. 페이지를 새로 열어 로그인하세요.');
+    throw new Error(payload?.error || '시트 데이터 API에 연결하지 못했습니다. 최신 배포와 연결 설정을 확인하세요.');
+  }
+  sourceSnapshot = payload;
+}
 
 function loadSheet(gid, includeColumnHeaders=false, range='') {
-  return new Promise((resolve, reject) => {
-    const cb = `cb_${gid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const sc = document.createElement('script');
-    const tm = setTimeout(()=>{ cleanup(); _failedSheets.add(gid); reject(new Error(`timeout:${gid}`)); }, 18000);
-    function cleanup(){ clearTimeout(tm); delete window[cb]; sc.remove(); }
-    window[cb] = payload => {
-      cleanup();
-      _failedSheets.delete(gid);
-      if (!payload || payload.status !== 'ok') { _failedSheets.add(gid); reject(new Error(`err:${gid}`)); return; }
-      const rows = (payload.table.rows||[]).map(r=>(r.c||[]).map(c=>c?c.v??'':''));
-      if (includeColumnHeaders) {
-        const headers = (payload.table.cols || []).map(c => tx(c?.label || ''));
-        resolve([headers, ...rows]);
-      } else {
-        resolve(rows);
-      }
-    };
-    sc.onerror = ()=>{ cleanup(); _failedSheets.add(gid); reject(new Error(`load:${gid}`)); };
-    const rangeQuery = range ? `&range=${encodeURIComponent(range)}` : '';
-    sc.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=responseHandler:${cb};out:json&gid=${gid}&headers=${includeColumnHeaders?1:0}${rangeQuery}`;
-    document.body.appendChild(sc);
-  });
+  const key = Object.keys(GID).find(key => GID[key] === gid);
+  const rows = sourceSnapshot?.sheets?.[key];
+  if (rows) return Promise.resolve(rows);
+  _failedSheets.add(gid);
+  return Promise.reject(new Error('필수 시트 데이터가 누락됐습니다.'));
 }
 
 // ★ Change 6: 느린 로딩 경고 (15초 후)
@@ -473,14 +469,15 @@ function applyPortfolioCouponDiscounts(months, couponRows) {
     const source = couponsByQuarter[sp.quarter] || new Map();
     const hasCouponRow = source.has('쿠폰할인금액');
     const couponDiscount = mv(source, '쿠폰할인금액', sp.cur);
-    const canMapToPreCouponEstimate = hasCouponRow && couponDiscount > 0 && m.gross > 0;
+    const hasCouponValue = mapHasMetricValue(source, ['쿠폰할인금액'], sp.cur);
+    const canMapToPreCouponEstimate = hasCouponValue && couponDiscount >= 0 && m.gross > 0;
     const mappedDiscount = canMapToPreCouponEstimate ? couponDiscount : 0;
     const listPriceRevenue = m.gross + mappedDiscount;
     m.discountAmount = mappedDiscount;
     m.discountShare = listPriceRevenue > 0 ? mappedDiscount / listPriceRevenue * 100 : 0;
     m.hasDiscountData = canMapToPreCouponEstimate;
     m.couponSheetPresent = hasCouponRow;
-    m.hasCouponSourceData = couponDiscount > 0;
+    m.hasCouponSourceData = hasCouponValue;
     m.unmappedCouponDiscount = canMapToPreCouponEstimate ? 0 : couponDiscount;
     m.discountScope = canMapToPreCouponEstimate ? 'portfolio_coupon' : null;
     m.discountBasis = canMapToPreCouponEstimate ? 'pre_coupon_estimate' : null;
@@ -605,6 +602,38 @@ function factValue(row, headerIndex, keys, fn=num) {
   return value === null ? 0 : fn(value);
 }
 
+function sourceDateKey(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return new Date(Date.UTC(1899,11,30)+value*86400000).toISOString().slice(0,10);
+  const text = String(value).trim();
+  const match = text.match(/(\d{4})[-./]\s*(\d{1,2})[-./]\s*(\d{1,2})/);
+  if (match) return `${match[1]}-${match[2].padStart(2,'0')}-${match[3].padStart(2,'0')}`;
+  const gviz = text.match(/^Date\((\d{4}),(\d+),(\d+)/);
+  return gviz ? `${gviz[1]}-${String(+gviz[2]+1).padStart(2,'0')}-${gviz[3].padStart(2,'0')}` : null;
+}
+
+function sourceMonthDate(monthNum, latest) {
+  const date = sourceDateKey(latest);
+  if (!date || +date.slice(0,4) !== TODAY_YEAR || +date.slice(5,7) < monthNum) return null;
+  return +date.slice(5,7) === monthNum ? date
+    : `${TODAY_YEAR}-${String(monthNum).padStart(2,'0')}-${daysInMonth(monthNum)}`;
+}
+
+function dateContract(row, headerIndex, monthNum) {
+  const read = key => sourceDateKey(factRawValue(row,headerIndex,[key]));
+  const cfg = new Map(sourceSnapshot?.sheets?.cfg || []);
+  const salesSourceDate = read('최신매출일_2026');
+  const salesPrevDate = read('최신매출일_2025');
+  const subscriptionSourceDate = read('최신구독일_2026');
+  const subscriptionPrevDate = read('최신구독일_2025');
+  const usageSourceDate = read('최신사용일_2026') || sourceMonthDate(monthNum,cfg.get('usage_local_latest_date'));
+  return { salesSourceDate, salesPrevDate, subscriptionSourceDate, subscriptionPrevDate, usageSourceDate,
+    hasArpuData:Boolean(salesSourceDate && subscriptionSourceDate && salesSourceDate===subscriptionSourceDate),
+    hasArpwData:Boolean(salesSourceDate && usageSourceDate && salesSourceDate===usageSourceDate),
+    salesComparable:Boolean(salesSourceDate && salesPrevDate && salesSourceDate.slice(5)===salesPrevDate.slice(5)),
+    subscriptionComparable:Boolean(subscriptionSourceDate && subscriptionPrevDate && subscriptionSourceDate.slice(5)===subscriptionPrevDate.slice(5)) };
+}
+
 // 최신 시트의 정규화 원천(fact_monthly)을 월·매장 데이터 모델로 변환한다.
 // 표시용 분석 탭이 재생성 중 0으로 남아도 이 원천과 매장 상세를 통해 대시보드를 복구한다.
 function parseFactMonthly(rows) {
@@ -637,7 +666,8 @@ function parseFactMonthly(rows) {
     const netPrev = factValue(row, headerIndex, ['순매출_2025']);
     const refundAmount = factValue(row, headerIndex, ['환불_2026', '환불금액_2026']);
     const usage = factValue(row, headerIndex, ['총사용_2026']);
-    const subscriptionSourceDate = tx(factRawValue(row, headerIndex, ['최신구독일_2026']));
+    const dates = dateContract(row, headerIndex, monthNum);
+    const subscriptionSourceDate = dates.subscriptionSourceDate;
     const hasSubscriptionData = headerIndex.has('최신구독일_2026')
       ? Boolean(subscriptionSourceDate)
       : ['유지_2026','신규_2026','해지_2026','MRR_2026'].some(key => factRawValue(row, headerIndex, [key]) !== null);
@@ -647,7 +677,7 @@ function parseFactMonthly(rows) {
     const elapsedDays = factValue(row, headerIndex, ['경과일수_2026']);
     const daysInSourceMonth = factValue(row, headerIndex, ['월일수_2026']);
     const exposureFactor = status === 'mtd' && daysInSourceMonth > 0
-      ? Math.max(0, Math.min(1, elapsedDays / daysInSourceMonth))
+      ? Math.max(0, Math.min(1, Number(subscriptionSourceDate?.slice(8) || 0) / daysInSourceMonth))
       : 1;
     const retainedExposureRaw = retainedRaw * exposureFactor;
     const storePassRevenue = factValue(row, headerIndex, ['단일구독매출_2026']);
@@ -664,12 +694,17 @@ function parseFactMonthly(rows) {
 
     const item = {
       month, monthNum, quarter, status,
+      ...dates,
+      salesComparable:storeName === '안성' ? null : dates.salesComparable,
+      contributionRevenue: factRawValue(row,headerIndex,['운영기여매출_2026']) === null ? null : factValue(row,headerIndex,['운영기여매출_2026']),
+      allPassAttributedRevenue: factRawValue(row,headerIndex,['올패스운영귀속매출_2026']) === null ? null : factValue(row,headerIndex,['올패스운영귀속매출_2026']),
+      attributionSourceDate: sourceDateKey(factRawValue(row,headerIndex,['올패스귀속기준일_2026'])),
       target, targetFull,
       gross, grossPrev,
-      hasGrossYoY: grossPrev > 0,
+      hasGrossYoY: dates.salesComparable && grossPrev > 0,
       grossYoY: grossPrev > 0 ? (gross - grossPrev) / grossPrev * 100 : 0,
       net, netPrev,
-      hasNetYoY: netPrev > 0,
+      hasNetYoY: dates.salesComparable && netPrev > 0,
       netYoY: netPrev > 0 ? (net - netPrev) / netPrev * 100 : 0,
       achievement: achievementRaw || (target > 0 ? net / target * 100 : 0),
       grossAchievement: target > 0 ? gross / target * 100 : 0,
@@ -695,14 +730,14 @@ function parseFactMonthly(rows) {
         : null,
       mrr: hasSubscriptionData ? mrr : null,
       mrrPrev: hasSubscriptionData ? mrrPrev : null,
-      hasMrrYoY: hasSubscriptionData && mrrPrev > 0,
+      hasMrrYoY: hasSubscriptionData && dates.subscriptionComparable && mrrPrev > 0,
       mrrYoY: hasSubscriptionData && mrrPrev > 0 ? (mrr - mrrPrev) / mrrPrev * 100 : null,
       arr: hasSubscriptionData ? factValue(row, headerIndex, ['ARR_2026']) : null,
       arrPrev: hasSubscriptionData ? factValue(row, headerIndex, ['ARR_2025']) : null,
       ltv: hasSubscriptionData ? factValue(row, headerIndex, ['LTV_추정_2026']) : null,
       ltvPrev: hasSubscriptionData ? factValue(row, headerIndex, ['LTV_추정_2025']) : null,
       storePassRevenue,
-      arpu: hasSubscriptionData
+      arpu: hasSubscriptionData && dates.hasArpuData
         ? (storePassArpuRaw || (retainedExposureRaw > 0 ? storePassRevenue / retainedExposureRaw : 0))
         : null,
       arpuBasis: 'store_pass_sales_exposure',
@@ -746,7 +781,8 @@ function parseOverallMonthly(rows) {
   rows.slice(headerRowIdx + 1).forEach(row => {
     const monthNum = factValue(row, headerIndex, ['월번호']);
     if (monthNum < 1 || monthNum > TODAY_MONTH) return;
-    const subscriptionSourceDate = tx(factRawValue(row, headerIndex, ['최신구독일_2026']));
+    const dates = dateContract(row, headerIndex, monthNum);
+    const subscriptionSourceDate = dates.subscriptionSourceDate;
     const hasSubscriptionData = headerIndex.has('최신구독일_2026')
       ? Boolean(subscriptionSourceDate)
       : ['유지_2026','신규_2026','해지_2026','MRR_2026'].some(key => factRawValue(row, headerIndex, [key]) !== null);
@@ -763,9 +799,10 @@ function parseOverallMonthly(rows) {
     const daysInSourceMonth = factValue(row, headerIndex, ['월일수_2026']);
     const status = monthStatus(monthNum);
     const exposureFactor = status === 'mtd' && daysInSourceMonth > 0
-      ? Math.max(0, Math.min(1, elapsedDays / daysInSourceMonth))
+      ? Math.max(0, Math.min(1, Number(subscriptionSourceDate?.slice(8) || 0) / daysInSourceMonth))
       : 1;
     byMonth.set(monthNum, {
+      ...dates,
       hasSubscriptionData,
       subscriptionSourceDate: subscriptionSourceDate || null,
       mrr: hasSubscriptionData ? factValue(row, headerIndex, ['MRR_2026']) : null,
@@ -783,8 +820,8 @@ function parseOverallMonthly(rows) {
       allPassRetainedPrev: hasSubscriptionData ? allPassRetainedPrevRaw : null,
       retainedExposure: hasSubscriptionData ? retainedRaw * exposureFactor : null,
       storePassRevenue: factValue(row, headerIndex, ['단일구독매출_2026']),
-      storePassArpu: hasSubscriptionData ? factValue(row, headerIndex, ['매장PASS_ARPU_2026']) : null,
-      allPassArpu: hasSubscriptionData ? factValue(row, headerIndex, ['올패스_ARPU_2026']) : null,
+      storePassArpu: hasSubscriptionData && dates.hasArpuData ? factValue(row, headerIndex, ['매장PASS_ARPU_2026']) : null,
+      allPassArpu: hasSubscriptionData && dates.hasArpuData ? factValue(row, headerIndex, ['올패스_ARPU_2026']) : null,
       mrrSubscribers: hasSubscriptionData ? retainedRaw + allPassRetainedRaw : null,
       mrrSubscribersPrev: hasSubscriptionData ? retainedPrevRaw + allPassRetainedPrevRaw : null,
       source: '_overall_monthly'
@@ -805,6 +842,7 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
         .some(value => value !== null && value !== undefined && Number(value) !== 0);
 
     if (canonical) {
+      ['salesSourceDate','usageSourceDate','subscriptionSourceDate','hasArpuData','hasArpwData','subscriptionComparable'].forEach(key => { m[key] = canonical[key]; });
       m.retained = canonical.retained;
       m.retainedPrev = canonical.retainedPrev;
       m.retainedExposure = canonical.retainedExposure;
@@ -831,7 +869,7 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
 
     m.mrr = finance.mrr ?? m.mrr ?? 0;
     m.mrrPrev = finance.mrrPrev ?? m.mrrPrev ?? 0;
-    m.hasMrrYoY = m.mrrPrev > 0;
+    m.hasMrrYoY = m.subscriptionComparable !== false && m.mrrPrev > 0;
     m.mrrYoY = m.mrrPrev > 0 ? (m.mrr - m.mrrPrev) / m.mrrPrev * 100 : 0;
     m.arr = finance.arr ?? m.mrr * 12;
     m.arrPrev = finance.arrPrev ?? m.mrrPrev * 12;
@@ -844,9 +882,9 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
     m.mrrSubscribersPrev = canonical?.mrrSubscribersPrev ?? m.retainedPrev ?? 0;
     m.storePassRevenue = canonical?.storePassRevenue ?? m.storePassRevenue ?? 0;
     m.retainedExposure = canonical?.retainedExposure ?? m.retainedExposure ?? m.retained ?? 0;
-    m.arpu = canonical?.storePassArpu || m.arpu ||
-      (m.retainedExposure > 0 ? m.storePassRevenue / m.retainedExposure : 0);
-    m.allPassArpu = canonical?.allPassArpu || 0;
+    m.arpu = m.hasArpuData === false ? null : canonical?.storePassArpu ?? m.arpu ??
+      (m.retainedExposure > 0 ? m.storePassRevenue / m.retainedExposure : null);
+    m.allPassArpu = m.hasArpuData === false ? null : canonical?.allPassArpu ?? null;
     m.mrrPerSubscriber = m.mrrSubscribers > 0 ? m.mrr / m.mrrSubscribers : 0;
     m.arpuBasis = 'store_pass_sales_exposure';
   });
@@ -899,6 +937,13 @@ function aggregatePortfolioMonths(stores) {
     return {
       month: spec.month, monthNum: spec.num, quarter: spec.quarter, status: monthStatus(spec.num),
       target, targetFull: sum('targetFull'),
+      salesSourceDate:records.map(row=>row.salesSourceDate).filter(Boolean).sort().at(-1) || null,
+      usageSourceDate:records.map(row=>row.usageSourceDate).filter(Boolean).sort().at(-1) || null,
+      hasArpuData:records.every(row=>row.hasArpuData!==false),
+      hasArpwData:records.every(row=>row.hasArpwData!==false),
+      salesComparable:records.every(row=>row.salesComparable!==false),
+      contributionRevenue:records.every(row=>row.contributionRevenue!=null) ? sum('contributionRevenue') : null,
+      allPassAttributedRevenue:records.every(row=>row.allPassAttributedRevenue!=null) ? sum('allPassAttributedRevenue') : null,
       gross, grossPrev,
       comparableGross, comparableGrossPrev,
       hasGrossYoY: grossPrev > 0,
@@ -976,7 +1021,7 @@ function aggMonths(months) {
     unmappedCouponDiscount:a.unmappedCouponDiscount+(m.unmappedCouponDiscount||0),
     refundVal:     a.refundVal+(m.refundAmount || m.gross*(m.refundRate/100)||0),
     // 원천 가동률에서 해당 월의 유효 Capacity를 역산해 기간 가중 집계한다.
-    cap:           a.cap+(m.utilization>0?m.usage/(m.utilization/100):0),
+    cap:           a.cap+(m.mtdCapacity ?? (m.utilization>0?m.usage/(m.utilization/100):0)),
   }), {target:0,gross:0,grossPrev:0,net:0,netPrev:0,usage:0,
        comparableGross:0,comparableGrossPrev:0,comparableNet:0,comparableNetPrev:0,
        retainedExposure:0,storePassRevenue:0,newSubs:0,cancelSubs:0,netAdds:0,subscriptionMonths:0,discountAmount:0,
@@ -987,15 +1032,23 @@ function aggMonths(months) {
   const subscriptionMonths = months.filter(m => m.hasSubscriptionData !== false);
   const lastSubscription = subscriptionMonths[subscriptionMonths.length - 1] || null;
   const hasSubscriptionData = Boolean(lastSubscription);
+  const hasArpuData = months.every(m => m.hasArpuData !== false) && hasSubscriptionData;
+  const hasArpwData = months.every(m => m.hasArpwData !== false);
+  const salesComparable = months.every(m => m.salesComparable !== false);
   return {
+    hasArpuData, hasArpwData, salesComparable,
+    salesSourceDate:last.salesSourceDate || null,
+    usageSourceDate:last.usageSourceDate || null,
+    contributionRevenue:months.every(m=>m.contributionRevenue!=null) ? months.reduce((s,m)=>s+m.contributionRevenue,0) : null,
+    allPassAttributedRevenue:months.every(m=>m.allPassAttributedRevenue!=null) ? months.reduce((s,m)=>s+m.allPassAttributedRevenue,0) : null,
     target:t.target, gross:t.gross, grossPrev:t.grossPrev, net:t.net, netPrev:t.netPrev,
     grossYoY: t.comparableGrossPrev?(t.comparableGross-t.comparableGrossPrev)/t.comparableGrossPrev*100:0,
     netYoY:   t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
     sameStoreNetYoY:t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
     totalNetGrowth:t.netPrev?(t.net-t.netPrev)/t.netPrev*100:0,
-    hasTotalNetGrowth:t.netPrev>0,
-    hasGrossYoY:t.comparableGrossPrev>0,
-    hasNetYoY:t.comparableNetPrev>0,
+    hasTotalNetGrowth:salesComparable && t.netPrev>0,
+    hasGrossYoY:salesComparable && t.comparableGrossPrev>0,
+    hasNetYoY:salesComparable && t.comparableNetPrev>0,
     achievement: t.target?t.net/t.target*100:0,
     grossAchievement: t.target?t.gross/t.target*100:0,
     usage:t.usage,
@@ -1003,7 +1056,7 @@ function aggMonths(months) {
     subscriptionMonthCount:t.subscriptionMonths,
     subscriptionSnapshotMonth:lastSubscription?.month || null,
     subscriptionSourceDate:lastSubscription?.subscriptionSourceDate || null,
-    subscriptionLagged:hasSubscriptionData && lastSubscription !== last,
+    subscriptionLagged:hasSubscriptionData && (lastSubscription !== last || lastSubscription.subscriptionSourceDate !== last.salesSourceDate),
     retained:hasSubscriptionData ? lastSubscription.retained : null,
     retainedPrev:hasSubscriptionData ? lastSubscription.retainedPrev : null,
     retainedExposure:hasSubscriptionData ? t.retainedExposure : null,
@@ -1016,7 +1069,7 @@ function aggMonths(months) {
     netAdds:hasSubscriptionData ? t.netAdds : null,
     mrr:hasSubscriptionData ? lastSubscription.mrr : null,
     mrrPrev:hasSubscriptionData ? lastSubscription.mrrPrev : null,
-    hasMrrYoY:hasSubscriptionData && (lastSubscription.mrrPrev||0)>0,
+    hasMrrYoY:hasSubscriptionData && lastSubscription.hasMrrYoY !== false && (lastSubscription.mrrPrev||0)>0,
     mrrYoY:hasSubscriptionData && lastSubscription.mrrPrev
       ? (lastSubscription.mrr-lastSubscription.mrrPrev)/lastSubscription.mrrPrev*100
       : null,
@@ -1038,7 +1091,7 @@ function aggMonths(months) {
       : null,
     // 스냅샷형 지표는 선택 기간의 최신 월 기준
     storePassRevenue:t.storePassRevenue,
-    arpu: hasSubscriptionData
+    arpu: hasArpuData
       ? (t.retainedExposure>0 && t.storePassRevenue>0 ? t.storePassRevenue/t.retainedExposure : (lastSubscription.arpu||0))
       : null,
     arpuBasis:'store_pass_sales_exposure',
@@ -1163,7 +1216,7 @@ function parseSummary(rows) {
   // Summary 시트에서 전체 포트폴리오 KPI (키-값 형식) 파싱
   const map = new Map();
   const sectionEnd = rows.findIndex(r => tx(r[0]) === 'H1 KPI');
-  const summaryRows = sectionEnd >= 0 ? rows.slice(0, sectionEnd) : rows.slice(0, 14);
+  const summaryRows = sectionEnd >= 0 ? rows.slice(0, sectionEnd) : rows;
   summaryRows.forEach(r => {
     const k = tx(r[0]);
     if (k) map.set(k, r);
@@ -1200,14 +1253,16 @@ function parseSummary(rows) {
     totalTarget:  get(['누적 목표매출','목표매출 합계']),
     totalGross:   get(['누적 실결제매출(구 총매출)','누적 실결제매출','실결제매출(구 총매출)','실결제매출','누적 총매출','총매출','매출합계','Total Revenue','total_gross']),
     totalNet:     get(['누적 순매출','순매출','Net Revenue']),
+    contributionRevenue: get(['누적 운영기여매출(환불 전)']),
+    allPassAttributedRevenue: get(['누적 올패스 운영귀속매출(환불 전)']),
     achievement:  getPct(['누적 순매출 달성률(대표)','누적 달성률(순매출)','누적 순매출 달성률']),
     grossAchievement: getPct(['누적 실결제매출 달성률(보조)','누적 실결제매출 달성률']),
     refundRate: getPct(['누적 환불율','누적 환불률']),
     sameStoreNetYoY: getPct(['동일점 순매출 YoY(안성 제외)']),
     totalNetGrowth: getPct(['전체 순매출 성장(안성 포함)']),
-    totalNewSubs: subscriptionSummary[0] || null,
-    totalCancelSubs: subscriptionSummary[1] || null,
-    retained: subscriptionSummary[2] || null,
+    totalNewSubs: subscriptionSummary[0] ?? null,
+    totalCancelSubs: subscriptionSummary[1] ?? null,
+    retained: subscriptionSummary[2] ?? null,
     subscriptionAvailable,
     totalMrr:     get(['MRR','월정기매출']),
     avgUtilization: getPct(['가동률','평균가동률','Utilization']),
@@ -1220,7 +1275,9 @@ function parseSummary(rows) {
 /* ── 8-B. 데이터 점검 시트 파싱 ──────────────────────────────── */
 function isSourceCheckPending(c) {
   const text = `${c?.name || ''} ${c?.status || ''} ${c?.value || ''} ${c?.note || ''}`;
-  if (['빌드 상태', '대시보드 빌드 상태'].includes(c?.name) && /재생성|진행 중|진행중|빌드/.test(text)) return true;
+  if (['빌드 상태', '대시보드 빌드 상태'].includes(c?.name)) {
+    return /진행\s*중|재생성\s*중|미완료|running|pending/i.test(`${c.status} ${c.value}`);
+  }
   if (c?.name === '매출 최신일' && /점검중|미완료|중간에 중단|확인 불가/.test(text)) return true;
   return /대시보드 재생성이 완료되지 않았|최종 점검 미완료/.test(text);
 }
@@ -1282,9 +1339,9 @@ function parseDataQuality(rows) {
     }
   }
   const salesCheck = checks.find(c => c.name === '매출 최신일');
-  const dateMatch = salesCheck?.value?.match(/latest\s+(\d{4}-\d{2}-\d{2})/i);
+  const dateMatch = salesCheck?.value?.match(/(\d{4}-\d{2}-\d{2})/);
   const salesLatestDate = dateMatch ? new Date(`${dateMatch[1]}T00:00:00`) : null;
-  const nonNormalChecks = checks.filter(c => c.status && c.status !== '정상');
+  const nonNormalChecks = checks.filter(c => c.status && !['정상','확인','안내','완료'].includes(c.status));
   const pendingChecks = nonNormalChecks.filter(isSourceCheckPending);
   const sourceCheckPending = pendingChecks.length > 0 ||
     details.some(d => isSourceCheckPending({ name:d.location, value:d.message, note:'' }));
@@ -1324,7 +1381,7 @@ function runDataQualityAudit(dataQuality) {
     if (c.name === '매출 최신일' && dataQuality.salesLatestDate) {
       const d = dataQuality.salesLatestDate;
       const dateText = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      return `원천 매출 최신일: ${dateText} · 데이터 최신성 확인 필요`;
+      return `마지막 원천 점검에 기록된 매출일: ${dateText} / 현재 수신 기준일은 핵심 요약에서 확인`;
     }
     if (c.name.startsWith('탭 오류')) {
       return `원천 시트 탭 오류: ${c.value || c.status}${c.note ? ` · ${c.note}` : ''}`;
@@ -1333,7 +1390,7 @@ function runDataQualityAudit(dataQuality) {
   });
   const infoItems = (dataQuality.infos || []).map(c => {
     if (c.name === '원천별 최신일') {
-      return `[정보] 원천 기준일: ${c.value || c.status}${c.note ? ` / ${c.note}` : ''}`;
+      return `[정보] 마지막 원천 점검 기준일: ${c.value || c.status}${c.note ? ` / ${c.note}` : ''}`;
     }
     if (c.name === '원천 미수신 0값 보호') {
       return `[정보] 구독 결측 보호: ${c.value || c.status} / 대시보드는 미수신 월을 공란 처리하고 선택 기간의 최신 수신월 스냅샷을 사용`;
@@ -1357,6 +1414,7 @@ async function loadData() {
   setProgress(8, '공식 월별 원천 연결 중…');
   markActive('lstep-sheets');
   startSlowLoadTimer();
+  await fetchDashboardSnapshot();
 
   const storeKeys = Object.keys(GID.stores);
 
@@ -1365,7 +1423,7 @@ async function loadData() {
   // 생략하는 경우가 있어 핵심 요약 범위를 명시적으로 고정한다.
   const safeLoad = (...args) => loadSheet(...args).catch(() => []);
   const [summaryR, dataCheckR, couponR, factR, overallMonthlyR, opsR] = await Promise.all([
-    safeLoad(GID.summary, false, 'A1:B14'),
+    safeLoad(GID.summary, false, 'A1:B40'),
     safeLoad(GID.dataCheck),
     safeLoad(GID.coupon),
     safeLoad(GID.factMonthly, true),
@@ -1374,6 +1432,8 @@ async function loadData() {
   ]);
 
   const factByStore = parseFactMonthly(factR);
+  const missingStores = storeKeys.filter(key => !factByStore.has(GID.stores[key].name));
+  if (missingStores.length) throw new Error('공식 월별 원천에 일부 매장이 누락되어 갱신을 보류했습니다.');
   const hasPortfolioFinance = parseOverallMonthly(overallMonthlyR).size > 0;
   const needsStoreFallback = factByStore.size < storeKeys.length;
   const needsLegacyFinance = !hasPortfolioFinance;
@@ -1454,6 +1514,7 @@ async function loadData() {
     qualityAudit.unshift(`[정보] 포트폴리오 분석 탭 ${legacyAggregateMismatchMonths}개월이 fact_monthly와 불일치하여 원천 직접 합계로 자동 복구했습니다.`);
   }
   dashboard.audit = [...baseAudit, ...qualityAudit];
+  if (sourceSnapshot?.preview) dashboard.audit.unshift('[점검보류] 로컬 검증 화면: 캡처한 시트 데이터이며 실시간 연동 결과가 아닙니다.');
 
   // updatedAt / auditBadge — renderHeroKpis()에서 동적으로 재생성하므로 중복 설정 제거
   markDone('lstep-render');
@@ -1626,7 +1687,7 @@ function renderGauges(ent) {
 
   // ★ MRR 게이지 delta: YoY율의 전월 변화(▲53.9%p)는 사용자에게 불투명 → 실제 MRR MoM 변화율로 교체
   //   게이지 face는 MRR YoY%, sub에는 "MoM MRR ▲X%" 형태로 기준 명시
-  const mrrMoMPct = (lastSubscription && prevSubscription && prevSubscription.mrr > 0)
+  const mrrMoMPct = (lastSubscription?.status === 'confirmed' && prevSubscription?.status === 'confirmed' && prevSubscription.mrr > 0)
     ? ((lastSubscription.mrr - prevSubscription.mrr) / prevSubscription.mrr * 100) : null;
   const mrrMomContext = lastSubscription?.status === 'mtd'
     ? ` (${lastSubscription.month} MTD / ${prevSubscription?.month || '전월'} 확정)`
@@ -1702,6 +1763,7 @@ function couponUnavailableLabel(c) {
 }
 
 function arpuBasisLabel(c) {
+  if (c?.hasArpuData === false) return '매출/구독 기준일 불일치 또는 미수신으로 산출 보류';
   return c?.arpuBasis === 'store_pass_sales_exposure'
     ? '매장PASS 실결제매출 ÷ 구독자-월 노출량'
     : '매장PASS 실결제매출 ÷ 유지 구독자';
@@ -1892,6 +1954,12 @@ function renderInsights(ent) {
   const periodRangeLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel}` : lastPeriodLabel;
   const _insActiveN = getActiveOpsStores().length;
   const summaryNotes = [];
+  if (c.contributionRevenue != null) {
+    summaryNotes.push(`<strong>운영기여매출 (보조)</strong><span>${fmtS(c.contributionRevenue)} / 올패스 운영귀속 ${fmtS(c.allPassAttributedRevenue)} / 환불 전 사용량 귀속 관리값</span>`);
+  }
+  if (c.salesSourceDate || c.usageSourceDate) {
+    summaryNotes.push(`<strong>원천 기준일</strong><span>매출 ${c.salesSourceDate || '미수신'} / 사용 ${c.usageSourceDate || '미수신'} / 구독 ${c.subscriptionSourceDate || '미수신'}</span>`);
+  }
 
   if (ent.isAll && topStore) {
     const topPeriodLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel} 합산` : lastPeriodLabel;
@@ -1907,11 +1975,8 @@ function renderInsights(ent) {
     const prev = ms[ms.length-2];
     const momGross = prev.gross>0?(latestM.gross-prev.gross)/prev.gross*100:0;
     const latestIsMTD = (latestM.status || monthStatus(latestM.monthNum)) === 'mtd';
-    if (Math.abs(momGross)>0.5) {
-      if (latestIsMTD) {
-        const prevLabel = prev.month || '전월';
-        summaryNotes.push(`<strong>최신월 흐름</strong><span>${latestM.month} MTD는 ${prevLabel} 확정 대비 ${momGross>=0?'+':''}${momGross.toFixed(1)}% · 경과일 차이로 직접 비교 주의</span>`);
-      } else if (ms.length === 2) {
+    if (Math.abs(momGross)>0.5 && !latestIsMTD) {
+      if (ms.length === 2) {
         summaryNotes.push(`<strong>매출 흐름</strong><span>${prev.month} 대비 ${latestM.month} ${momGross>=0?'+':''}${momGross.toFixed(1)}% MoM</span>`);
       }
     }
@@ -2491,7 +2556,7 @@ function renderOpsArpuStats(ent) {
       <tbody>
         ${ms.map(m => {
           const d    = m.discountShare || 0;
-          const hasSubscriptionData = m.hasSubscriptionData !== false;
+          const hasSubscriptionData = m.hasSubscriptionData !== false && m.hasArpuData !== false;
           const arpu = hasSubscriptionData ? (m.arpu || 0) : null;
           const diff = hasSubscriptionData && arpuAvg > 0 ? ((arpu - arpuAvg) / arpuAvg * 100) : null;
           const sign = diff !== null && diff >= 0 ? '+' : '';
@@ -2499,7 +2564,7 @@ function renderOpsArpuStats(ent) {
           return `<tr style="border-bottom:1px solid var(--bg2)">
             <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
             <td style="padding:4px 6px;text-align:right;color:${m.hasDiscountData ? dColor : 'var(--muted)'}">${m.hasDiscountData ? `${d.toFixed(1)}%` : (m.hasCouponSourceData ? '산출 제외' : m.couponSheetPresent ? '집계 없음' : '—')}</td>
-            <td style="padding:4px 6px;text-align:right;font-weight:700;color:${hasSubscriptionData ? 'var(--text)' : 'var(--muted)'}">${hasSubscriptionData ? fmtS(arpu) : '미수신'}</td>
+            <td style="padding:4px 6px;text-align:right;font-weight:700;color:${hasSubscriptionData ? 'var(--text)' : 'var(--muted)'}">${hasSubscriptionData ? fmtS(arpu) : m.hasSubscriptionData === false ? '미수신' : '기준일 불일치'}</td>
             <td style="padding:4px 0;text-align:right;color:${diff === null ? 'var(--muted)' : diff >= 0 ? 'var(--green)' : 'var(--rose)'};">${diff === null ? '—' : `${sign}${diff.toFixed(1)}%`}</td>
           </tr>`;
         }).join('')}
@@ -2830,7 +2895,7 @@ function renderScatterChart(ent) {
   // 선택 기간에 확정월이 없을 때만 MTD를 대체 사용한다.
   const selectedPeriodMonths = months => {
     const base = months.filter(m =>
-      periodMatchesMonth(state.quarter, m) && m.gross > 0 && m.target > 0 && m.hasSubscriptionData !== false
+      periodMatchesMonth(state.quarter, m) && m.gross > 0 && m.target > 0 && m.hasSubscriptionData !== false && m.hasArpuData !== false
     );
     const confirmed = base.filter(m => m.status === 'confirmed');
     return confirmed.length ? confirmed : base.filter(m => m.status === 'mtd');
@@ -3142,7 +3207,8 @@ function renderHeroKpis(ent) {
   const freshMin  = loadedAt ? Math.round((Date.now() - loadedAt) / 60000) : null;
   const freshStr  = freshMin === null ? '—' : freshMin < 1 ? '방금 전' : `${freshMin}분 전`;
   const loadedStr = loadedAt ? loadedAt.toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'}) : '—';
-  const sourceDate = dashboard.dataQuality?.salesLatestDate;
+  const actualSalesDate = dashboard.overall?.map(month=>month.salesSourceDate).filter(Boolean).sort().at(-1);
+  const sourceDate = actualSalesDate ? new Date(`${actualSalesDate}T00:00:00`) : dashboard.dataQuality?.salesLatestDate;
   const sourcePending = dashboard.dataQuality?.sourceCheckPending;
   const sourceStr = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? sourceDate.toLocaleDateString('ko-KR', {month:'numeric', day:'numeric'})
@@ -3202,14 +3268,14 @@ function renderHeroKpis(ent) {
           : '✓ 정합성 정상';
 
   // 연결 상태는 실제 로드 실패 여부, 데이터 최신성은 원천 매출 최신일로 별도 표시한다.
-  const connectionIssue = _failedSheets.size > 0;
-  const connClass = connectionIssue ? 'warn' : 'ok';
+  const connectionIssue = sourceRefreshFailed || _failedSheets.size > 0;
+  const connClass = connectionIssue || sourceSnapshot?.preview ? 'warn' : 'ok';
 
   metaEl.innerHTML = `
     <span class="meta-pill" id="updatedAt">🕐 조회 ${loadedStr} · ${freshStr}</span>
     <span class="meta-pill">📊 ${storeStr} · ${qStr}</span>
     <span class="meta-pill">📅 ${rangeStr}</span>
-    <span class="meta-pill ${connClass}">● 시트 연결 ${connectionIssue ? '일부 실패' : '정상'}</span>
+    <span class="meta-pill ${connClass}" id="connectionStatus">${sourceRefreshFailed ? '갱신 보류 / 마지막 정상 조회값' : sourceSnapshot?.preview ? '캡처 데이터 검증 화면 / 실시간 아님' : `시트 연결 ${connectionIssue ? '일부 실패' : '정상'}`}</span>
     <span class="meta-pill ${sourceClass}">🗂 원천 매출 ${sourceStr}${sourceFreshness}</span>
     <span class="meta-pill ${auditClass}" id="auditBadge">${auditText}</span>
     <span class="meta-pill">↻ 자동갱신 5분</span>
@@ -3325,7 +3391,7 @@ function buildCapacityData(ent) {
     // ── 보수적 단가: 매출과 사용량이 모두 있는 월만 사용 ──────────
     // 선택 기간에 매출 원천이 없으면 해당 매장의 가용 과거 실적으로 대체한다.
     const calcUnitPrice = months => {
-      const valid = (months || []).filter(m => (m.net || 0) > 0 && (m.usage || 0) > 0);
+      const valid = (months || []).filter(m => m.hasArpwData !== false && (m.net || 0) > 0 && (m.usage || 0) > 0);
       const net = valid.reduce((s, m) => s + (m.net || 0), 0);
       const usage = valid.reduce((s, m) => s + (m.usage || 0), 0);
       return usage > 0 ? net / usage : 0;
@@ -3333,7 +3399,7 @@ function buildCapacityData(ent) {
     const periodPrice = calcUnitPrice(filtMs);
     const storeHistory = (dashboard?.stores || []).find(s => s.name === storeName)?.months || [];
     const historyPrice = calcUnitPrice(storeHistory);
-    const sourcePrice = [...filtMs].reverse().find(m => (+m.lossUnitPrice || 0) > 0)?.lossUnitPrice || 0;
+    const sourcePrice = [...filtMs].reverse().find(m => m.hasArpwData !== false && (+m.lossUnitPrice || 0) > 0)?.lossUnitPrice || 0;
     const consPrice = sourcePrice || periodPrice || historyPrice || UNIT_PRICE_TARGET;
     const priceSource = sourcePrice ? 'fact_monthly' : periodPrice ? 'selected_period' : historyPrice ? 'available_history' : 'fallback_target';
 
@@ -3889,15 +3955,15 @@ function renderSubscriptionPipeline(ent) {
   el.innerHTML = `
     <div class="pipe-summary-card">
       <div>
-        <div class="pipe-label">월말 매장PASS 유지 구독자</div>
+        <div class="pipe-label">${last.status === 'mtd' ? '기준일' : '월말'} 매장PASS 유지 구독</div>
         <div class="pipe-main-val">${fmtN(retained)}명</div>
       </div>
-      <div class="pipe-summary-note">${last.month} 수신 기준</div>
+      <div class="pipe-summary-note">${last.subscriptionSourceDate || last.month} 수신 기준</div>
     </div>
     <div class="pipe-flow-title">월중 변동 흐름</div>
     ${flowRows.map(s => {
       const absVal = Math.abs(s.val || 0);
-      const w = Math.max(6, (absVal / flowBase * 100)).toFixed(1);
+      const w = (absVal / flowBase * 100).toFixed(1);
       const signVal = s.label === '순증감' && s.val > 0 ? `+${fmtN(s.val)}` : fmtN(s.val);
       return `<div class="pipe-row">
         <div class="pipe-label-row">
@@ -3910,11 +3976,11 @@ function renderSubscriptionPipeline(ent) {
         </div>
       </div>`;
     }).join('')}
-    <div class="pipe-footnote">매장PASS 유지는 월말 스냅샷, 신규/해지는 월중 발생 건수입니다. ALL PASS는 전사 MRR과 전체 활성 구독자 범위에만 별도 포함됩니다.</div>
+    <div class="pipe-footnote">매장PASS 유지는 수신 기준일 스냅샷, 신규/해지는 월중 발생 건수입니다. ALL PASS는 전사 MRR과 전체 활성 구독 범위에 별도 포함됩니다.</div>
   `;
 
   // MoM 변화 요약
-  if (ms.length >= 2) {
+  if (ms.length >= 2 && last.status === 'confirmed' && ms[ms.length-2].status === 'confirmed') {
     const prev = ms[ms.length-2];
     const delta = (last.netAdds||0) - (prev.netAdds||0);
     const trend = delta >= 0 ? `<span style="color:#216552">▲ ${delta > 0 ? '+' : ''}${fmtN(delta)}</span>` : `<span style="color:#b24c58">▼ ${fmtN(delta)}</span>`;
@@ -4000,10 +4066,10 @@ function renderPaymentPanel(ent) {
   const netPerWash      = usage > 0 ? net   / usage : 0;    // 순매출 / 총사용 = 건당 순매출
 
   const items = [
-    { label:'건당 매출', val:fmtS(revenuePerWash),
-      note:`실결제매출 ÷ ${fmtN(usage)}대`, color:'navy' },
-    { label:'건당 순매출', val:fmtS(netPerWash),
-      note:`실결제매출에서 환불·기타 차감 후`, color:'green' },
+    { label:'건당 매출', val:c.hasArpwData === false ? '—' : fmtS(revenuePerWash),
+      note:c.hasArpwData === false ? '매출/사용 기준일 불일치로 산출 보류' : `실결제매출 ÷ ${fmtN(usage)}대`, color:'navy' },
+    { label:'건당 순매출', val:c.hasArpwData === false ? '—' : fmtS(netPerWash),
+      note:c.hasArpwData === false ? '매출/사용 기준일 불일치로 산출 보류' : '실결제매출에서 환불 차감 후', color:'green' },
     { label:'매장PASS ARPU', val:arpu>0?fmtS(arpu):'—',
       note:c.hasSubscriptionData ? `${arpuBasisLabel(c)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), color:'accent' },
     { label:'목표 실현 단가', val:`${fmtN(UNIT_PRICE_TARGET)}원`,
@@ -4418,13 +4484,13 @@ function renderDetail(ent) {
 
   // 최근 추세 (월별 변화)
   const trends = [];
-  if (lastM && prevM) {
+  if (lastM?.status === 'confirmed' && prevM?.status === 'confirmed') {
     const momGross = prevM.gross > 0 ? (lastM.gross - prevM.gross) / prevM.gross * 100 : 0;
     const momUtil  = lastM.utilization - prevM.utilization;
     trends.push({ label:'실결제매출 MoM',  val:`${momGross>=0?'+':''}${momGross.toFixed(1)}%`, good: momGross >= 0 });
     trends.push({ label:'가동률 변화', val:`${momUtil>=0?'+':''}${momUtil.toFixed(1)}%p`, good: momUtil >= 0 });
   }
-  if (lastSubscription && prevSubscription) {
+  if (lastSubscription?.status === 'confirmed' && prevSubscription?.status === 'confirmed') {
     const momChurn = lastSubscription.churn - prevSubscription.churn;
     trends.push({ label:`이탈률 변화 (${lastSubscription.month})`, val:`${momChurn>=0?'+':''}${momChurn.toFixed(1)}%p`, good: momChurn <= 0, invert:true });
     trends.push({ label:`순증감 (${lastSubscription.month})`, val:`${(lastSubscription.netAdds||0)>=0?'+':''}${lastSubscription.netAdds||0}건`, good: (lastSubscription.netAdds||0) >= 0 });
@@ -4810,13 +4876,13 @@ function renderInlineStoreDetail(ent) {
 
   // 최근 트렌드
   const trends = [];
-  if (lastM && prevM) {
+  if (lastM?.status === 'confirmed' && prevM?.status === 'confirmed') {
     const momGross = prevM.gross > 0 ? (lastM.gross - prevM.gross) / prevM.gross * 100 : 0;
     const momUtil  = (lastM.utilization||0) - (prevM.utilization||0);
     trends.push({ label:'실결제매출 MoM',  val:`${momGross>=0?'+':''}${momGross.toFixed(1)}%`,  good:momGross>=0 });
     trends.push({ label:'가동률 변화', val:`${momUtil>=0?'+':''}${momUtil.toFixed(1)}%p`,   good:momUtil>=0 });
   }
-  if (lastSubscription && prevSubscription) {
+  if (lastSubscription?.status === 'confirmed' && prevSubscription?.status === 'confirmed') {
     const momChurn = (lastSubscription.churn||0) - (prevSubscription.churn||0);
     const momNetA  = (lastSubscription.netAdds||0) - (prevSubscription.netAdds||0);
     trends.push({ label:`이탈률 변화 (${lastSubscription.month})`, val:`${momChurn>=0?'+':''}${momChurn.toFixed(1)}%p`, good:momChurn<=0 });
@@ -5004,15 +5070,30 @@ function bindEvents() {
 async function loadAll() { await init(true); }
 
 async function init(showLoading=true) {
+  if (init.running) return;
+  init.running = true;
+  const previousDashboard = dashboard;
+  const previousSnapshot = sourceSnapshot;
   if (showLoading) $('loadingOverlay').style.display = 'flex';
   const errBannerEl = $('errBanner');
   if (errBannerEl) errBannerEl.style.display = 'none';
   _failedSheets.clear();
   try {
     await loadData();
+    sourceRefreshFailed = false;
     renderAll();
     $('loadingOverlay').style.display = 'none';
   } catch(e) {
+    dashboard = previousDashboard;
+    sourceSnapshot = previousSnapshot;
+    sourceRefreshFailed = true;
+    const connectionStatus = $('connectionStatus');
+    if (connectionStatus) { connectionStatus.textContent = dashboard ? '갱신 보류 / 마지막 정상 조회값' : '조회 보류 / 수신 데이터 없음'; connectionStatus.className = 'meta-pill warn'; }
+    if (!dashboard) {
+      for (const [id, text] of Object.entries({focusLabel:'데이터 조회 보류', statusText:'조회 실패 / 재시도 가능', auditBadge:'원천 조회 후 점검 가능'})) {
+        if ($(id)) $(id).textContent = text;
+      }
+    }
     console.error('[OPS Dashboard] 로드 오류:', e);
     clearSlowLoadTimer();
     $('loadingOverlay').style.display = 'none';
@@ -5027,12 +5108,13 @@ async function init(showLoading=true) {
     const errEl = $('errBanner');
     if (errEl) {
       errEl.style.display = 'block';
-      errEl.innerHTML = `<span style="font-weight:800">⚠ 데이터 로드 실패 · 시트 연결을 확인해주세요${failedStr}</span>
-        <br><span style="font-size:11.5px;opacity:.85">${e.message}</span>
+      const safeMessage = String(e.message).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+      errEl.innerHTML = `<span style="font-weight:800">데이터 갱신 보류${dashboard ? ' / 마지막 정상 조회 화면 유지' : ''}${failedStr}</span>
+        <br><span style="font-size:11.5px;opacity:.85">${safeMessage}</span>
         <button id="errRetryBtn" style="margin-left:14px;padding:4px 14px;border-radius:99px;border:1px solid currentColor;background:transparent;color:inherit;font-family:inherit;font-size:12px;font-weight:700;cursor:pointer">↻ 재시도</button>`;
       document.getElementById('errRetryBtn')?.addEventListener('click', loadAll);
     }
-  }
+  } finally { init.running = false; }
 }
 
 parseHash();

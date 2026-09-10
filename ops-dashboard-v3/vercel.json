@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/auth.js": { "maxDuration": 10 },
-    "api/check.js": { "maxDuration": 5 }
+    "api/check.js": { "maxDuration": 5 },
+    "api/data.js": { "maxDuration": 60 }
   },
   "headers": [
     {
