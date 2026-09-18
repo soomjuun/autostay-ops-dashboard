@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { fetchSnapshot } = require('./lib/sheets.cjs');
 
 const appPath = path.join(__dirname, 'app.js');
 const sheetId = '1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo';
@@ -36,6 +37,8 @@ function createDashboardApi() {
       parseStore, parseOps, parseOverall, applyPortfolioCouponDiscounts,
       parseSummary, aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
       runAudit, buildCapacityData,
+      sourceDateKey, isSourceCheckPending, dateContract,
+      setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
       setState: value => { state = value; }
     };
@@ -95,6 +98,7 @@ function closeEnough(actual, expected) {
 }
 
 function metricClose(actual, expected, percentage = false) {
+  if (actual == null || expected == null) return actual == null && expected == null;
   const absTolerance = percentage ? 0.05 : 1;
   const relativeTolerance = percentage ? 1e-5 : 1e-7;
   return Math.abs(Number(actual || 0) - Number(expected || 0)) <=
@@ -120,18 +124,14 @@ function kstDateParts(date = new Date()) {
 async function main() {
   const api = createDashboardApi();
   const storeNames = Object.keys(gids.stores);
-  const entries = await Promise.all([
-    loadSheet(gids.summary, false, 'A1:B14'),
-    loadSheet(gids.ops),
-    loadSheet(gids.sales),
-    loadSheet(gids.subs),
-    loadSheet(gids.mrr),
-    loadSheet(gids.coupon),
-    loadSheet(gids.dataCheck),
-    loadSheet(gids.factMonthly, true),
-    loadSheet(gids.overallMonthly, true),
-    ...storeNames.map(name => loadSheet(gids.stores[name]))
-  ]);
+  const snapshotIndex = process.argv.indexOf('--snapshot');
+  const snapshot = snapshotIndex >= 0
+    ? JSON.parse(fs.readFileSync(process.argv[snapshotIndex+1], 'utf8'))
+    : await fetchSnapshot();
+  api.setSourceSnapshot(snapshot);
+  const sheets = snapshot.sheets;
+  const entries = ['summary','ops','sales','subs','mrr','coupon','dataCheck','factMonthly','overallMonthly',...storeNames]
+    .map(key => sheets[key] || []);
   const [summaryRows, opsRows, salesRows, subsRows, mrrRows, couponRows, dataCheckRows, factRows, overallMonthlyRows, ...storeRows] = entries;
 
   const factByStore = api.parseFactMonthly(factRows);
@@ -230,8 +230,9 @@ async function main() {
     const retained = rawNumber(row, '유지_2026');
     const elapsedDays = rawNumber(row, '경과일수_2026');
     const sourceMonthDays = rawNumber(row, '월일수_2026');
-    const exposureFactor = month === maxFactMonth && sourceMonthDays > 0
-      ? Math.max(0, Math.min(1, elapsedDays / sourceMonthDays))
+    const subscriptionDate = api.sourceDateKey(row[index['최신구독일_2026']]);
+    const exposureFactor = month === kstDateParts().month && sourceMonthDays > 0
+      ? Math.max(0, Math.min(1, Number(subscriptionDate?.slice(8) || 0) / sourceMonthDays))
       : 1;
     const retainedExposure = retained * exposureFactor;
     const newSubs = rawNumber(row, '신규_2026');
@@ -302,6 +303,9 @@ async function main() {
 
   const discrepancies = [];
   const missingnessIssues = [];
+  const missingUsageMonths = new Set((sheets.usageQuality || []).slice(1)
+    .filter(row => row[8] !== 'OK' && row[8] !== 'PREOPEN' && row[8] !== 'FUTURE')
+    .map(row => Number(row[1])));
   overall.forEach(month => {
     const rows = rawByMonth.get(month.monthNum) || [];
     const sum = key => rows.reduce((total, row) => total + rawNumber(row, key), 0);
@@ -309,7 +313,7 @@ async function main() {
     const checks = {
       gross: sum('총매출_2026'),
       net: sum('순매출_2026'),
-      usage: sum('총사용_2026'),
+      usage: missingUsageMonths.has(month.monthNum) ? null : sum('총사용_2026'),
       retained: canonical?.retained || 0,
       newSubs: canonical?.newSubs || 0,
       cancelSubs: canonical?.cancelSubs || 0,
@@ -319,9 +323,14 @@ async function main() {
       mtdCapacity: sum('MTD_Capacity_2026')
     };
     Object.entries(checks).forEach(([key, expected]) => {
-      const actual = Number(month[key] || 0);
-      if (!closeEnough(actual, expected)) discrepancies.push({ month: month.month, key, actual, expected });
+      const actual = month[key];
+      if (!metricClose(actual, expected)) discrepancies.push({ month: month.month, key, actual, expected });
     });
+    if (missingUsageMonths.has(month.monthNum)) {
+      for (const key of ['usage', 'utilization', 'contributionRevenue', 'allPassAttributedRevenue']) {
+        if (month[key] !== null) missingnessIssues.push({month:month.month, key, issue:'incomplete source must remain null'});
+      }
+    }
     const subscriptionFields = ['retained','newSubs','cancelSubs','netAdds','churn','mrr','arpu','arr','ltv'];
     if (canonical?.hasSubscriptionData === false) {
       if (month.hasSubscriptionData !== false) {
@@ -343,6 +352,7 @@ async function main() {
     ['arpu', false]
   ];
   parsedStores.forEach(store => {
+    if (!sheets[store.name]) return;
     const canonicalMonths = factByStore.get(store.name) || [];
     canonicalMonths.forEach(expected => {
       const actual = store.months.find(month => month.monthNum === expected.monthNum);
@@ -398,7 +408,7 @@ async function main() {
     const reconciliation = {
       gross: Number(portfolio.gross || 0) - storeSum('gross'),
       net: Number(portfolio.net || 0) - storeSum('net'),
-      usage: Number(portfolio.usage || 0) - storeSum('usage')
+      observedUsage: Number(portfolio.observedUsage || 0) - storeSum('observedUsage')
     };
     Object.entries(reconciliation).forEach(([key, difference]) => {
       if (!closeEnough(difference, 0)) discrepancies.push({ period, key, difference });
@@ -412,13 +422,13 @@ async function main() {
       grossAchievement: portfolio.grossAchievement || 0,
       sameStoreNetYoY: portfolio.netYoY || 0,
       totalNetGrowth: portfolio.totalNetGrowth || 0,
-      utilization: portfolio.utilization || 0,
+      utilization: portfolio.utilization ?? null,
       churn: portfolio.churn || 0,
       mrr: portfolio.mrr || 0,
       retained: portfolio.retained || 0,
       allPassRetained: portfolio.allPassRetained || 0,
       mrrSubscribers: portfolio.mrrSubscribers || 0,
-      arpu: portfolio.arpu || 0
+      arpu: portfolio.arpu ?? null
     };
   }
 
@@ -431,7 +441,9 @@ async function main() {
     ['totalGross', cumulativePortfolio.gross, false],
     ['totalNet', cumulativePortfolio.net, false],
     ['achievement', cumulativePortfolio.achievement, true],
-    ['grossAchievement', cumulativePortfolio.grossAchievement, true],
+      ['grossAchievement', cumulativePortfolio.grossAchievement, true],
+      ['contributionRevenue', rawRows.reduce((sum,row)=>sum+rawNumber(row,'운영기여매출_2026'),0), false],
+      ['allPassAttributedRevenue', rawRows.reduce((sum,row)=>sum+rawNumber(row,'올패스운영귀속매출_2026'),0), false],
     ['refundRate', cumulativePortfolio.refundRate, true],
     ['sameStoreNetYoY', cumulativePortfolio.netYoY, true],
     ['totalNetGrowth', cumulativePortfolio.totalNetGrowth, true]
@@ -445,9 +457,15 @@ async function main() {
   }
   requiredSummaryChecks.forEach(([summaryField, expected, percentage]) => {
     const actual = summaryKpis[summaryField];
+    const labels = {totalTarget:'목표',totalGross:'실결제매출',totalNet:'순매출',
+      contributionRevenue:'누적 운영기여매출',allPassAttributedRevenue:'누적 올패스 운영귀속매출'};
+    const amountCell = labels[summaryField] && summaryRows.find(row =>
+      String(row[0]).includes(labels[summaryField]) && /억원$/.test(String(row[1])))?.[1];
+    const decimals = amountCell ? (String(amountCell).match(/\.(\d+)/)?.[1].length || 0) : null;
+    const roundingTolerance = decimals === null ? 0 : 0.5 * 1e8 / 10 ** decimals;
     if (actual === null || actual === undefined) {
       summaryDiscrepancies.push({ field:summaryField, issue:'missing required Summary value', expected });
-    } else if (!metricClose(actual, expected, percentage)) {
+    } else if (!metricClose(actual, expected, percentage) && Math.abs(actual-expected) > roundingTolerance) {
       summaryDiscrepancies.push({ field:summaryField, actual, expected });
     }
   });
@@ -497,12 +515,13 @@ async function main() {
   const capacityRows = api.buildCapacityData({ isAll: true, months: overall });
   const mtdCapacity = capacityRows.reduce((total, row) => total + Number(row.mtdDesignCap || 0), 0);
   const mtdUsage = capacityRows.reduce((total, row) => total + Number(row.mtdUsage || 0), 0);
+  const capacityComplete = capacityRows.every(row=>row.hasUsageData !== false);
   dashboard.audit = [...api.runAudit(overall, opsStores), ...api.runDataQualityAudit(dataQuality)];
 
   const legacyAggregateEmpty = legacyOverall.every(month =>
     !month.gross && !month.net && !month.usage && !month.mrr
   );
-  const legacyAggregateMismatchMonths = legacyOverall.reduce((count, legacy, index) => {
+  const legacyAggregateMismatchMonths = !sheets.sales ? 0 : legacyOverall.reduce((count, legacy, index) => {
     const derived = overall[index] || {};
     const differs = [
       ['gross', 1], ['net', 1], ['usage', 1], ['churn', 0.05], ['arpu', 1]
@@ -514,6 +533,9 @@ async function main() {
   }, 0);
   const result = {
     checkedAt: new Date().toISOString(),
+    inputMode:snapshotIndex >= 0 ? 'captured-sheet-snapshot' : 'authenticated-live-api',
+    capturedAt:snapshot.capturedAt || snapshot.fetchedAt,
+    storeDetailTabsChecked:storeNames.filter(name => sheets[name]),
     factStoreCount: factByStore.size,
     legacyAggregateEmpty,
     legacyAggregateMismatchMonths,
@@ -538,16 +560,16 @@ async function main() {
     discrepancies,
     periods,
     currentCapacity: {
-      capacity: mtdCapacity,
-      usage: mtdUsage,
-      utilization: mtdCapacity > 0 ? mtdUsage / mtdCapacity * 100 : 0
+      capacity: capacityComplete ? mtdCapacity : null,
+      usage: capacityComplete ? mtdUsage : null,
+      utilization: capacityComplete && mtdCapacity > 0 ? mtdUsage / mtdCapacity * 100 : null
     },
     currentKpis: {
       month: latestPortfolioMonth.month || null,
       gross: latestPortfolioMonth.gross || 0,
       net: latestPortfolioMonth.net || 0,
       achievement: latestPortfolioMonth.achievement || 0,
-      utilization: latestPortfolioMonth.utilization || 0,
+      utilization: latestPortfolioMonth.utilization ?? null,
       subscriptionAvailable: latestPortfolioMonth.hasSubscriptionData !== false,
       subscriptionSnapshotMonth: cumulativePortfolio.subscriptionSnapshotMonth || null,
       churn: latestPortfolioMonth.churn,
@@ -574,7 +596,8 @@ async function main() {
   }
 }
 
-main().catch(error => {
+module.exports = { createDashboardApi };
+if (require.main === module) main().catch(error => {
   console.error(error.stack || error.message);
   process.exitCode = 1;
 });

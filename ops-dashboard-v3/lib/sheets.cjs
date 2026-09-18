@@ -2,13 +2,17 @@ const { createSign, createHash } = require('node:crypto');
 
 const SHEET_ID = '1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo';
 const SOURCES = {
-  summary: { gid:446178451, range:"'Summary'!A1:B40" },
+  summary: { gid:446178451, range:"'Summary'!A1:B60" },
   dataCheck: { gid:830227479, range:"'데이터 점검'!A1:F100" },
   coupon: { gid:2006396236, range:"'쿠폰 분석'!A1:AB140" },
   factMonthly: { gid:464978532, range:"'fact_monthly'!A1:CW100" },
   overallMonthly: { gid:863402866, range:"'_overall_monthly'!A1:CZ14" },
   ops: { gid:638953343, range:"'운영 인사이트'!A1:Z90" },
-  cfg: { gid:1506888111, range:"'_cfg'!A1:B60" }
+  usageQuality: { range:"'_ops_quality_usage_2026'!A1:R85" },
+  usageQualityPrev: { range:"'_ops_quality_usage_2025'!A1:R85" },
+  salesQuality: { range:"'_ops_quality_sales_2026'!A1:R85" },
+  salesQualityPrev: { range:"'_ops_quality_sales_2025'!A1:R85" },
+  cfg: { gid:1506888111, range:"'_cfg'!A1:B90" }
 };
 
 class SourceError extends Error {
@@ -75,7 +79,14 @@ async function readRanges(ranges, env, fetchImpl) {
   ranges.forEach(range=>url.searchParams.append('ranges',range));
   url.searchParams.set('valueRenderOption','UNFORMATTED_VALUE');
   url.searchParams.set('dateTimeRenderOption','FORMATTED_STRING');
-  const response=await fetchImpl(url,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(14000)});
+  let response;
+  try {
+    response=await fetchImpl(url,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(45000)});
+  } catch (error) {
+    if (['TimeoutError','AbortError'].includes(error.name))
+      throw new SourceError('SOURCE_TIMEOUT','Google 시트 응답이 지연되어 조회를 완료하지 못했습니다. 잠시 후 다시 시도하세요.');
+    throw error;
+  }
   if (!response.ok) throw new SourceError('SOURCE_READ_FAILED',
     response.status===403 ? 'Google 시트 읽기 권한 또는 Sheets API 사용 설정을 확인해야 합니다.' : 'Google 시트 조회에 실패했습니다. 잠시 후 다시 시도하세요.');
   const payload=await response.json();
@@ -100,8 +111,17 @@ async function fetchSnapshot({env=process.env,fetchImpl=fetch}={}) {
   if (captured.status!==before.status || captured.runId!==before.runId)
     throw new SourceError('SOURCE_CHANGED','조회 중 원천 실행본이 변경되어 갱신을 보류했습니다.');
   const cfg=Object.fromEntries(sheets.cfg || []);
+  if (cfg.dashboard_audit_run_id !== before.runId || String(cfg.dashboard_audit_blocking ?? '').trim() === '' ||
+      !Number.isFinite(Number(cfg.dashboard_audit_blocking)))
+    throw new SourceError('SOURCE_AUDIT_PENDING','현재 원천 실행본의 최종 점검이 완료되지 않아 갱신을 보류합니다.');
   if (Number(cfg.dashboard_audit_blocking)>0)
     throw new SourceError('SOURCE_AUDIT_FAILED','원천 시트의 차단 오류가 남아 있어 갱신을 보류합니다.');
+  for (const key of ['usageQuality','usageQualityPrev','salesQuality','salesQualityPrev']) {
+    const rows = sheets[key];
+    const runColumn = rows?.[0]?.indexOf('실행본');
+    if (runColumn < 0 || rows?.[1]?.[runColumn] !== before.runId || !rows?.[0]?.includes('품질상태'))
+      throw new SourceError('SOURCE_QUALITY_PENDING','일별 원천 품질표가 현재 실행본과 일치하지 않아 갱신을 보류합니다.');
+  }
   if (!sheets.factMonthly?.[0]?.includes('월번호') || !sheets.overallMonthly?.[0]?.includes('월번호'))
     throw new SourceError('SOURCE_SCHEMA_CHANGED','공식 월별 원천의 필수 열을 찾지 못했습니다.');
   return {schemaVersion:1,sheetId:SHEET_ID,fetchedAt:new Date().toISOString(),build:after,sheets};

@@ -178,7 +178,7 @@ const fmtW   = v => `${Math.round(+v||0).toLocaleString("ko-KR")}원`;
 const fmtS   = v => { const n=+v||0,a=Math.abs(n); if(a>=1e8) return `${(n/1e8).toFixed(1)}억`; if(a>=1e4){const m=n/1e4; return `${Number.isInteger(m)?m:m.toFixed(1)}만원`;} return `${Math.round(n).toLocaleString()}원`; };
 const fmtA   = v => { const n=+v||0,a=Math.abs(n); return a>=1e8?`${(n/1e8).toFixed(1)}억`:a>=1e4?`${Math.round(n/1e4)}만`:String(Math.round(n)); };
 const fmtN   = v => `${Math.round(+v||0).toLocaleString("ko-KR")}`;
-const fmtP   = v => `${(+v||0).toFixed(1)}%`;
+const fmtP   = v => v == null || !Number.isFinite(+v) ? '—' : `${(+v).toFixed(1)}%`;
 const fmtP1  = v => `${(+v||0).toFixed(1)}%`;
 const fmtYoY = (v, available=true) => available ? `${(+v||0)>0?'+':''}${fmtP(v||0)}` : '비교 없음';
 function subscriptionMonthsFor(months) {
@@ -190,7 +190,13 @@ function subscriptionBasisLabel(summary) {
   return `${summary.subscriptionSourceDate || monthLabel} 구독 수신 기준${summary.subscriptionLagged ? ' / 매출 기준일과 다름' : ''}`;
 }
 const tx     = v => String(v??'').replace(/\s+/g,' ').trim();
-const num    = v => typeof v==='number'?v:+(String(v??'').replace(/[^\d.-]/g,''))||0;
+const num = v => {
+  if (typeof v === 'number') return v;
+  const text = String(v ?? '').trim();
+  const value = +(text.replace(/[^\d.-]/g,'')) || 0;
+  const unit = /억원?$/.test(text) ? 1e8 : /백만원$/.test(text) ? 1e6 : /만원$/.test(text) ? 1e4 : 1;
+  return value * unit;
+};
 // ★ pct() 핵심 로직:
 //  gviz는 % 서식 셀을 소수로 반환  → 0.16 (16%), 1.182 (118.2%)
 //  일반 숫자 셀로 저장된 % 값은 원본 그대로 반환 → 16, 99.8, 118.2
@@ -233,7 +239,7 @@ let sourceSnapshot = null;
 let sourceRefreshFailed = false;
 
 async function fetchDashboardSnapshot() {
-  const response = await fetch('/api/data', { cache:'no-store', credentials:'same-origin', signal:AbortSignal.timeout(60000) });
+  const response = await fetch('/api/data', { cache:'no-store', credentials:'same-origin', signal:AbortSignal.timeout(170000) });
   const payload = await response.json().catch(() => null);
   if (!response.ok || !payload?.sheets) {
     if (response.status === 401) throw new Error('인증이 만료됐습니다. 페이지를 새로 열어 로그인하세요.');
@@ -474,7 +480,7 @@ function applyPortfolioCouponDiscounts(months, couponRows) {
     const mappedDiscount = canMapToPreCouponEstimate ? couponDiscount : 0;
     const listPriceRevenue = m.gross + mappedDiscount;
     m.discountAmount = mappedDiscount;
-    m.discountShare = listPriceRevenue > 0 ? mappedDiscount / listPriceRevenue * 100 : 0;
+    m.discountShare = m.gross > 0 ? mappedDiscount / m.gross * 100 : 0;
     m.hasDiscountData = canMapToPreCouponEstimate;
     m.couponSheetPresent = hasCouponRow;
     m.hasCouponSourceData = hasCouponValue;
@@ -518,12 +524,12 @@ function parseOps(rows) {
     const target       = num(rows[i][1]);
     const gross        = num(rows[i][2]);
     const net          = num(rows[i][4]);
-    const usageVal     = num(rows[i][5]);
+    const usageVal     = tx(rows[i][5]) === '' ? null : num(rows[i][5]);
     const retained     = num(rows[i][6]);
     const refundRate   = pct(rows[i][9]);   // 소수 → %, pct() 자동 처리
     const churn        = pct(rows[i][10]);  // 소수 → %, pct() 자동 처리
     // [통일] 가동률 단일 소스: ops시트 col13 — 매장 레벨 가동률의 권위 값
-    const utilizationVal = pct(rows[i][13]);// 소수 → %, pct() 자동 처리
+    const utilizationVal = tx(rows[i][13]) === '' ? null : pct(rows[i][13]);
 
     // 파생 계산
     const discountAmount = 0;
@@ -619,6 +625,48 @@ function sourceMonthDate(monthNum, latest) {
     : `${TODAY_YEAR}-${String(monthNum).padStart(2,'0')}-${daysInMonth(monthNum)}`;
 }
 
+function sourceQuality(key, storeName, monthNum) {
+  const rows = sourceSnapshot?.sheets?.[key];
+  if (!rows) return { complete:true, observed:null, status:'LEGACY' };
+  const headers = rows[0] || [];
+  const get = (row, name) => row[headers.indexOf(name)];
+  const row = rows.slice(1).find(row => get(row,'매장') === storeName && Number(get(row,'월')) === monthNum);
+  const status = row ? get(row,'품질상태') : 'MISSING';
+  const clean = row && ['중복행','잘못된 값','매출 분해 불일치'].every(key => Number(get(row,key)) === 0);
+  return { complete:status === 'OK' || status === 'PREOPEN', status,
+    expected:row ? num(get(row,'기대일')) : 0, received:row ? num(get(row,'수신일')) : 0,
+    observed:clean && num(get(row,'수신일')) > 0 ? num(get(row,'관측 이용량')) : null };
+}
+
+function applySourceQuality(item, storeName) {
+  const usage = sourceQuality('usageQuality',storeName,item.monthNum);
+  const sales = sourceQuality('salesQuality',storeName,item.monthNum);
+  const priorSales = sourceQuality('salesQualityPrev',storeName,item.monthNum);
+  const priorUsage = sourceQuality('usageQualityPrev',storeName,item.monthNum);
+  const stores = Object.values(GID.stores).map(s=>s.name);
+  const sharedComplete = stores.every(name => sourceQuality('usageQuality',name,item.monthNum).complete &&
+    sourceQuality('salesQuality',name,item.monthNum).complete);
+  item.hasUsageData = usage.complete;
+  item.hasSalesData = sales.complete;
+  item.usageQuality = usage;
+  item.observedUsage = usage.status === 'LEGACY' ? item.usage : usage.observed;
+  item.usageComparable = usage.complete && priorUsage.complete;
+  item.salesComparable = item.salesComparable !== false && sales.complete && priorSales.complete;
+  item.hasGrossYoY = item.hasGrossYoY && item.salesComparable;
+  item.hasNetYoY = item.hasNetYoY && item.salesComparable;
+  item.hasArpwData = item.hasArpwData && usage.complete && sales.complete;
+  item.hasArpuData = item.hasArpuData && sales.complete;
+  if (!usage.complete) {
+    for (const key of ['usage','utilization','utilizationRaw','seasonIdx','seasonIdxConfirmed','seasonIdxMtd',
+      'seasonIdxProjected','idleMtd','projectedUsage','projectedIdle','lossUnitPrice','lossMtd','lossProjected']) item[key] = null;
+  }
+  if (!sales.complete) {
+    for (const key of ['gross','net','refundAmount','achievement','grossAchievement','refundRate','arpu']) item[key] = null;
+  }
+  if (!sharedComplete) { item.contributionRevenue = null; item.allPassAttributedRevenue = null; }
+  return item;
+}
+
 function dateContract(row, headerIndex, monthNum) {
   const read = key => sourceDateKey(factRawValue(row,headerIndex,[key]));
   const cfg = new Map(sourceSnapshot?.sheets?.cfg || []);
@@ -649,6 +697,7 @@ function parseFactMonthly(rows) {
     const storeName = tx(row[headerIndex.get('매장')]);
     const monthNum = factValue(row, headerIndex, ['월번호']);
     if (!knownStoreNames.has(storeName) || monthNum < 1 || monthNum > TODAY_MONTH) return;
+    if (storeActiveDaysInMonth(storeName, monthNum) === 0) return;
 
     const quarter = tx(row[headerIndex.get('분기')]) || quarterForMonth(monthNum);
     const month = tx(row[headerIndex.get('월라벨')]) || `${monthNum}월`;
@@ -761,7 +810,7 @@ function parseFactMonthly(rows) {
     };
 
     if (!byStore.has(storeName)) byStore.set(storeName, []);
-    byStore.get(storeName).push(item);
+    byStore.get(storeName).push(applySourceQuality(item, storeName));
   });
 
   byStore.forEach(months => months.sort((a, b) => a.monthNum - b.monthNum));
@@ -842,7 +891,9 @@ function applyPortfolioFinancials(months, overallRows, legacyMonths = []) {
         .some(value => value !== null && value !== undefined && Number(value) !== 0);
 
     if (canonical) {
-      ['salesSourceDate','usageSourceDate','subscriptionSourceDate','hasArpuData','hasArpwData','subscriptionComparable'].forEach(key => { m[key] = canonical[key]; });
+      ['salesSourceDate','usageSourceDate','subscriptionSourceDate','subscriptionComparable'].forEach(key => { m[key] = canonical[key]; });
+      m.hasArpuData = m.hasArpuData !== false && canonical.hasArpuData;
+      m.hasArpwData = m.hasArpwData !== false && canonical.hasArpwData;
       m.retained = canonical.retained;
       m.retainedPrev = canonical.retainedPrev;
       m.retainedExposure = canonical.retainedExposure;
@@ -956,9 +1007,13 @@ function aggregatePortfolioMonths(stores) {
       grossAchievement: target > 0 ? gross / target * 100 : 0,
       refundAmount,
       refundRate: gross > 0 ? refundAmount / gross * 100 : 0,
-      usage,
-      utilization: mtdCapacity > 0 ? usage / mtdCapacity * 100 : 0,
-      utilizationRaw: mtdCapacity > 0 ? usage / mtdCapacity * 100 : 0,
+      hasUsageData:records.every(row=>row.hasUsageData!==false),
+      hasSalesData:records.every(row=>row.hasSalesData!==false),
+      usageComparable:records.every(row=>row.usageComparable!==false),
+      observedUsage:records.every(row=>row.observedUsage!=null || row.capacity===0) ? sum('observedUsage') : null,
+      usage:records.every(row=>row.hasUsageData!==false) ? usage : null,
+      utilization: records.every(row=>row.hasUsageData!==false) && mtdCapacity > 0 ? usage / mtdCapacity * 100 : null,
+      utilizationRaw: records.every(row=>row.hasUsageData!==false) && mtdCapacity > 0 ? usage / mtdCapacity * 100 : null,
       capacity, mtdCapacity,
       hasSubscriptionData,
       subscriptionSourceDate: records.map(row => row.subscriptionSourceDate).filter(Boolean).sort().at(-1) || null,
@@ -1035,8 +1090,12 @@ function aggMonths(months) {
   const hasArpuData = months.every(m => m.hasArpuData !== false) && hasSubscriptionData;
   const hasArpwData = months.every(m => m.hasArpwData !== false);
   const salesComparable = months.every(m => m.salesComparable !== false);
+  const hasUsageData = months.every(m => m.hasUsageData !== false);
+  const hasSalesData = months.every(m => m.hasSalesData !== false);
   return {
-    hasArpuData, hasArpwData, salesComparable,
+    hasArpuData, hasArpwData, salesComparable, hasUsageData, hasSalesData,
+    usageComparable:months.every(m=>m.usageComparable!==false),
+    observedUsage:months.every(m=>m.observedUsage!=null) ? months.reduce((s,m)=>s+m.observedUsage,0) : null,
     salesSourceDate:last.salesSourceDate || null,
     usageSourceDate:last.usageSourceDate || null,
     contributionRevenue:months.every(m=>m.contributionRevenue!=null) ? months.reduce((s,m)=>s+m.contributionRevenue,0) : null,
@@ -1051,7 +1110,7 @@ function aggMonths(months) {
     hasNetYoY:salesComparable && t.comparableNetPrev>0,
     achievement: t.target?t.net/t.target*100:0,
     grossAchievement: t.target?t.gross/t.target*100:0,
-    usage:t.usage,
+    usage:hasUsageData ? t.usage : null,
     hasSubscriptionData,
     subscriptionMonthCount:t.subscriptionMonths,
     subscriptionSnapshotMonth:lastSubscription?.month || null,
@@ -1074,12 +1133,12 @@ function aggMonths(months) {
       ? (lastSubscription.mrr-lastSubscription.mrrPrev)/lastSubscription.mrrPrev*100
       : null,
     churn:hasSubscriptionData && t.retainedExposure ? t.cancelSubs/t.retainedExposure*100 : null,
-    utilization: t.cap?t.usage/t.cap*100:0,
+    utilization: hasUsageData && t.cap ? t.usage/t.cap*100 : null,
     refundRate:  t.gross?t.refundVal/t.gross*100:0,
     refundAmount:t.refundVal,
     discountAmount:t.discountAmount,
     listPriceRevenue:t.gross+t.discountAmount,
-    discountShare: (t.gross+t.discountAmount)?t.discountAmount/(t.gross+t.discountAmount)*100:0,
+    discountShare: t.gross ? t.discountAmount/t.gross*100 : 0,
     hasDiscountData:t.hasDiscountData,
     discountScope:t.portfolioCouponData?'portfolio_coupon':null,
     couponSheetMonths:t.couponSheetMonths,
@@ -1131,13 +1190,13 @@ function runAudit(months, opsStores) {
     // 극단적 이상치
     if (m.utilization > 130)
       opIssues.push(`${m.month}: 가동률 ${fmtP(m.utilization)} — Capacity 원천 데이터 확인 필요`);
-    // ★ v3: 쿠폰할인율 ≈ 환불율 동일값 감지 — 컬럼 혼용 가능성
+    // ★ v3: 지정 쿠폰 비중 ≈ 환불율 동일값 감지 — 컬럼 혼용 가능성
     if (m.hasDiscountData && m.discountShare > 0 && m.refundRate > 0) {
       const diff = Math.abs(m.discountShare - m.refundRate);
-      if (diff < 0.01) opIssues.push(`${m.month}: 쿠폰할인율·환불율 동일값(${fmtP(m.refundRate)}) — 컬럼 매핑 확인 필요`);
+      if (diff < 0.01) opIssues.push(`${m.month}: 지정 쿠폰 비중·환불율 동일값(${fmtP(m.refundRate)}) — 컬럼 매핑 확인 필요`);
     }
     if ((m.unmappedCouponDiscount||0) > 0)
-      fmtIssues.push(`${m.month}: 쿠폰할인 ${fmtS(m.unmappedCouponDiscount)} 있으나 실결제매출 0원 — 쿠폰 적용 전 추정액 대비 할인율 산출 제외`);
+      fmtIssues.push(`${m.month}: 쿠폰할인 ${fmtS(m.unmappedCouponDiscount)} 있으나 실결제매출 0원 — 실결제매출 대비 지정 쿠폰 할인액 비율 산출 제외`);
   });
 
   const emptyCouponAggregateMonths = months.filter(m =>
@@ -1201,7 +1260,7 @@ function runAudit(months, opsStores) {
 
   // ★ v3: 정합성 카드 "정상" 판정 기준 강화
   //   아래 조건 중 하나라도 해당하면 "정상" 아님:
-  //   ① 가동률 >100% ② 쿠폰할인율=환불율 동일값 ③ 매출 불일치 ④ 매장 수 불일치 ⑤ 오픈 전 실데이터
+  //   ① 가동률 >100% ② 지정 쿠폰 비중=환불율 동일값 ③ 매출 불일치 ④ 매장 수 불일치 ⑤ 오픈 전 실데이터
 
   // 운영 리스크 먼저, 시트 형식 확인 사항은 별도 prefix로 뒤에 추가
   return [
@@ -1674,7 +1733,7 @@ function renderGauges(ent) {
   // ★ 실제 값 보존: 게이지 호(arc) 각도는 100% 기준으로 클램프하되,
   //   표시 숫자는 실제 값(>100% 가능)을 그대로 보여줌
   const achRaw  = c.achievement||0;
-  const utilRaw = c.utilization||0;
+  const utilRaw = c.hasUsageData === false ? 0 : usageValue(c);
   const ach  = Math.min(100, achRaw);
   const util = Math.min(100, utilRaw);
   const churnH = hasSubscriptionData ? Math.max(0, 100 - ((c.churn||0)/12)*100) : 50;
@@ -1727,7 +1786,10 @@ function renderGauges(ent) {
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
     ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubNet}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, utilLabel, `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}대${periodLabel}`);
+    util, c.hasUsageData === false ? '—' : utilLabel, c.hasUsageData === false
+      ? '사용 원천 일부 누락: 가동률 산출 보류'
+      : `총사용 ${fmtN(c.usage||0)}회 / 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}회${periodLabel}`);
+  if (c.hasUsageData === false) $('gsvg-util').innerHTML = '';
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, hasSubscriptionData ? fmtP(c.churn||0) : '—', !hasSubscriptionData
       ? `${subscriptionBasisLabel(c)}${periodLabel}`
@@ -1771,7 +1833,7 @@ function arpuBasisLabel(c) {
 
 const KPI_TOOLTIPS = {
   '실결제매출':  { formula:'환불 차감 전 실결제 기준 매출. 목표 달성 판단은 순매출 달성률을 우선 적용', benchmark:'실결제매출 달성률은 보조 지표' },
-  '순매출':  { formula:'순매출 = 실결제매출 − 환불 · 쿠폰 적용 전 추정 결제액 = 실결제매출 + 쿠폰할인', benchmark:'정상가 GMV는 원천 미보유 · 환불율 < 5%' },
+  '순매출':  { formula:'순매출 = 실결제매출 − 환불', benchmark:'정상가 GMV는 원천 미보유, 환불율 < 5%' },
   'MRR':    { formula:'활성 구독 기반 반복매출 런레이트. 전체는 단일 PASS+ALL PASS, 매장별은 단일 PASS 기준', benchmark:'YoY +10% 이상 = 성장 안정' },
   '가동률':  { formula:'총사용 ÷ 원천 MTD Capacity\n마감월은 월 Capacity, 미마감월은 유효 경과일 기준 MTD Capacity 사용', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
   '이탈률':  { formula:'해지 건수 ÷ 구독자-월 노출량 × 100. 진행월은 경과일/월일수로 월환산', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
@@ -1798,7 +1860,7 @@ function renderKpis(ent) {
   const grossTrend = ms.map(m=>m.gross);
   const netTrend   = ms.map(m=>m.net);
   const mrrTrend   = ms.map(m=>m.hasSubscriptionData === false ? null : m.mrr);
-  const utilTrend  = ms.map(m=>m.utilization||0);
+  const utilTrend  = ms.map(m=>m.utilization);
   const churnTrend = ms.map(m=>m.hasSubscriptionData === false ? null : m.churn);
   const addsTrend  = ms.map(m=>m.hasSubscriptionData === false ? null : m.netAdds);
 
@@ -1822,7 +1884,7 @@ function renderKpis(ent) {
       prog:c.grossAchievement, color:'accent', spark:grossTrend, sparkColor:'#8f4219',
       projection: projGross ? `${lastM.month} 월말 예상 ${fmtS(projGross)}` : null },
     { label:'순매출',  val:fmtS(c.net),
-      delta:c.hasNetYoY ? c.netYoY : null,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}${ent.isAll && c.hasTotalNetGrowth ? ` · 안성 포함 전체 성장 ${c.totalNetGrowth>=0?'+':''}${fmtP(c.totalNetGrowth)}` : ''}`,
+      delta:c.hasNetYoY ? c.netYoY : null,     sub:`${c.hasDiscountData ? `쿠폰할인 ${fmtS(c.discountAmount||0)} · 실결제매출 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)} · 환불 ${fmtP(c.refundRate||0)}${ent.isAll && c.hasTotalNetGrowth ? ` · 안성 포함 전체 성장 ${c.totalNetGrowth>=0?'+':''}${fmtP(c.totalNetGrowth)}` : ''}`,
       deltaContext:ent.isAll ? '동일점 YoY' : 'YoY',
       color:'navy',  spark:netTrend, sparkColor:'#24344f' },
     { label:'MRR',    val:hasSubscriptionData ? fmtS(c.mrr||0) : '—',
@@ -1834,12 +1896,12 @@ function renderKpis(ent) {
           : `MRR YoY 비교 없음 · 전년 동기 운영 이력 없음${(c.arpu||0)>0?' · 매장PASS ARPU '+fmtS(c.arpu):''} · ${subscriptionBasisLabel(c)}`,
       deltaContext:'YoY',
       color:'green', spark:mrrTrend, sparkColor:'#216552' },
-    { label:'가동률',  val:fmtP(c.utilization||0),
+    { label:'가동률',  val:fmtP(usageValue(c)),
       delta:null, deltaSuffix:'%p',
-      sub:`${ms.length > 1 ? '기간 ' : ''}총사용 ${fmtN(c.usage||0)}대`,
-      color:'amber', spark:utilTrend, sparkColor:'#c07b48',
-      projection: (c.achievement||0)>0 && (c.achievement||0)<100
-        ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(c.utilization||0) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
+      sub:c.hasUsageData === false ? '원천 일부 누락으로 산출 보류' : `${ms.length > 1 ? '기간 ' : ''}총사용 ${fmtN(c.usage||0)}대`,
+      color:'amber', spark:c.hasUsageData === false ? null : utilTrend, sparkColor:'#c07b48',
+      projection: c.hasUsageData !== false && (c.achievement||0)>0 && (c.achievement||0)<100
+        ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(usageValue(c)) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
     { label:'이탈률',  val:hasSubscriptionData ? fmtP(c.churn||0) : '—',
       delta:null, deltaSuffix:'%p', invert:true,
       sub:!hasSubscriptionData ? subscriptionBasisLabel(c) : ms.length > 1
@@ -1904,7 +1966,7 @@ function renderSignals(ent) {
   else                 signals.push({type:'bad',  title:'이탈 위험', text:`이탈률 ${fmtP(churn)} — 즉각 대응`});
 
   // FIX 4 — 가동률 시그널 (100% 초과 과부하 케이스 추가)
-  const util = c.utilization||0;
+  const util = usageValue(c);
   if (util > 100) {
     signals.push({type:'warn', title:'과부하 주의', text:`운영 가동률 ${fmtP(util)} — Capacity 초과, 설비 점검 및 Capacity 재검토 필요`});
   } else if (util >= 85) {
@@ -2003,7 +2065,7 @@ function renderInsights(ent) {
       <span>${fmtP(c.achievement||0)} 달성 · ${gapText}<br>실결제매출 ${fmtS(c.gross||0)}</span>
     </div>
     <div class="summary-metric-grid">
-      <div class="summary-metric"><span>가동률</span><strong>${fmtP(c.utilization||0)}</strong></div>
+      <div class="summary-metric"><span>가동률</span><strong>${fmtP(usageValue(c))}</strong></div>
       <div class="summary-metric"><span>이탈률</span><strong>${c.hasSubscriptionData ? fmtP(c.churn||0) : '—'}</strong></div>
       <div class="summary-metric"><span>MRR</span><strong>${c.hasSubscriptionData ? fmtS(c.mrr||0) : '—'}</strong><small>${mrrDir}</small></div>
     </div>
@@ -2036,19 +2098,19 @@ function renderInsights(ent) {
       owner:`마케팅팀`,
       action:`월말 집중 프로모션 · 신규 채널 테스트`});
   // FIX 4 — over-capacity risk
-  if ((c.utilization||0) > 100) {
-    risks.push({lv:'warning', text:`운영 가동률 ${fmtP(c.utilization||0)} — 원천 Capacity 초과`,
+  if ((usageValue(c)) > 100) {
+    risks.push({lv:'warning', text:`운영 가동률 ${fmtP(usageValue(c))} — 원천 Capacity 초과`,
       impact:`설비 과부하 · 서비스 품질 저하 위험`,
       owner:`사업운영팀 · 건축관리팀`,
       action:'Capacity 설정값 재검토 · 설비 점검 우선'});
   }
-  if ((c.utilization||0) < 45)
-    risks.push({lv:'critical', text:`운영 가동률 저조 (${fmtP(c.utilization||0)})`,
+  if ((usageValue(c)) < 45)
+    risks.push({lv:'critical', text:`운영 가동률 저조 (${fmtP(usageValue(c))})`,
       impact:`유휴 Capacity 기회금액 상한 증가 · 설비 유휴화`,
       owner:`사업운영팀 · 건축관리팀`,
       action:`미가동 시간대 특가 프로모션 · 기업 제휴 세차 패키지 검토`});
-  else if ((c.utilization||0) < 60)
-    risks.push({lv:'warning', text:`운영 가동률 주의 (${fmtP(c.utilization||0)})`,
+  else if ((usageValue(c)) < 60)
+    risks.push({lv:'warning', text:`운영 가동률 주의 (${fmtP(usageValue(c))})`,
       impact:`Capacity 대비 세차 대수 부족`,
       owner:`사업운영팀 · 건축관리팀`,
       action:`유휴 설비 점검 · 예약 운영 시스템 검토`});
@@ -2140,10 +2202,13 @@ function renderInsights(ent) {
   }
 }
 
+function usageValue(c) { return c.hasUsageData === false ? NaN : (c.utilization || 0); }
+
 function computeScore(c) {
+  if (c.hasUsageData === false || c.hasSalesData === false) return null;
   const scores = [
     Math.min(100, (c.achievement||0)),
-    Math.min(100, (c.utilization||0)),
+    Math.min(100, (usageValue(c))),
     Math.max(0,  100 - (c.churn||0)*5),
     Math.max(0,  100 - (c.refundRate||0)*3),
     Math.min(100, 50 + (c.mrrYoY||0)),
@@ -2254,7 +2319,7 @@ function renderScoreChart(ent) {
     const dims = ['순매출달성률','가동률','이탈건전성','환불건전성','MRR성장','매출성장'];
     const vals = [
       Math.min(100,c.achievement||0),
-      Math.min(100,c.utilization||0),
+      Math.min(100,usageValue(c)),
       Math.max(0,100-(c.churn||0)*5),
       Math.max(0,100-(c.refundRate||0)*3),
       Math.max(0,Math.min(100,50+(c.mrrYoY||0))),
@@ -2359,7 +2424,7 @@ function renderOpsUtilChart(ent) {
     data:{
       labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
-        { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization||0),
+        { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization),
           borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
           fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4 }
       ]
@@ -2504,14 +2569,14 @@ function renderOpsArpuChart(ent) {
   if (arpuArt) {
     const h2 = arpuArt.querySelector('h2');
     const sub = arpuArt.querySelector('.sub');
-    if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·매장PASS ARPU 수익성' : `③ 매장PASS ARPU 수익성 · ${hasCouponSourceData ? '쿠폰할인율 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음' : '매장별 쿠폰할인 미배분'}`;
-    if (sub) sub.textContent = hasDiscountData ? '쿠폰 적용 전 추정액 대비 할인율(%) · 구독자-월 노출 기준 ARPU(원)' : `매장PASS ARPU 월별 추이 · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계' : hasCouponSheetRows ? '쿠폰 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`;
+    if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·매장PASS ARPU 수익성' : `③ 매장PASS ARPU 수익성 · ${hasCouponSourceData ? '지정 쿠폰 비중 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음' : '매장별 쿠폰할인 미배분'}`;
+    if (sub) sub.textContent = hasDiscountData ? '실결제매출 대비 지정 쿠폰 할인액 비율(%) · 구독자-월 노출 기준 ARPU(원)' : `매장PASS ARPU 월별 추이 · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계' : hasCouponSheetRows ? '쿠폰 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`;
   }
   mkChart('opsArpuChart', {
     data:{
       labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
-        ...(hasDiscountData ? [{ type:'bar', label:'쿠폰할인율 %', data:ms.map(m=>m.hasDiscountData ? (m.discountShare||0) : null),
+        ...(hasDiscountData ? [{ type:'bar', label:'지정 쿠폰 비중 %', data:ms.map(m=>m.hasDiscountData ? (m.discountShare||0) : null),
           backgroundColor:makeGrad(null,90,63,140,.55,.2),
           borderColor:PALETTE.violet, borderWidth:0, borderRadius:4, yAxisID:'pct' }] : []),
         { type:'line', label:'매장PASS ARPU (원)', data:ms.map(m=>m.hasSubscriptionData === false ? null : m.arpu),
@@ -2548,7 +2613,7 @@ function renderOpsArpuStats(ent) {
       <thead>
         <tr style="border-bottom:1px solid var(--border)">
           <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
-          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--violet,#5a3f8c);font-size:10.5px">쿠폰할인율</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--violet,#5a3f8c);font-size:10.5px">지정 쿠폰 비중</th>
           <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--navy,#24344f);font-size:10.5px">매장PASS ARPU</th>
           <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">vs 평균</th>
         </tr>
@@ -2570,7 +2635,7 @@ function renderOpsArpuStats(ent) {
         }).join('')}
       </tbody>
     </table>
-    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 매장PASS ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 쿠폰할인율은 적용 전 추정액 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 실결제매출 0원 월 산출 제외' : ''}` : ` · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계로 쿠폰할인율 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음 · 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
+    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 매장PASS ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 지정 쿠폰 할인비중은 실결제매출 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 실결제매출 0원 월 산출 제외' : ''}` : ` · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계로 지정 쿠폰 비중 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음 · 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -2621,118 +2686,25 @@ function renderMrrTrendChart(ent) {
 //   단일 매장 선택 시 해당 매장 필터된 월 집계값 사용. isAll=false이면 매장별 데이터.
 function renderBridgeChart(ent) {
   const c = ent.current;
-  const gross    = Math.max(0, c.gross||0);
-  const net      = Math.max(0, c.net||0);
-  const discount = c.hasDiscountData ? Math.max(0, c.discountAmount || 0) : 0;
-  const listPriceRevenue = gross + discount;
-  const afterSaleDeduction = Math.max(0, gross - net);
-  const refundVal = Math.min(afterSaleDeduction, Math.max(0, c.refundAmount || gross * ((c.refundRate||0)/100)));
-  const otherDeduction = Math.max(0, afterSaleDeduction - refundVal);
-
-
-  // 쿠폰 적용 전 추정 결제액은 실결제매출+쿠폰할인이며 정상가 GMV와는 구분한다.
-  //   Floating/Stack 방식의 Chart.js 렌더링 버그 완전 제거
-  //   매장별 원천이 없는 경우 쿠폰할인은 0원으로 표시하고 임의 배분하지 않는다.
-  const barData   = [listPriceRevenue, discount, gross, refundVal, otherDeduction, net];
-  const barColors = [
-    'rgba(90,63,140,.82)',   // violet — 쿠폰 적용 전 추정 결제액
-    'rgba(178,76,88,.82)',   // rose  — 쿠폰할인
-    'rgba(36,52,79,.85)',    // navy  — 실결제매출
-    'rgba(192,110,80,.78)',  // amber — 환불
-    'rgba(192,123,72,.75)',  // amber — 기타 차감
-    'rgba(33,101,82,.88)'    // green — 순매출
-  ];
-  const barBorders = ['#5a3f8c','#b24c58','#24344f','#c06e50','#c07b48','#216552'];
-  const pctBase = listPriceRevenue || gross;
-  const pctLabel = v => pctBase > 0 ? `${((v/pctBase)*100).toFixed(1)}%` : '';
-
-  // 화살표 서브레이블 (X축 레이블 아래)
-  const arrowLabels = [c.hasDiscountData ? '쿠폰 적용 전 추정' : '실결제매출', '(−) 쿠폰할인', '실결제매출', '(−) 환불', '(−) 기타', '순매출'];
-
+  const gross = c.gross || 0;
+  const refund = c.refundAmount || 0;
+  const net = c.net || 0;
   mkChart('bridgeChart', {
     type:'bar',
-    data:{
-      labels: arrowLabels,
-      datasets:[{
-        label:'금액',
-        data: barData,
-        backgroundColor: barColors,
-        borderColor: barBorders,
-        borderWidth: 1.5,
-        borderRadius: 6,
-        borderSkipped: false,
-        barPercentage: 0.52   // 바 사이 간격 넓혀서 각 바가 독립적으로 보이게
-      }]
-    },
-    options:{
-      responsive:true, maintainAspectRatio:false,
-      plugins:{
-        legend:{display:false},
-        tooltip:{
-          callbacks:{
-            title: ctx => ctx[0].label,
-            label: ctx => {
-              const v = +ctx.raw || 0;
-              if (!v && ctx.dataIndex !== barData.length - 1) return ['해당 없음 (0원)'];
-              return [`금액: ${fmtS(v)}`, `${c.hasDiscountData ? '쿠폰 적용 전 추정액' : '실결제매출'} 대비: ${pctLabel(v)}`];
-            }
-          }
-        },
-        datalabels:{
-          display: true,   // 모든 바에 레이블 (0원 포함)
-          // 값이 작으면 바 위에, 크면 바 중앙에
-          anchor: ctx => {
-            const v = barData[ctx.dataIndex];
-            return (pctBase > 0 && v/pctBase < 0.08) ? 'end' : 'center';
-          },
-          align: ctx => {
-            const v = barData[ctx.dataIndex];
-            return (pctBase > 0 && v/pctBase < 0.08) ? 'top' : 'center';
-          },
-          color: ctx => {
-            const v = barData[ctx.dataIndex];
-            return (pctBase > 0 && v/pctBase < 0.08) ? '#4a3f35' : '#fff';
-          },
-          font:{size:11, weight:700},
-          textAlign:'center',
-          padding:{ bottom: 2 },
-          formatter: (v, ctx) => {
-            const val = +v || 0;
-            const isSmall = pctBase > 0 && val/pctBase < 0.08;
-            if (val === 0) {
-              // 할인 또는 환불이 0원인 경우
-              return ctx.dataIndex === 0 || ctx.dataIndex === barData.length - 1 ? `${fmtS(val)}\n${pctLabel(val)}` : '0원';
-            }
-            if (isSmall) {
-              // 소액 항목: 값과 비율을 바 위에 표시
-              return `${fmtS(val)} (${pctLabel(val)})`;
-            }
-            // 일반 항목: 값과 비율을 바 중앙에 표시
-            return `${fmtS(val)}\n${pctLabel(val)}`;
-          }
-        }
-      },
-      scales:{
-        y:{
-          ticks:{callback:fmtA},
-          grid:{color:'#f0ebe3'},
-          beginAtZero:true,
-          suggestedMax: Math.ceil(pctBase * 1.20)  // 상단 여백 확보 (소액 레이블 공간)
-        },
-        x:{ grid:{display:false} }
-      }
+    data:{ labels:['실결제매출','환불 차감','순매출'], datasets:[{
+      label:'금액', data:[[0,gross],[net,gross],[0,net]],
+      backgroundColor:['#24344f','#b24c58','#216552'], borderRadius:4
+    }] },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{
+        label:ctx => fmtW([gross,refund,net][ctx.dataIndex])
+      }} },
+      scales:{y:{beginAtZero:true,ticks:{callback:fmtA}},x:{grid:{display:false}}}
     }
   });
-
-  $('bridgeTitle').textContent = ent.isAll ? '포트폴리오 수익 브리지' : `${ent.name} 수익 브리지`;
-  const bridgeSub = document.querySelector('#bridgeTitle + .sub') ||
-    document.querySelector('[id="bridgeTitle"]')?.closest('article')?.querySelector('.sub');
-  if (bridgeSub) {
-    const netPct = pctBase > 0 ? ` (${c.hasDiscountData ? '쿠폰 적용 전 추정액' : '실결제매출'} 대비 ${pctLabel(net)})` : '';
-    bridgeSub.textContent = c.hasDiscountData
-      ? `쿠폰 적용 전 추정액 ${fmtS(listPriceRevenue)} → 쿠폰할인 ${fmtS(discount)} → 실결제매출 ${fmtS(gross)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}${couponCoverageSuffix(c)} · 정상가 GMV 원천 미보유`
-      : `실결제매출 ${fmtS(gross)} → ${couponUnavailableLabel(c)} → 환불 ${fmtS(refundVal)} → 기타차감 ${fmtS(otherDeduction)} → 순매출 ${fmtS(net)}${netPct}`;
-  }
+  $('bridgeTitle').textContent = ent.isAll ? '포트폴리오 수익 브리지' : ent.name + ' 수익 브리지';
+  const sub = document.querySelector('#bridgeTitle + .sub');
+  if (sub) sub.textContent = '실결제매출 → 환불 차감 → 순매출. 정상가 원천이 없어 할인 전 매출은 산출하지 않습니다. 지정 쿠폰 할인액은 별도 참고값입니다.';
 }
 
 function renderBenchmarkChart(ent) {
@@ -2801,7 +2773,7 @@ function renderHealthChart(ent) {
   const dims = ['순매출달성률','가동률','이탈건전성','환불건전성','MRR성장','매출성장'];
   const selVals = [
     Math.min(100,c.achievement||0),
-    Math.min(100,c.utilization||0),
+    Math.min(100,usageValue(c)),
     Math.max(0,100-(c.churn||0)*5),
     Math.max(0,100-(c.refundRate||0)*3),
     Math.max(0,Math.min(100,50+(c.mrrYoY||0))),
@@ -2814,7 +2786,7 @@ function renderHealthChart(ent) {
   activeStoresForHealth.forEach(s=>{
     const sc = aggMonths(filterMonths(s.months))||{};
     avgVals[0] += Math.min(100,sc.achievement||0)/healthDenom;
-    avgVals[1] += Math.min(100,sc.utilization||0)/healthDenom;
+    avgVals[1] += Math.min(100,usageValue(sc))/healthDenom;
     avgVals[2] += Math.max(0,100-(sc.churn||0)*5)/healthDenom;
     avgVals[3] += Math.max(0,100-(sc.refundRate||0)*3)/healthDenom;
     avgVals[4] += Math.max(0,Math.min(100,50+(sc.mrrYoY||0)))/healthDenom;
@@ -3065,7 +3037,7 @@ function renderMomentumChart(ent) {
         { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.achievement||0),
           borderColor:PALETTE.accent, borderWidth:2.5, pointRadius:4,
           fill:true, backgroundColor:makeGrad(null,143,66,25,.13,0), tension:0.4 },
-        { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization||0),
+        { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization),
           borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
           fill:false, tension:0.4 },
         { type:'line', label:'이탈률 %', data:ms.map(m=>m.churn||0),
@@ -3099,14 +3071,14 @@ function renderMixChart(ent) {
   const net      = Math.max(0, c.net||0);
   const other    = Math.max(0, gross - refund - net);
 
-  const rawData  = [net, discount, refund, other];
+  const rawData  = [net, refund, other];
   const total    = rawData.reduce((a,b)=>a+b,0);
   const MIN_SHOW = 0.05; // 5% 미만 슬라이스 레이블 숨김 (겹침 방지)
 
   mkChart('mixChart', {
     type:'doughnut',
     data:{
-      labels:['순매출','쿠폰할인','환불금액','기타차감'],
+      labels:['순매출','환불금액','기타차감'],
       datasets:[{
         data: rawData,
         backgroundColor:[
@@ -3171,7 +3143,7 @@ function renderMixChart(ent) {
   });
   $('mixTitle').textContent = ent.isAll ? '포트폴리오 구성 분석' : `${ent.name} 구성 분석`;
   $('mixSub').textContent   = total > 0
-    ? `${c.hasDiscountData ? '쿠폰 적용 전 추정액' : '실결제매출'} 대비 순매출 ${total?((net/total)*100).toFixed(1):'—'}% | 환불 ${fmtS(refund)} · ${c.hasDiscountData ? `쿠폰할인 ${fmtS(discount)}${couponCoverageSuffix(c)}` : couponUnavailableLabel(c)}`
+    ? `실결제매출 대비 순매출 ${((net/total)*100).toFixed(1)}% / 환불 ${fmtS(refund)}. 지정 쿠폰 할인액은 이미 반영된 금액이므로 구성비에 더하지 않습니다.`
     : `실결제매출 ${fmtS(gross)} 기준 수익 구조`;
 }
 
@@ -3184,7 +3156,7 @@ function renderHeroKpis(ent) {
   const items = [
     { label:'실결제매출', val: fmtS(c.gross), note: `실결제매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
     { label:'MRR',   val: hasSubscriptionData ? fmtS(c.mrr||0) : '—', note: hasSubscriptionData ? `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: c.hasMrrYoY ? (c.mrrYoY||0)>=0 : null },
-    { label:'가동률', val: fmtP(c.utilization||0), note: `${fmtN(c.usage||0)}대 사용`, good: (c.utilization||0)>=70 },
+    { label:'가동률', val: fmtP(usageValue(c)), note: c.hasUsageData === false ? '원천 누락으로 산출 보류' : `${fmtN(c.usage||0)}회 사용`, good: (usageValue(c))>=70 },
     { label:'이탈률', val: hasSubscriptionData ? fmtP(c.churn||0) : '—', note: hasSubscriptionData ? `해지 ${fmtN(c.cancelSubs||0)}건 / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: hasSubscriptionData ? (c.churn||0)<8 : null, invert:true },
     { label:'순증감', val: hasSubscriptionData ? `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}` : '—', note: hasSubscriptionData ? `신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: hasSubscriptionData ? (c.netAdds||0)>=0 : null },
     { label:'순매출 달성률', val: fmtP(c.achievement||0), note: `순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`, good: (c.achievement||0)>=100 }
@@ -3290,8 +3262,8 @@ function renderAlerts(ent) {
   const alerts = [];
   if ((c.achievement||0) < 80)   alerts.push({ lvl:'danger',  msg: `⚠ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 80% 미달. 즉각 점검 필요` });
   else if ((c.achievement||0) >= 100) alerts.push({ lvl:'success', msg: `✓ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 초과 달성` });
-  if ((c.utilization||0) > 110)  alerts.push({ lvl:'info',    msg: `ℹ 가동률 ${fmtP(c.utilization||0)} — 100% 초과, 설비 과부하 모니터링 권장` });
-  else if ((c.utilization||0) < 50) alerts.push({ lvl:'danger', msg: `⚠ 가동률 ${fmtP(c.utilization||0)} — 50% 미달, 운영 효율화 필요` });
+  if ((usageValue(c)) > 110)  alerts.push({ lvl:'info',    msg: `ℹ 가동률 ${fmtP(usageValue(c))} — 100% 초과, 설비 과부하 모니터링 권장` });
+  else if ((usageValue(c)) < 50) alerts.push({ lvl:'danger', msg: `⚠ 가동률 ${fmtP(usageValue(c))} — 50% 미달, 운영 효율화 필요` });
   if ((c.churn||0) > 10)         alerts.push({ lvl:'danger',  msg: `⚠ 이탈률 ${fmtP(c.churn||0)} — 긴급 해지 방어 캠페인 검토` });
   else if ((c.churn||0) > 6)     alerts.push({ lvl:'warn',    msg: `△ 이탈률 ${fmtP(c.churn||0)} — 경계 수준, 리텐션 점검 권장` });
   if ((c.refundRate||0) > 15)    alerts.push({ lvl:'warn',    msg: `△ 환불율 ${fmtP(c.refundRate||0)} — CS 이슈 점검 필요` });
@@ -3376,6 +3348,11 @@ function proratedCapacity(monthlyCapacity, storeName, monthNum, throughDay = nul
 function buildCapacityData(ent) {
   // fact_monthly의 Capacity/MTD_Capacity가 있으면 이를 권위 값으로 사용한다.
   function calcForStore(storeName, filtMs) {
+    if (filtMs.some(m=>m.hasUsageData === false || m.hasArpwData === false)) {
+      return { name:storeName, hasUsageData:false, capacity:null, usage:null, utilization:null,
+        lossEstimate:null, idleCount:null, conservativePrice:null, confirmedLoss:null, mtdLoss:null,
+        projLoss:null, confirmedIdle:null, mtdIdle:null, monthCount:filtMs.length };
+    }
     const sourceMonthCap = filtMs.reduce((max, m) => Math.max(max, +m.capacity || 0), 0);
     const rawCap   = sourceMonthCap || STORE_CAPACITY_RAW[storeName] || 0;
     const monthCap = rawCap; // 하위 렌더러 호환 필드
@@ -3566,7 +3543,8 @@ function renderCapacityPanel(ent) {
   // 계절지수 (확정월 기준) — 2025 실적 기반 매장별 월평균으로 계산
   const confSeasonUsage = stores.reduce((s,st) => s+(st.confirmedSeasonUsage||0), 0);
   const confSeasonBase = stores.reduce((s,st) => s+(st.confirmedSeasonBase||0), 0);
-  const confSeasonIdx  = confSeasonBase > 0 ? confSeasonUsage / confSeasonBase : null;
+  const confSeasonIdx = ent.current.usageComparable !== false && confSeasonBase > 0
+    ? confSeasonUsage / confSeasonBase : null;
 
   // 상태 배지 헬퍼
   function sBadge(type) {
@@ -3624,7 +3602,7 @@ function renderCapacityPanel(ent) {
     <div class="cap-sum-item">
       <div class="cap-sum-label">계절 지수 (확정)${capTip('2025 매장별 월평균 대비 확정월 총사용<br>2025 기준선이 없는 신규 매장은 제외')}</div>
       <div class="cap-sum-val" style="color:${confSeasonIdx==null?'var(--muted)':confSeasonIdx>=1?'#216552':confSeasonIdx>=0.8?'#c07b48':'#b24c58'}">${confSeasonIdx==null?'—':confSeasonIdx.toFixed(2)}</div>
-      <div class="cap-sum-sub">2025 실적 보유 매장 기준</div>
+      <div class="cap-sum-sub">${ent.current.usageComparable === false ? '전년 원천 누락으로 비교 보류' : '2025 실적 보유 매장 기준'}</div>
     </div>
   </div>`;
 
@@ -4067,9 +4045,9 @@ function renderPaymentPanel(ent) {
 
   const items = [
     { label:'건당 매출', val:c.hasArpwData === false ? '—' : fmtS(revenuePerWash),
-      note:c.hasArpwData === false ? '매출/사용 기준일 불일치로 산출 보류' : `실결제매출 ÷ ${fmtN(usage)}대`, color:'navy' },
+      note:c.hasArpwData === false ? '사용 원천 누락 또는 기준일 불일치로 산출 보류' : `실결제매출 ÷ ${fmtN(usage)}대`, color:'navy' },
     { label:'건당 순매출', val:c.hasArpwData === false ? '—' : fmtS(netPerWash),
-      note:c.hasArpwData === false ? '매출/사용 기준일 불일치로 산출 보류' : '실결제매출에서 환불 차감 후', color:'green' },
+      note:c.hasArpwData === false ? '사용 원천 누락 또는 기준일 불일치로 산출 보류' : '실결제매출에서 환불 차감 후', color:'green' },
     { label:'매장PASS ARPU', val:arpu>0?fmtS(arpu):'—',
       note:c.hasSubscriptionData ? `${arpuBasisLabel(c)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), color:'accent' },
     { label:'목표 실현 단가', val:`${fmtN(UNIT_PRICE_TARGET)}원`,
@@ -4112,13 +4090,13 @@ function renderHeatmap(ent) {
       name:        s.name,
       status:      ops.status || '',
       achievement: agg.achievement  || 0,
-      utilization: agg.utilization  || 0,
+      utilization: agg.utilization,
       churn:       agg.churn        || 0,
       refundRate:  agg.refundRate   || 0,
       netAdds:     agg.netAdds      || 0,
       arpu:        agg.arpu         || 0,
       gross:       agg.gross        || 0,
-      lossEstimate:cap.lossEstimate || 0
+      lossEstimate:cap.lossEstimate ?? null
     };
   });
 
@@ -4178,7 +4156,8 @@ function renderHeatmap(ent) {
       style="grid-template-columns:90px ${'1fr '.repeat(metrics.length).trim()}">
       <div class="hm-label-cell">${s.name}</div>
       ${metrics.map((m,i)=>{
-        const v = s[m.key]||0;
+        const v = s[m.key];
+        if (v == null) return '<div class="hm-cell" title="원천 누락으로 산출 보류">—</div>';
         const {min,max} = cols[i];
         const norm = max>min?(v-min)/(max-min):0.5;
         const {bg,text} = cellColor(norm, m.inv);
@@ -4265,7 +4244,7 @@ function renderTable(ent) {
       achievement: agg.achievement  || 0,
       net:         agg.net          || 0,
       usage:       agg.usage        || 0,
-      utilization: agg.utilization  || 0,
+      utilization: agg.utilization,
       utilizationRaw,
       refundRate:  agg.refundRate   || 0,
       churn:       agg.churn        || 0,
@@ -4279,6 +4258,7 @@ function renderTable(ent) {
   // ★ v3: 파생 상태 계산 함수 — 실데이터 기반 다중 조건
   // 우선 점검 매장 로직과 동일 기준 사용
   function deriveStoreStatus(s) {
+    if (s.utilization == null) return { text:'자료 확인', cls:'warn' };
     if (s.opsStatus === '오픈 전') return { text:'오픈 전', cls:'open' };
     const ach      = s.achievement    || 0;
     const util     = s.utilization    || 0;
@@ -4341,14 +4321,14 @@ function renderTable(ent) {
     // 원천 MTD Capacity 기준 가동률
     const util = s.utilization||0;
     const utilRaw = s.utilizationRaw||0;
-    const utilCell = fmtP(utilRaw || util);
+    const utilCell = s.utilization == null ? '자료 부족' : fmtP(utilRaw || util);
 
     // ★ v3: 파생 상태 표시 (시트 판정 대신 실데이터 기반)
     const derivedSt = deriveStoreStatus(s);
 
     const selected = s.name===selName?'selected':'';
     return `<tr class="${selected}" data-store="${s.name}" role="button" tabindex="0"
-      aria-label="${s.name} 매장 선택 · 순매출 달성률 ${fmtP(ach)} · 가동률 ${fmtP(utilRaw || util)} · 이탈률 ${fmtP(s.churn||0)}">
+      aria-label="${s.name} 매장 선택 · 순매출 달성률 ${fmtP(ach)} · 가동률 ${utilCell} · 이탈률 ${fmtP(s.churn||0)}">
       <td data-label="매장">${s.name}</td>
       <td data-label="순매출 달성률">${achCell}</td>
       <td data-label="가동률">${utilCell}</td>
@@ -4392,10 +4372,10 @@ function renderDetail(ent) {
   // 기본 지표 그리드
   const items = [
     { label:'실결제매출',    val:fmtS(c.gross),         sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}` },
-    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `실결제매출−환불 · 쿠폰할인 적용 전 추정액 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `실결제매출−환불 · ${couponUnavailableLabel(c)}` },
+    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `실결제매출−환불 · 쿠폰할인 실결제매출 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `실결제매출−환불 · ${couponUnavailableLabel(c)}` },
     { label:'MRR',      val:hasSubscriptionData ? fmtS(c.mrr||0) : '—', sub:hasSubscriptionData ? `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c) },
     { label:'순매출 달성률',   val:fmtP(c.achievement||0),  sub:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}` },
-    { label:'운영 가동률', val:fmtP(c.utilization||0),  sub:(()=>{
+    { label:'운영 가동률', val:fmtP(usageValue(c)),  sub:(()=>{
         const capAll = buildCapacityData(ent);
         const cr = ent.isAll
           ? { idleCount: capAll.reduce((s,d)=>s+(d.idleCount||0),0) }
@@ -4418,8 +4398,8 @@ function renderDetail(ent) {
                       : '';
       const dispVal   = noData  ? '—' : fmtP(dDiscount);
       const dispSub   = noData  ? couponUnavailableLabel(c)
-                      : `쿠폰 적용 전 추정액 대비 · ${fmtS(c.discountAmount||0)}${couponCoverageSuffix(c)}`;
-      return { label:`쿠폰할인율${badge}`, val:dispVal, sub:dispSub };
+                      : `실결제매출 대비 · ${fmtS(c.discountAmount||0)}${couponCoverageSuffix(c)}`;
+      return { label:`지정 쿠폰 비중${badge}`, val:dispVal, sub:dispSub };
     })(),
     { label:'매장PASS ARPU', val:c.arpu>0?fmtS(c.arpu):'—', sub:hasSubscriptionData ? `${arpuBasisLabel(c)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c) },
     { label:'ARR',      val: (c.arr||0) > 0 ? fmtS(c.arr) : '—', sub:`ARR YoY ${c.arrYoY ? (c.arrYoY>0?'+':'')+fmtP(c.arrYoY) : '—'} (연간 반복매출)` },
@@ -4458,7 +4438,7 @@ function renderDetail(ent) {
   const issues = [];
   const ach = c.achievement || 0;
   const churn = c.churn || 0;
-  const util = c.utilization || 0;
+  const util = usageValue(c);
   const refund = c.refundRate || 0;
   const netAdds = c.netAdds || 0;
   const capRow = buildCapacityData(ent)[0] || {};
@@ -4592,7 +4572,7 @@ function renderActionCenter(ent) {
     kpi:'이탈률 6% 이하',
     confirm:`주간 이탈률 추이 안정화 확인 또는 리텐션 메시지 발송 완료` });
 
-  const util = c.utilization || 0;
+  const util = usageValue(c);
   if (util < 45)      actions.push({ level:'critical', text:`가동률 ${fmtP(util)} — 미가동 설비 점검 및 프로모션 계획 수립`,
     dri:'사업운영팀', deadline:deadline3d,
     kpi:'가동률 60% 이상',
@@ -4666,7 +4646,7 @@ function renderActionCenter(ent) {
     const sIssues = [];
     if ((c.achievement||0) < 80)  sIssues.push(`순매출 달성률 ${fmtP(c.achievement||0)}`);
     if ((c.churn||0)       > 8)   sIssues.push(`이탈 ${fmtP(c.churn||0)}`);
-    if ((c.utilization||0) < 60)  sIssues.push(`가동 ${fmtP(c.utilization||0)}`);
+    if ((usageValue(c)) < 60)  sIssues.push(`가동 ${fmtP(usageValue(c))}`);
     if ((c.refundRate||0)  > 10)  sIssues.push(`환불 ${fmtP(c.refundRate||0)}`);
     if ((c.netAdds||0)     < 0)   sIssues.push(`순증감 ${c.netAdds||0}건`);
     // ★ 경계 수준 경고 (임계값 미달이지만 모니터링 필요)
@@ -4708,7 +4688,7 @@ function renderActionCenter(ent) {
 
       // ★ Priority 7: 1차 원인 + 우선 액션 도출 (deriveStoreStatus와 동일 차원 우선순위)
       const ach     = agg.achievement  || 0;
-      const util    = agg.utilization  || 0;
+      const util    = agg.utilization;
       const capMetric = buildCapacityData({ name:s.name, isAll:false, months:filtMs })[0] || {};
       const utilRaw = capMetric.capacity > 0 ? capMetric.utilization : util;
       const churn   = agg.churn        || 0;
@@ -4856,7 +4836,7 @@ function renderInlineStoreDetail(ent) {
   const issues = [];
   const ach    = c.achievement || 0;
   const churn  = c.churn       || 0;
-  const util   = c.utilization || 0;
+  const util   = usageValue(c);
   const refund = c.refundRate  || 0;
   const netAdds= c.netAdds     || 0;
   const capRow = buildCapacityData(ent)[0] || {};
@@ -4976,23 +4956,59 @@ function renderInlineStoreDetail(ent) {
 }
 
 /* ── 19. 전체 렌더 ──────────────────────────────────────────── */
+function renderReviewed(renderer, ent, ids, complete) {
+  for (const id of ids) {
+    const element = $(id);
+    if (!element) continue;
+    const host = element.tagName === 'CANVAS' ? element.parentElement : element;
+    let note = $(`${id}-quality-note`);
+    if (!note) {
+      note = document.createElement('p');
+      note.id = `${id}-quality-note`;
+      note.className = 'quality-note';
+      note.textContent = '선택 기간 또는 비교 대상의 원천이 불완전하여 이 분석은 보류합니다. 원천 수신 상태와 데이터 품질 점검 내용을 확인하세요. 누락을 0으로 간주하지 않습니다.';
+      host.before(note);
+    }
+    note.hidden = complete;
+    host.hidden = !complete;
+  }
+  if (complete) renderer(ent);
+}
+
+function renderSourceCoverage(ent) {
+  const panel = $('sourceCoverage');
+  if (!panel) return;
+  const stores = ent.isAll ? getActiveStores() : [{name:ent.name,months:ent.months}];
+  const rows = stores.flatMap(store => filterMonths(store.months).filter(m=>m.hasUsageData===false || m.hasSalesData===false)
+    .map(m=>({name:store.name,month:m.month,quality:m.usageQuality,observed:m.observedUsage})));
+  panel.hidden = rows.length === 0;
+  if (!rows.length) return;
+  panel.innerHTML = `<h2>선택 기간 원천 수신 상태</h2><p>아래 구간의 관측 사용량은 수신된 날짜의 합계입니다. 완전한 기간 실적이 아니므로 가동률, 단가, 기회금액과 관련 종합 점수는 표시하지 않습니다. 매출과 구독 등 별도 검증된 지표는 유지합니다.</p>
+    <div class="coverage-grid"><strong>매장 / 월</strong><strong>수신일 / 기대일</strong><strong>관측 사용(회)</strong>
+    ${rows.map(r=>`<span>${r.name} / ${r.month}</span><span>${r.quality?.received ?? '—'} / ${r.quality?.expected ?? '—'}</span><span>${r.observed == null ? '—' : fmtN(r.observed)}</span>`).join('')}</div>`;
+}
+
 function renderAll() {
   if (!dashboard) return;
   const ent = getEntity();
   if (!ent) return;
+  const usageComplete = ent.current.hasUsageData !== false && ent.current.hasSalesData !== false;
+  const portfolioComplete = getActiveStores().every(s => filterMonths(s.months).every(m=>m.hasUsageData!==false && m.hasSalesData!==false));
+  renderSourceCoverage(ent);
 
   renderHeroKpis(ent);
   renderAlerts(ent);
-  renderActionCenter(ent);   // ★ 액션 커맨드 센터 — 상단 우선 노출
+  renderReviewed(renderActionCenter,ent,['actionCenter'],usageComplete && portfolioComplete);
   renderGauges(ent);
   renderKpis(ent);
-  renderSignals(ent);
+  renderReviewed(renderSignals,ent,['signalGrid'],usageComplete);
   renderInsights(ent);
+  if ((!usageComplete || !portfolioComplete) && $('focusScore')) $('focusScore').style.display = 'none';
   renderPerformanceChart(ent);
-  renderScoreChart(ent);
+  renderReviewed(renderScoreChart,ent,['scoreChart'],usageComplete && portfolioComplete);
   renderSubscriptionChart(ent);
   renderOpsUtilChart(ent);
-  renderOpsUtilStats(ent);
+  renderReviewed(renderOpsUtilStats,ent,['opsUtilStats'],usageComplete);
   renderOpsChurnChart(ent);
   renderOpsChurnStats(ent);
   renderOpsArpuChart(ent);
@@ -5000,20 +5016,20 @@ function renderAll() {
   renderMrrTrendChart(ent);
   renderBridgeChart(ent);
   renderBenchmarkChart(ent);
-  renderHealthChart(ent);
+  renderReviewed(renderHealthChart,ent,['healthChart'],usageComplete && portfolioComplete);
   renderQuarterChart(ent);
   renderScatterChart(ent);
   renderMomentumChart(ent);
   renderMixChart(ent);
   renderSubscriptionPipeline(ent);
   renderChurnClassification(ent);
-  renderCapacityPanel(ent);
-  renderSeasonChart(ent);
+  renderReviewed(renderCapacityPanel,ent,['capacityPanel'],usageComplete);
+  renderReviewed(renderSeasonChart,ent,['seasonChart'],usageComplete && ent.current.usageComparable !== false);
   renderPaymentPanel(ent);
   renderHeatmap(ent);
   renderTable(ent);
-  renderDetail(ent);
-  renderInlineStoreDetail(ent);   // ★ 히트맵·랭킹·테이블 클릭 직후 노출 드릴다운
+  renderReviewed(renderDetail,ent,['detailGrid'],usageComplete);
+  renderReviewed(renderInlineStoreDetail,ent,['inlineStoreDetail'],ent.isAll || usageComplete);
 }
 
 /* ── 20. 이벤트 바인딩 ──────────────────────────────────────── */

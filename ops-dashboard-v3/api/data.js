@@ -1,4 +1,4 @@
-const { fetchSnapshot } = require('../lib/sheets.cjs');
+const { fetchSnapshot, SourceError } = require('../lib/sheets.cjs');
 
 function authorized(req) {
   const expected=process.env.DASHBOARD_TOKEN;
@@ -23,7 +23,8 @@ module.exports=async function handler(req,res) {
     if (!pending) pending=fetchSnapshot().finally(()=>{pending=null;});
     return res.status(200).json(await pending);
   } catch(error) {
-    return res.status(error.status||503).json({code:error.code||'SOURCE_UNAVAILABLE',
-      error:error.code ? error.message : '시트 연결이 지연되고 있습니다. 잠시 후 다시 시도하세요.'});
+    const known = error instanceof SourceError;
+    return res.status(known ? error.status : 503).json({code:known ? error.code : 'SOURCE_UNAVAILABLE',
+      error:known ? error.message : '시트 연결이 지연되고 있습니다. 잠시 후 다시 시도하세요.'});
   }
 };

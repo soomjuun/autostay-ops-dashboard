@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20260825">
+  <link rel="stylesheet" href="./style.css?v=20260918">
   <!-- 인증 가드: 쿠키 없이 직접 접근 시 로그인 페이지로 이동 -->
   <script>
     (function() {
@@ -106,6 +106,7 @@
     </div>
   </section>
 
+  <section id="sourceCoverage" class="panel" hidden aria-live="polite"></section>
   <section class="gauge-grid">
     <article class="panel gauge-panel">
       <div class="gauge-badge" id="gbadge-ach"></div>
@@ -216,7 +217,7 @@
         <div class="chart-section-head" style="margin-bottom:6px">
           <div>
             <h2 style="font-size:13.5px;margin:0">③ 쿠폰할인·매장PASS ARPU 수익성</h2>
-            <p class="sub" style="margin:0">쿠폰 적용 전 추정액 대비 할인율 · 구독자-월 노출 기준 ARPU</p>
+            <p class="sub" style="margin:0">실결제매출 대비 지정 쿠폰 비중 / 구독자-월 노출 기준 ARPU</p>
           </div>
           <button class="collapse-toggle collapsed" data-target="opsArpuDetail" aria-label="상세 보기">
             <span class="arrow">▾</span><span class="toggle-label">상세</span>
@@ -239,7 +240,7 @@
     </article>
     <article class="panel col-6">
       <div class="chart-section-head">
-        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">쿠폰 적용 전 추정 결제액 → 쿠폰할인 → 실결제매출 → 환불 → 순매출</p></div>
+        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">실결제매출 → 환불 → 순매출</p></div>
         <button class="collapse-toggle" data-target="bridgeWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="bridgeWrap" class="collapsible-content">
@@ -259,7 +260,7 @@
     </article>
     <article class="panel col-2">
       <h2 id="mixTitle">수익 구성 분석</h2>
-      <p class="sub" id="mixSub">순매출·쿠폰할인·환불·기타 비중</p>
+      <p class="sub" id="mixSub">실결제매출 내 순매출과 환불 비중</p>
       <div class="chart lg"><canvas id="mixChart"></canvas></div>
     </article>
     <article class="panel col-2">
@@ -359,6 +360,6 @@
     </article>
   </section>
 </div>
-<script src="./app.js?v=20260910"></script>
+<script src="./app.js?v=20260918"></script>
 </body>
 </html>

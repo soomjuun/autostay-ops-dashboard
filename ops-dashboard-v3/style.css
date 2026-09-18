@@ -932,3 +932,7 @@ tbody td:first-child{text-align:left;font-weight:800;font-size:13px}
   .chart-master-grid [class*="col-"]{grid-column:span 1}
   .chart-master-grid .col-6,.chart-master-grid .col-8,.chart-master-grid .col-12{grid-column:span 2}
 }
+[hidden] { display: none !important; }
+.quality-note { padding: 12px; color: #74695d; background: #f7f2e9; border-radius: 8px; font-size: 12px; }
+.coverage-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
+#sourceCoverage { margin-bottom: 16px; }
