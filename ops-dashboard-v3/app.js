@@ -4041,7 +4041,6 @@ function renderPaymentPanel(ent) {
       <div class="pay-val">${it.val}</div>
       <div class="pay-note">${it.note}</div>
     </div>`).join('') + `
-  <div class="pay-row" style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:2px">
     <div class="pay-item accent">
       <div class="pay-label">ARR${kpiTooltipIcon('ARR')}</div>
       <div class="pay-val">${arr > 0 ? fmtS(arr) : '—'}</div>
@@ -4052,7 +4051,7 @@ function renderPaymentPanel(ent) {
       <div class="pay-val">${ltv > 0 ? fmtW(ltv) : '—'}</div>
       <div class="pay-note">MRR ÷ 월환산 해지수</div>
     </div>
-  </div>`;
+  `;
 }
 
 /* ── 16. 히트맵 ─────────────────────────────────────────────── */
@@ -4296,7 +4295,7 @@ function renderTable(ent) {
     const achBg    = ach>=100?'var(--green-soft)':ach>=80?'var(--amber-soft)':'var(--rose-soft)';
     const achColor = ach>=100?'var(--green)':ach>=80?'var(--amber)':'var(--rose)';
     const achBold  = ach < 80 ? 'font-weight:900;' : '';
-    const achCell  = `<div class="ach-wrap" style="background:${achBg};padding:3px 6px;border-radius:6px;display:inline-block">
+    const achCell  = `<div class="ach-wrap" style="background:${achBg}">
       <span style="color:${achColor};${achBold}">${fmtP(ach)}</span>
       <div class="ach-bar-bg"><div class="ach-bar-fill" style="width:${Math.min(100,ach)}%;background:${ach>=100?'#216552':ach>=80?'#c07b48':'#b24c58'}"></div></div>
     </div>`;
