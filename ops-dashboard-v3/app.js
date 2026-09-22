@@ -49,7 +49,7 @@ const KST_TODAY  = getKstDateParts();
 const TODAY_YEAR = KST_TODAY.year;
 const TODAY_MONTH = KST_TODAY.month;   // 1-12
 const QUARTERS = ['Q1','Q2','Q3','Q4'];
-const PERIOD_FILTERS = ['all','H1', ...QUARTERS];
+const PERIOD_FILTERS = ['all','H1','H2', ...QUARTERS];
 function quarterForMonth(monthNum) {
   return `Q${Math.ceil((+monthNum || 1) / 3)}`;
 }
@@ -60,10 +60,12 @@ function quarterEndMonth(q) {
 function periodMatchesMonth(period, month) {
   if (period === 'all') return true;
   if (period === 'H1') return (month.monthNum || month.num || 0) >= 1 && (month.monthNum || month.num || 0) <= 6;
+  if (period === 'H2') return (month.monthNum || month.num || 0) >= 7 && (month.monthNum || month.num || 0) <= 12;
   return month.quarter === period;
 }
 function periodEndMonth(period) {
   if (period === 'H1') return 6;
+  if (period === 'H2') return 12;
   return quarterEndMonth(period);
 }
 const ALL_MONTH_SPECS = [
@@ -190,6 +192,7 @@ function subscriptionBasisLabel(summary) {
   return `${summary.subscriptionSourceDate || monthLabel} 구독 수신 기준${summary.subscriptionLagged ? ' / 매출 기준일과 다름' : ''}`;
 }
 const tx     = v => String(v??'').replace(/\s+/g,' ').trim();
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num = v => {
   if (typeof v === 'number') return v;
   const text = String(v ?? '').trim();
@@ -649,6 +652,7 @@ function applySourceQuality(item, storeName) {
   item.hasUsageData = usage.complete;
   item.hasSalesData = sales.complete;
   item.usageQuality = usage;
+  item.usageMissingDays = Math.max(0, (usage.expected || 0) - (usage.received || 0));
   item.observedUsage = usage.status === 'LEGACY' ? item.usage : usage.observed;
   item.usageComparable = usage.complete && priorUsage.complete;
   item.salesComparable = item.salesComparable !== false && sales.complete && priorSales.complete;
@@ -1011,6 +1015,7 @@ function aggregatePortfolioMonths(stores) {
       hasSalesData:records.every(row=>row.hasSalesData!==false),
       usageComparable:records.every(row=>row.usageComparable!==false),
       observedUsage:records.every(row=>row.observedUsage!=null || row.capacity===0) ? sum('observedUsage') : null,
+      usageMissingDays:sum('usageMissingDays'),
       usage:records.every(row=>row.hasUsageData!==false) ? usage : null,
       utilization: records.every(row=>row.hasUsageData!==false) && mtdCapacity > 0 ? usage / mtdCapacity * 100 : null,
       utilizationRaw: records.every(row=>row.hasUsageData!==false) && mtdCapacity > 0 ? usage / mtdCapacity * 100 : null,
@@ -1096,6 +1101,8 @@ function aggMonths(months) {
     hasArpuData, hasArpwData, salesComparable, hasUsageData, hasSalesData,
     usageComparable:months.every(m=>m.usageComparable!==false),
     observedUsage:months.every(m=>m.observedUsage!=null) ? months.reduce((s,m)=>s+m.observedUsage,0) : null,
+    usageMissingDays:months.reduce((s,m)=>s+(m.usageMissingDays||0),0),
+    mtdCapacity:t.cap,
     salesSourceDate:last.salesSourceDate || null,
     usageSourceDate:last.usageSourceDate || null,
     contributionRevenue:months.every(m=>m.contributionRevenue!=null) ? months.reduce((s,m)=>s+m.contributionRevenue,0) : null,
@@ -1284,14 +1291,16 @@ function parseSummary(rows) {
   const get = (keys, col=1) => {
     for (const k of keys) {
       const r = map.get(k);
-      if (r && r[col] !== undefined && String(r[col]).trim() !== '') return num(r[col]);
+      if (r && r[col] !== undefined && String(r[col]).trim() !== '')
+        return /보류|미수신|누락|참고|불가/.test(tx(r[col])) ? null : num(r[col]);
     }
     return null;
   };
   const getPct = (keys, col=1) => {
     for (const k of keys) {
       const r = map.get(k);
-      if (r && r[col] !== undefined && String(r[col]).trim() !== '') return pct(r[col]);
+      if (r && r[col] !== undefined && String(r[col]).trim() !== '')
+        return /보류|미수신|누락|참고|불가/.test(tx(r[col])) ? null : pct(r[col]);
     }
     return null;
   };
@@ -1400,14 +1409,30 @@ function parseDataQuality(rows) {
   const salesCheck = checks.find(c => c.name === '매출 최신일');
   const dateMatch = salesCheck?.value?.match(/(\d{4}-\d{2}-\d{2})/);
   const salesLatestDate = dateMatch ? new Date(`${dateMatch[1]}T00:00:00`) : null;
-  const nonNormalChecks = checks.filter(c => c.status && !['정상','확인','안내','완료'].includes(c.status));
+  const cfg = Object.fromEntries(sourceSnapshot?.sheets?.cfg || []);
+  const auditCurrent = ['success','complete','completed','done'].includes(cfg.dashboard_build_status) &&
+    Boolean(cfg.dashboard_run_id) && cfg.dashboard_audit_run_id === cfg.dashboard_run_id &&
+    String(cfg.dashboard_audit_blocking ?? '').trim() === '0';
+  const nonNormalChecks = checks.filter(c => {
+    if (['참고 경고','검증 경고'].includes(c.name)) return false;
+    if (c.name === '차단 오류') return num(c.value) > 0;
+    if (['빌드 상태','대시보드 빌드 상태'].includes(c.name) && auditCurrent) return false;
+    if (c.status === '전회 결과')
+      return /\[주의\]|\[위험\]|검토:|누락\s*[1-9]\d*|실패|#REF!|#VALUE!|#DIV\/0!|불일치/.test(c.value);
+    return c.status && !['정상','확인','안내','완료'].includes(c.status);
+  });
   const pendingChecks = nonNormalChecks.filter(isSourceCheckPending);
   const sourceCheckPending = pendingChecks.length > 0 ||
     details.some(d => isSourceCheckPending({ name:d.location, value:d.message, note:'' }));
   const actionableChecks = nonNormalChecks.filter(c => !isSourceCheckPending(c));
+  const warnings = actionableChecks.filter(c => !isInformationalDataQualityCheck(c));
+  details.filter(d => /차단|위험|오류/.test(d.grade)).forEach(d => {
+    if (!warnings.some(c => c.value === d.message || c.name === d.location))
+      warnings.push({name:d.location, status:d.grade, value:d.message, note:d.action});
+  });
   return {
-    checks,
-    warnings: actionableChecks.filter(c => !isInformationalDataQualityCheck(c)),
+    checks, auditCurrent,
+    warnings,
     infos: actionableChecks.filter(isInformationalDataQualityCheck),
     pendingChecks,
     sourceCheckPending,
@@ -1786,16 +1811,16 @@ function renderGauges(ent) {
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
     ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubNet}${periodLabel}`);
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
-    util, c.hasUsageData === false ? '—' : utilLabel, c.hasUsageData === false
-      ? '사용 원천 일부 누락: 가동률 산출 보류'
+    util, usagePresentation(c).label, c.hasUsageData === false
+      ? usagePresentation(c).note
       : `총사용 ${fmtN(c.usage||0)}회 / 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}회${periodLabel}`);
   if (c.hasUsageData === false) $('gsvg-util').innerHTML = '';
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, hasSubscriptionData ? fmtP(c.churn||0) : '—', !hasSubscriptionData
       ? `${subscriptionBasisLabel(c)}${periodLabel}`
       : ms.length > 1
-        ? `기간 이탈 ${fmtN(c.cancelSubs||0)}명 · 구독자-월 노출 ${fmtN(c.retainedExposure||0)}명 · ${subscriptionBasisLabel(c)}${periodLabel}`
-        : `이탈 ${fmtN(c.cancelSubs||0)}명 · 구독자-월 노출 ${fmtN(c.retainedExposure||c.retained||0)}명 · ${subscriptionBasisLabel(c)}${periodLabel}`);
+        ? `기간 해지 ${fmtN(c.cancelSubs||0)}건 / 구독-월 노출 ${fmtN(c.retainedExposure||0)}건 / ${subscriptionBasisLabel(c)}${periodLabel}`
+        : `해지 ${fmtN(c.cancelSubs||0)}건 / 구독-월 노출 ${fmtN(c.retainedExposure||c.retained||0)}건 / ${subscriptionBasisLabel(c)}${periodLabel}`);
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
     mrrM, mrrValText, mrrSubText);
 
@@ -1896,17 +1921,17 @@ function renderKpis(ent) {
           : `MRR YoY 비교 없음 · 전년 동기 운영 이력 없음${(c.arpu||0)>0?' · 매장PASS ARPU '+fmtS(c.arpu):''} · ${subscriptionBasisLabel(c)}`,
       deltaContext:'YoY',
       color:'green', spark:mrrTrend, sparkColor:'#216552' },
-    { label:'가동률',  val:fmtP(usageValue(c)),
+    { label:'가동률',  val:usagePresentation(c).label,
       delta:null, deltaSuffix:'%p',
-      sub:c.hasUsageData === false ? '원천 일부 누락으로 산출 보류' : `${ms.length > 1 ? '기간 ' : ''}총사용 ${fmtN(c.usage||0)}대`,
+      sub:usagePresentation(c).note,
       color:'amber', spark:c.hasUsageData === false ? null : utilTrend, sparkColor:'#c07b48',
       projection: c.hasUsageData !== false && (c.achievement||0)>0 && (c.achievement||0)<100
         ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(usageValue(c)) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
     { label:'이탈률',  val:hasSubscriptionData ? fmtP(c.churn||0) : '—',
       delta:null, deltaSuffix:'%p', invert:true,
       sub:!hasSubscriptionData ? subscriptionBasisLabel(c) : ms.length > 1
-        ? `기간 해지 ${fmtN(c.cancelSubs||0)}건 · 구독자-월 노출 ${fmtN(c.retainedExposure||0)}명`
-        : `해지 ${fmtN(c.cancelSubs||0)}건 · 구독자-월 노출 ${fmtN(c.retainedExposure||c.retained||0)}명`,
+        ? `기간 해지 ${fmtN(c.cancelSubs||0)}건 / 구독-월 노출 ${fmtN(c.retainedExposure||0)}건`
+        : `해지 ${fmtN(c.cancelSubs||0)}건 / 구독-월 노출 ${fmtN(c.retainedExposure||c.retained||0)}건`,
       color:'rose', spark:churnTrend, sparkColor:'#b24c58' },
     { label:'순증감',  val:hasSubscriptionData ? ((c.netAdds||0)>=0?`+${fmtN(c.netAdds)}`:fmtN(c.netAdds||0)) : '—',
       delta:null, deltaSuffix:'건', isRaw:true,
@@ -2065,7 +2090,7 @@ function renderInsights(ent) {
       <span>${fmtP(c.achievement||0)} 달성 · ${gapText}<br>실결제매출 ${fmtS(c.gross||0)}</span>
     </div>
     <div class="summary-metric-grid">
-      <div class="summary-metric"><span>가동률</span><strong>${fmtP(usageValue(c))}</strong></div>
+      <div class="summary-metric"><span>가동률</span><strong>${usagePresentation(c).label}</strong></div>
       <div class="summary-metric"><span>이탈률</span><strong>${c.hasSubscriptionData ? fmtP(c.churn||0) : '—'}</strong></div>
       <div class="summary-metric"><span>MRR</span><strong>${c.hasSubscriptionData ? fmtS(c.mrr||0) : '—'}</strong><small>${mrrDir}</small></div>
     </div>
@@ -2141,44 +2166,11 @@ function renderInsights(ent) {
       <div class="risk-action-header">
         <span class="risk-dot ${r.lv}" style="margin-top:5px"></span>
         <span class="risk-action-text">${r.text}</span>
-        ${r.lv!=='ok'?'<span class="risk-status-badge">미조치</span>':''}
       </div>
       ${r.impact?`<div class="risk-impact">💥 ${r.impact}</div>`:''}
-      ${r.owner?`<div class="risk-owner">👤 담당: ${r.owner}</div>`:''}
       ${r.action?`<div class="risk-action-rec">→ ${r.action}</div>`:''}
     </div>`).join('');
 
-  // ── 정합성 — 문제·영향 지표·권장 조치 ──────────────────
-  const al = dashboard.audit;
-  const alOp = al.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('[점검보류]'));  // 운영 리스크만
-  $('auditList').innerHTML = al.length
-    ? al.map(a => {
-        if (a === '---') {
-          return `<div class="audit-section-divider"><span>시트 형식 확인 사항</span></div>`;
-        }
-        const isFmt = a.startsWith('[형식]');
-        const isInfo = a.startsWith('[정보]');
-        const isPending = a.startsWith('[점검보류]');
-        const text  = isFmt ? a.replace('[형식] ', '') : isInfo ? a.replace('[정보] ', '') : isPending ? a.replace('[점검보류] ', '') : a;
-        const icon  = isFmt ? '⚙' : isInfo ? 'ℹ' : isPending ? '⏳' : '⚑';
-        const cls   = isFmt || isInfo || isPending ? 'audit-action-item audit-fmt' : 'audit-action-item';
-        const rec   = isFmt
-          ? '→ 데이터 값은 계산 대체값으로 표시 중 · 시트 컬럼 형식 확인 권장'
-          : isInfo
-          ? '→ 참고 정보 · 원천 시트 정책에 따라 자동 제외'
-          : isPending
-          ? '→ 원천 점검 탭 재생성 완료 후 자동 해소 · 실적 원천 탭 직접 파싱은 유지'
-          : '→ 원본 시트 대조 · 입력값 검토 필요';
-        return `
-        <div class="${cls}">
-          <span class="audit-flag">${icon}</span>
-          <div class="audit-content">
-            <div class="audit-issue">${text}</div>
-            <div class="audit-action-rec">${rec}</div>
-          </div>
-        </div>`;
-      }).join('')
-    : '<div class="audit-item audit-ok">✓ 모든 수치가 정상 범위입니다</div>';
 
   // ── 포커스 패널 ──────────────────
   $('focusLabel').textContent = ent.name;
@@ -2203,6 +2195,20 @@ function renderInsights(ent) {
 }
 
 function usageValue(c) { return c.hasUsageData === false ? NaN : (c.utilization || 0); }
+
+// Reference values remain separate from official KPIs, comparisons and rankings.
+function usagePresentation(c) {
+  const partial = c.hasUsageData === false;
+  const reference = partial && c.observedUsage != null && c.mtdCapacity > 0
+    ? c.observedUsage / c.mtdCapacity * 100 : null;
+  return {
+    partial, reference,
+    label:partial ? (reference == null ? '—' : `참고 ${fmtP(reference)}`) : fmtP(c.utilization),
+    note:partial
+      ? reference == null ? '이용량 자료 확인 중' : `관측 ${fmtN(c.observedUsage)}회 / ${fmtN(c.usageMissingDays)}점포일 누락`
+      : `${fmtN(c.usage)}회 사용`
+  };
+}
 
 function computeScore(c) {
   if (c.hasUsageData === false || c.hasSalesData === false) return null;
@@ -2426,12 +2432,14 @@ function renderOpsUtilChart(ent) {
       datasets:[
         { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization),
           borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
-          fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4 }
+          fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4, spanGaps:false },
+        { type:'line', label:'참고 가동률 (일부 수신)', data:ms.map(m=>usagePresentation(m).reference),
+          showLine:false, pointRadius:5, pointStyle:'triangle', borderColor:PALETTE.amber, backgroundColor:PALETTE.amber }
       ]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{ display:false }, tooltip:TTdefaults },
+      plugins:{ legend:{ display:true, labels:{boxWidth:10} }, tooltip:TTdefaults },
       scales:{
         y:{ ticks:{callback:v=>`${v.toFixed(0)}%`, font:{size:10}}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
         x:{ grid:{display:false}, ticks:{font:{size:10}} }
@@ -2466,6 +2474,7 @@ function renderOpsUtilStats(ent) {
       </thead>
       <tbody>
         ${ms.map(m => {
+          if (m.hasUsageData === false) return `<tr class="reference-row"><td>${esc(m.month)}</td><td>${usagePresentation(m).label}</td><td>—</td><td>일부 수신</td></tr>`;
           const u    = m.utilization || 0;
           const diff = (u - 75).toFixed(1);
           const sign = diff >= 0 ? '+' : '';
@@ -2664,7 +2673,7 @@ function renderMrrTrendChart(ent) {
       plugins:{ legend:{position:'top',labels:{boxWidth:10,padding:12}}, tooltip:TTdefaults },
       scales:{
         val:{ position:'left', ticks:{callback:fmtA}, grid:{color:'#f0ebe3'} },
-        subs:{ position:'right', ticks:{callback:v=>`${Math.round(v)}명`}, grid:{display:false} },
+        subs:{ position:'right', ticks:{callback:v=>`${Math.round(v)}건`}, grid:{display:false} },
         pct:{ display:false },   // tooltip에서만 확인 (3축 축적 방지)
         x:{ grid:{display:false} }
       }
@@ -3156,7 +3165,7 @@ function renderHeroKpis(ent) {
   const items = [
     { label:'실결제매출', val: fmtS(c.gross), note: `실결제매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
     { label:'MRR',   val: hasSubscriptionData ? fmtS(c.mrr||0) : '—', note: hasSubscriptionData ? `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: c.hasMrrYoY ? (c.mrrYoY||0)>=0 : null },
-    { label:'가동률', val: fmtP(usageValue(c)), note: c.hasUsageData === false ? '원천 누락으로 산출 보류' : `${fmtN(c.usage||0)}회 사용`, good: (usageValue(c))>=70 },
+    { label:'가동률', val:usagePresentation(c).label, note:usagePresentation(c).note, good:c.hasUsageData === false ? null : c.utilization>=70 },
     { label:'이탈률', val: hasSubscriptionData ? fmtP(c.churn||0) : '—', note: hasSubscriptionData ? `해지 ${fmtN(c.cancelSubs||0)}건 / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: hasSubscriptionData ? (c.churn||0)<8 : null, invert:true },
     { label:'순증감', val: hasSubscriptionData ? `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}` : '—', note: hasSubscriptionData ? `신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: hasSubscriptionData ? (c.netAdds||0)>=0 : null },
     { label:'순매출 달성률', val: fmtP(c.achievement||0), note: `순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`, good: (c.achievement||0)>=100 }
@@ -3187,7 +3196,7 @@ function renderHeroKpis(ent) {
     : sourcePending ? '점검 보류' : '확인 불가';
   const sourceAgeDays = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? Math.max(0, Math.round((
-        Date.UTC(TODAY_YEAR, TODAY_MONTH - 1, TODAY_DAY)
+        Date.UTC(getKstDateParts().year, getKstDateParts().month - 1, getKstDateParts().day)
         - Date.UTC(sourceDate.getFullYear(), sourceDate.getMonth(), sourceDate.getDate())
       ) / 86400000))
     : null;
@@ -3219,25 +3228,10 @@ function renderHeroKpis(ent) {
   const storeStr  = ent.isAll ? _storeDesc : ent.name;
   const qStr      = state.quarter === 'all' ? '전체' : state.quarter;
 
-  // 정합성 — 운영 리스크만 카운트 (파싱 형식 오류는 별도)
-  const auditAll    = dashboard.audit || [];
-  const auditPendingCnt = auditAll.filter(a => a.startsWith('[점검보류]')).length;
-  const auditQualityCnt = auditAll.filter(a => a.startsWith('원천 ')).length;
-  const auditInfoCnt = auditAll.filter(a => a.startsWith('[정보]')).length;
-  const auditOpCnt  = auditAll.filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('[점검보류]') && !a.startsWith('원천 ')).length;
-  const auditFmtCnt = auditAll.filter(a => a.startsWith('[형식]')).length;
-  const auditClass  = auditOpCnt || auditQualityCnt ? 'warn' : (auditPendingCnt || auditFmtCnt ? 'info' : 'ok');
-  const auditText   = auditQualityCnt
-    ? `⚠ 데이터 품질 ${auditQualityCnt}건${auditOpCnt ? ` · 운영 ${auditOpCnt}건` : ''}${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}`
-    : auditOpCnt
-    ? `⚠ 운영 이슈 ${auditOpCnt}건${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}`
-    : auditPendingCnt
-      ? `⚙ 원천 점검 보류${auditFmtCnt ? ` · 형식 ${auditFmtCnt}건` : ''}${auditInfoCnt ? ` · 안내 ${auditInfoCnt}건` : ''}`
-      : auditFmtCnt
-        ? `⚙ 시트 형식 확인 ${auditFmtCnt}건`
-        : auditInfoCnt
-          ? `✓ 정합성 정상 · 안내 ${auditInfoCnt}건`
-          : '✓ 정합성 정상';
+  const auditQualityCnt = dashboard.dataQuality?.warnings?.length || 0;
+  const auditClass = sourcePending || auditQualityCnt ? 'warn' : 'ok';
+  const auditText = sourcePending ? '원천 점검 대기'
+    : auditQualityCnt ? `데이터 참고사항 ${auditQualityCnt}건` : '원천 점검 완료';
 
   // 연결 상태는 실제 로드 실패 여부, 데이터 최신성은 원천 매출 최신일로 별도 표시한다.
   const connectionIssue = sourceRefreshFailed || _failedSheets.size > 0;
@@ -3267,17 +3261,6 @@ function renderAlerts(ent) {
   if ((c.churn||0) > 10)         alerts.push({ lvl:'danger',  msg: `⚠ 이탈률 ${fmtP(c.churn||0)} — 긴급 해지 방어 캠페인 검토` });
   else if ((c.churn||0) > 6)     alerts.push({ lvl:'warn',    msg: `△ 이탈률 ${fmtP(c.churn||0)} — 경계 수준, 리텐션 점검 권장` });
   if ((c.refundRate||0) > 15)    alerts.push({ lvl:'warn',    msg: `△ 환불율 ${fmtP(c.refundRate||0)} — CS 이슈 점검 필요` });
-  // ★ 정합성 — 알림 센터에는 요약만 (상세는 정합성 카드에서 확인)
-  // 컬럼 매핑 관련 반복 경고를 건수 요약으로 통합
-  const auditOpItems = (dashboard.audit||[]).filter(a => a !== '---' && !a.startsWith('[형식]') && !a.startsWith('[정보]') && !a.startsWith('[점검보류]'));
-  if (auditOpItems.length) {
-    const mappingItems = auditOpItems.filter(a => a.includes('컬럼 매핑') || a.includes('동일값'));
-    const otherItems   = auditOpItems.filter(a => !a.includes('컬럼 매핑') && !a.includes('동일값'));
-    // 매핑 관련: 건수 요약 1줄로 통합
-    if (mappingItems.length) alerts.push({ lvl:'warn', msg: `⚑ 컬럼 매핑 확인 필요 ${mappingItems.length}건 — 정합성 카드 상세 확인` });
-    // 기타 운영 리스크: 개별 표시
-    otherItems.forEach(a => alerts.push({ lvl:'warn', msg: `⚑ ${a}` }));
-  }
 
   // 상태 도트 업데이트
   const dot = $('statusDot'), txt = $('statusText');
@@ -3934,7 +3917,7 @@ function renderSubscriptionPipeline(ent) {
     <div class="pipe-summary-card">
       <div>
         <div class="pipe-label">${last.status === 'mtd' ? '기준일' : '월말'} 매장PASS 유지 구독</div>
-        <div class="pipe-main-val">${fmtN(retained)}명</div>
+        <div class="pipe-main-val">${fmtN(retained)}건</div>
       </div>
       <div class="pipe-summary-note">${last.subscriptionSourceDate || last.month} 수신 기준</div>
     </div>
@@ -3950,7 +3933,7 @@ function renderSubscriptionPipeline(ent) {
         </div>
         <div class="pipe-bar-wrap">
           <div class="pipe-bar" style="width:${w}%;background:${s.color}88"></div>
-          <span class="pipe-val" style="color:${s.color}">${signVal}명</span>
+          <span class="pipe-val" style="color:${s.color}">${signVal}건</span>
         </div>
       </div>`;
     }).join('')}
@@ -3962,7 +3945,7 @@ function renderSubscriptionPipeline(ent) {
     const prev = ms[ms.length-2];
     const delta = (last.netAdds||0) - (prev.netAdds||0);
     const trend = delta >= 0 ? `<span style="color:#216552">▲ ${delta > 0 ? '+' : ''}${fmtN(delta)}</span>` : `<span style="color:#b24c58">▼ ${fmtN(delta)}</span>`;
-    el.innerHTML += `<div class="pipe-footer">순증감 ${(last.netAdds||0)>=0?'+':''}${fmtN(last.netAdds||0)}명 · 전월 대비 ${trend}</div>`;
+    el.innerHTML += `<div class="pipe-footer">순증감 ${(last.netAdds||0)>=0?'+':''}${fmtN(last.netAdds||0)}건 / 전월 대비 ${trend}</div>`;
   }
 }
 
@@ -4050,9 +4033,7 @@ function renderPaymentPanel(ent) {
       note:c.hasArpwData === false ? '사용 원천 누락 또는 기준일 불일치로 산출 보류' : '실결제매출에서 환불 차감 후', color:'green' },
     { label:'매장PASS ARPU', val:arpu>0?fmtS(arpu):'—',
       note:c.hasSubscriptionData ? `${arpuBasisLabel(c)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), color:'accent' },
-    { label:'목표 실현 단가', val:`${fmtN(UNIT_PRICE_TARGET)}원`,
-      note:`Capacity 기회금액 상한 기준 단가`, color:'amber' }
-  ];
+  ].filter(it => it.val !== '—');
 
   el.innerHTML = items.map(it => `
     <div class="pay-item ${it.color}">
@@ -4118,11 +4099,12 @@ function renderHeatmap(ent) {
     { key:'arpu',     label:'매장PASS ARPU', fmt:fmtS, inv:false },
     { key:'gross',    label:'실결제매출', fmt:fmtS,  inv:false }
   ];
-  const metrics = _hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore;
+  const metrics = (_hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore)
+    .filter(metric => activeStores.some(store => Number.isFinite(store[metric.key])));
 
   // 열별 min/max — 운영 매장 기준 정규화
   const cols = metrics.map(m=>{
-    const vals = activeStores.map(s=>s[m.key]||0);
+    const vals = activeStores.map(s=>s[m.key]).filter(Number.isFinite);
     return { min:Math.min(...vals), max:Math.max(...vals) };
   });
 
@@ -4162,8 +4144,9 @@ function renderHeatmap(ent) {
         const norm = max>min?(v-min)/(max-min):0.5;
         const {bg,text} = cellColor(norm, m.inv);
         // ★ 항상 내림차순 정렬 — inv:true(이탈률·손실 등)에서 rank 1 = 가장 위험한 매장
-        const rank = [...activeStores].sort((a,b)=>(b[m.key]||0)-(a[m.key]||0)).findIndex(st=>st.name===s.name)+1;
-        const rankLabel = m.inv ? `위험 ${rank}위 / ${activeStores.length}개 매장` : `${rank}위 / ${activeStores.length}개 매장`;
+        const ranked = activeStores.filter(store => Number.isFinite(store[m.key])).sort((a,b)=>b[m.key]-a[m.key]);
+        const rank = ranked.findIndex(st=>st.name===s.name)+1;
+        const rankLabel = m.inv ? `위험 ${rank}위 / ${ranked.length}개 매장` : `${rank}위 / ${ranked.length}개 매장`;
         // ★ 순위는 title(hover tooltip)로만 노출
         return `<div class="hm-cell" style="background:${bg};color:${text}" title="${rankLabel}">
           <span class="hm-cell-top">${m.fmt(v)}</span>
@@ -4245,6 +4228,7 @@ function renderTable(ent) {
       net:         agg.net          || 0,
       usage:       agg.usage        || 0,
       utilization: agg.utilization,
+      usageLabel:usagePresentation(agg).label,
       utilizationRaw,
       refundRate:  agg.refundRate   || 0,
       churn:       agg.churn        || 0,
@@ -4258,10 +4242,9 @@ function renderTable(ent) {
   // ★ v3: 파생 상태 계산 함수 — 실데이터 기반 다중 조건
   // 우선 점검 매장 로직과 동일 기준 사용
   function deriveStoreStatus(s) {
-    if (s.utilization == null) return { text:'자료 확인', cls:'warn' };
     if (s.opsStatus === '오픈 전') return { text:'오픈 전', cls:'open' };
     const ach      = s.achievement    || 0;
-    const util     = s.utilization    || 0;
+    const util     = s.utilization == null ? NaN : s.utilization;
     const utilRaw  = s.utilizationRaw || util;
     const refund   = s.refundRate     || 0;
     const churn    = s.churn          || 0;
@@ -4295,7 +4278,7 @@ function renderTable(ent) {
     if (util < 60 && utilRaw <= 100)            risks.push({ score:65,  tag:'저가동' });
 
     // 정상 매장 (리스크 없음)
-    if (!risks.length) return { text:'정상', cls:'good' };
+    if (!risks.length) return s.utilization == null ? {text:'이용량 참고',cls:'warn'} : { text:'정상', cls:'good' };
 
     // 점수 내림차순 정렬 후 상위 2개만 표시
     risks.sort((a,b) => b.score - a.score);
@@ -4321,7 +4304,7 @@ function renderTable(ent) {
     // 원천 MTD Capacity 기준 가동률
     const util = s.utilization||0;
     const utilRaw = s.utilizationRaw||0;
-    const utilCell = s.utilization == null ? '자료 부족' : fmtP(utilRaw || util);
+    const utilCell = s.usageLabel;
 
     // ★ v3: 파생 상태 표시 (시트 판정 대신 실데이터 기반)
     const derivedSt = deriveStoreStatus(s);
@@ -4957,35 +4940,40 @@ function renderInlineStoreDetail(ent) {
 
 /* ── 19. 전체 렌더 ──────────────────────────────────────────── */
 function renderReviewed(renderer, ent, ids, complete) {
+  const standalone = new Set(['scoreChart','healthChart','seasonChart','capacityPanel','detailGrid']);
   for (const id of ids) {
     const element = $(id);
     if (!element) continue;
-    const host = element.tagName === 'CANVAS' ? element.parentElement : element;
-    let note = $(`${id}-quality-note`);
-    if (!note) {
-      note = document.createElement('p');
-      note.id = `${id}-quality-note`;
-      note.className = 'quality-note';
-      note.textContent = '선택 기간 또는 비교 대상의 원천이 불완전하여 이 분석은 보류합니다. 원천 수신 상태와 데이터 품질 점검 내용을 확인하세요. 누락을 0으로 간주하지 않습니다.';
-      host.before(note);
-    }
-    note.hidden = complete;
+    const host = id === 'capacityPanel' ? element.closest('section') || element
+      : standalone.has(id) ? element.closest('article') || element : element;
     host.hidden = !complete;
+    if (id === 'detailGrid' && $('detailTitle')) $('detailTitle').hidden = !complete;
   }
   if (complete) renderer(ent);
 }
 
 function renderSourceCoverage(ent) {
   const panel = $('sourceCoverage');
-  if (!panel) return;
+  const reference = $('dataReference');
+  if (!panel || !reference) return;
   const stores = ent.isAll ? getActiveStores() : [{name:ent.name,months:ent.months}];
-  const rows = stores.flatMap(store => filterMonths(store.months).filter(m=>m.hasUsageData===false || m.hasSalesData===false)
+  const rows = stores.flatMap(store => filterMonths(store.months).filter(m=>m.hasUsageData===false)
     .map(m=>({name:store.name,month:m.month,quality:m.usageQuality,observed:m.observedUsage})));
+  const warnings = dashboard.dataQuality?.warnings || [];
+  const pending = dashboard.dataQuality?.sourceCheckPending;
+  reference.hidden = !rows.length && !warnings.length && !pending;
+  $('qualitySummary').textContent = rows.length
+    ? `데이터 참고사항 / 이용량 ${rows.length}개 매장-월 일부 수신 / 상세 보기`
+    : pending ? '데이터 참고사항 / 원천 점검 대기 / 상세 보기'
+    : `데이터 참고사항 ${warnings.length}건 / 상세 보기`;
   panel.hidden = rows.length === 0;
-  if (!rows.length) return;
-  panel.innerHTML = `<h2>선택 기간 원천 수신 상태</h2><p>아래 구간의 관측 사용량은 수신된 날짜의 합계입니다. 완전한 기간 실적이 아니므로 가동률, 단가, 기회금액과 관련 종합 점수는 표시하지 않습니다. 매출과 구독 등 별도 검증된 지표는 유지합니다.</p>
+  panel.innerHTML = rows.length ? `<p>관측 사용량은 수신분 합계입니다. 참고 가동률은 관측 사용량을 선택 기간 전체 Capacity로 나눈 값으로, 완전 실적이나 순위에 사용하지 않습니다. 누락분은 추정하지 않습니다.</p>
     <div class="coverage-grid"><strong>매장 / 월</strong><strong>수신일 / 기대일</strong><strong>관측 사용(회)</strong>
-    ${rows.map(r=>`<span>${r.name} / ${r.month}</span><span>${r.quality?.received ?? '—'} / ${r.quality?.expected ?? '—'}</span><span>${r.observed == null ? '—' : fmtN(r.observed)}</span>`).join('')}</div>`;
+    ${rows.map(r=>`<span>${esc(r.name)} / ${esc(r.month)}</span><span>${r.quality?.received ?? '—'} / ${r.quality?.expected ?? '—'}</span><span>${r.observed == null ? '—' : fmtN(r.observed)}</span>`).join('')}</div>
+    <p class="sub">자료가 부족한 종합 점수, 순위, 기회금액 및 비교 분석은 표시하지 않습니다. 확인 가능한 매출과 구독 지표는 유지합니다.</p>` : '';
+  $('auditList').innerHTML = warnings.map(c=>`<div class="quality-item"><strong>${esc(c.name)}</strong><span>${esc(c.value || c.status)}</span></div>`).join('') +
+    (pending ? '<p>원천 최종 점검이 완료되지 않았습니다.</p>' : '') +
+    '<a class="source-link" href="https://docs.google.com/spreadsheets/d/1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo/edit#gid=830227479" target="_blank" rel="noopener noreferrer">원천 데이터 점검 열기</a>';
 }
 
 function renderAll() {
@@ -5008,7 +4996,7 @@ function renderAll() {
   renderReviewed(renderScoreChart,ent,['scoreChart'],usageComplete && portfolioComplete);
   renderSubscriptionChart(ent);
   renderOpsUtilChart(ent);
-  renderReviewed(renderOpsUtilStats,ent,['opsUtilStats'],usageComplete);
+  renderOpsUtilStats(ent);
   renderOpsChurnChart(ent);
   renderOpsChurnStats(ent);
   renderOpsArpuChart(ent);
@@ -5022,7 +5010,6 @@ function renderAll() {
   renderMomentumChart(ent);
   renderMixChart(ent);
   renderSubscriptionPipeline(ent);
-  renderChurnClassification(ent);
   renderReviewed(renderCapacityPanel,ent,['capacityPanel'],usageComplete);
   renderReviewed(renderSeasonChart,ent,['seasonChart'],usageComplete && ent.current.usageComparable !== false);
   renderPaymentPanel(ent);

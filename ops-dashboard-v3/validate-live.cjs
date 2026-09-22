@@ -37,7 +37,7 @@ function createDashboardApi() {
       parseStore, parseOps, parseOverall, applyPortfolioCouponDiscounts,
       parseSummary, aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
       runAudit, buildCapacityData,
-      sourceDateKey, isSourceCheckPending, dateContract,
+      sourceDateKey, isSourceCheckPending, dateContract, usagePresentation,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
       setState: value => { state = value; }
@@ -308,12 +308,17 @@ async function main() {
     .map(row => Number(row[1])));
   overall.forEach(month => {
     const rows = rawByMonth.get(month.monthNum) || [];
+    const qualityRows = (sheets.usageQuality || []).slice(1).filter(row =>
+      Number(row[1]) === month.monthNum && storeNames.includes(String(row[0])) &&
+      row[8] !== 'PREOPEN' && row[8] !== 'FUTURE');
     const sum = key => rows.reduce((total, row) => total + rawNumber(row, key), 0);
     const canonical = canonicalFinanceByMonth.get(month.monthNum);
     const checks = {
       gross: sum('총매출_2026'),
       net: sum('순매출_2026'),
       usage: missingUsageMonths.has(month.monthNum) ? null : sum('총사용_2026'),
+      observedUsage: qualityRows.reduce((total, row) => total + Number(row[13] || 0), 0),
+      usageMissingDays: qualityRows.reduce((total, row) => total + Number(row[4] || 0), 0),
       retained: canonical?.retained || 0,
       newSubs: canonical?.newSubs || 0,
       cancelSubs: canonical?.cancelSubs || 0,
@@ -327,6 +332,11 @@ async function main() {
       if (!metricClose(actual, expected)) discrepancies.push({ month: month.month, key, actual, expected });
     });
     if (missingUsageMonths.has(month.monthNum)) {
+      const reference = api.usagePresentation(month).reference;
+      const expectedReference = checks.mtdCapacity > 0 ? checks.observedUsage / checks.mtdCapacity * 100 : null;
+      if (!metricClose(reference, expectedReference, true)) {
+        discrepancies.push({month:month.month, key:'referenceUtilization', actual:reference, expected:expectedReference});
+      }
       for (const key of ['usage', 'utilization', 'contributionRevenue', 'allPassAttributedRevenue']) {
         if (month[key] !== null) missingnessIssues.push({month:month.month, key, issue:'incomplete source must remain null'});
       }
@@ -399,7 +409,7 @@ async function main() {
   });
 
   const periods = {};
-  for (const period of ['all', 'H1', 'Q1', 'Q2', 'Q3']) {
+  for (const period of ['all', 'H1', 'H2', 'Q1', 'Q2', 'Q3']) {
     api.setState({ quarter: period, store: 'all' });
     const months = api.filterMonths(overall);
     const portfolio = api.aggMonths(months) || {};
@@ -423,6 +433,9 @@ async function main() {
       sameStoreNetYoY: portfolio.netYoY || 0,
       totalNetGrowth: portfolio.totalNetGrowth || 0,
       utilization: portfolio.utilization ?? null,
+      observedUsage: portfolio.observedUsage ?? null,
+      referenceUtilization: api.usagePresentation(portfolio).reference,
+      usageMissingDays: portfolio.usageMissingDays ?? null,
       churn: portfolio.churn || 0,
       mrr: portfolio.mrr || 0,
       retained: portfolio.retained || 0,
@@ -442,8 +455,8 @@ async function main() {
     ['totalNet', cumulativePortfolio.net, false],
     ['achievement', cumulativePortfolio.achievement, true],
       ['grossAchievement', cumulativePortfolio.grossAchievement, true],
-      ['contributionRevenue', rawRows.reduce((sum,row)=>sum+rawNumber(row,'운영기여매출_2026'),0), false],
-      ['allPassAttributedRevenue', rawRows.reduce((sum,row)=>sum+rawNumber(row,'올패스운영귀속매출_2026'),0), false],
+      ['contributionRevenue', cumulativePortfolio.contributionRevenue, false],
+      ['allPassAttributedRevenue', cumulativePortfolio.allPassAttributedRevenue, false],
     ['refundRate', cumulativePortfolio.refundRate, true],
     ['sameStoreNetYoY', cumulativePortfolio.netYoY, true],
     ['totalNetGrowth', cumulativePortfolio.totalNetGrowth, true]
@@ -463,6 +476,9 @@ async function main() {
       String(row[0]).includes(labels[summaryField]) && /억원$/.test(String(row[1])))?.[1];
     const decimals = amountCell ? (String(amountCell).match(/\.(\d+)/)?.[1].length || 0) : null;
     const roundingTolerance = decimals === null ? 0 : 0.5 * 1e8 / 10 ** decimals;
+    const sourceHold = labels[summaryField] && summaryRows.some(row =>
+      String(row[0]).includes(labels[summaryField]) && /귀속 보류/.test(String(row[1])));
+    if (expected === null && actual === null && sourceHold) return;
     if (actual === null || actual === undefined) {
       summaryDiscrepancies.push({ field:summaryField, issue:'missing required Summary value', expected });
     } else if (!metricClose(actual, expected, percentage) && Math.abs(actual-expected) > roundingTolerance) {

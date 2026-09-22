@@ -77,6 +77,46 @@ test('compact Summary monetary units retain won scale',()=>{
   assert.equal(summary.contributionRevenue,4775000000);
 });
 
+test('typed hold text never becomes a monetary amount or a percentage',()=>{
+  const api=createDashboardApi();
+  const result=api.parseSummary([['누적 운영기여매출(환불 전)','귀속 보류\n15점포일 누락'],
+    ['가동률','참고 42.7%\n7점포일 누락']]);
+  assert.equal(result.contributionRevenue,null);
+  assert.equal(result.avgUtilization,null);
+});
+
+test('previous-result labels do not turn passed checks and zero blockers into warnings',()=>{
+  const api=createDashboardApi();
+  api.setSourceSnapshot({sheets:{cfg:[['dashboard_build_status','success'],['dashboard_run_id','run'],
+    ['dashboard_audit_run_id','run'],['dashboard_audit_blocking',0]]}});
+  const result=api.parseDataQuality([['점검 항목','상태','기준/값'],
+    ['대시보드 빌드 상태','주의','생성 완료. 감사 실행본/차단 오류를 함께 확인'],
+    ['차단 오류','전회 결과','0건'],['참고 경고','전회 결과','4건'],
+    ['Summary 수식','전회 결과','검증 통과'],['2026 쿠폰 ID 대사','전회 결과','[주의] 쿠폰 메타 누락'],
+    ['일별 원천 정합성','전회 결과','누락 30 / 오류 0 매장-월']]);
+  assert.equal(result.auditCurrent,true);
+  assert.deepEqual(Array.from(result.warnings,c=>c.name),['2026 쿠폰 ID 대사','일별 원천 정합성']);
+});
+
+test('real blockers and failed previous checks remain actionable',()=>{
+  const api=createDashboardApi();
+  const result=api.parseDataQuality([['점검 항목','상태','기준/값'],
+    ['차단 오류','전회 결과','2건'],['Summary 수식','전회 결과','검증 실패'],
+    ['검증 상세'],['등급','위치','메시지'],['위험','fact_monthly','필수 열 누락']]);
+  assert.equal(result.warnings.length,3);
+});
+
+test('partial reference utilization never replaces official utilization or fabricates zero',()=>{
+  const api=createDashboardApi();
+  const row={hasUsageData:false,observedUsage:700,mtdCapacity:1000,usageMissingDays:1,utilization:null};
+  const display=api.usagePresentation(row);
+  assert.equal(display.label,'참고 70.0%'); assert.equal(row.utilization,null);
+  assert.equal(api.usagePresentation({...row,observedUsage:null}).reference,null);
+  assert.equal(api.usagePresentation({...row,observedUsage:0}).reference,0);
+  api.setState({quarter:'H2',store:'all'});
+  assert.deepEqual(Array.from(api.filterMonths([{monthNum:6,gross:1},{monthNum:7,gross:1},{monthNum:9,gross:1}]),m=>m.monthNum),[7,9]);
+});
+
 function usageQuality(status, received, expected=9) {
   return [['매장','월','기대일','수신일','누락일','중복행','잘못된 값','매출 분해 불일치','품질상태','관측 이용량'],
     ['일산',month,expected,received,expected-received,0,0,0,status,700]];

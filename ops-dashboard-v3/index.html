@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20260918">
+  <link rel="stylesheet" href="./style.css?v=20260922">
   <!-- 인증 가드: 쿠키 없이 직접 접근 시 로그인 페이지로 이동 -->
   <script>
     (function() {
@@ -66,6 +66,7 @@
     <div class="toggle" id="quarterToggle">
       <button data-q="all" class="active">전체</button>
       <button data-q="H1">H1</button>
+      <button data-q="H2">H2</button>
       <button data-q="Q1">Q1</button>
       <button data-q="Q2">Q2</button>
       <button data-q="Q3">Q3</button>
@@ -106,7 +107,13 @@
     </div>
   </section>
 
-  <section id="sourceCoverage" class="panel" hidden aria-live="polite"></section>
+  <details id="dataReference" class="data-reference" hidden>
+    <summary id="qualitySummary">데이터 참고사항 / 상세 보기</summary>
+    <div class="data-reference-body">
+      <div id="sourceCoverage" hidden></div>
+      <div id="auditList"></div>
+    </div>
+  </details>
   <section class="gauge-grid">
     <article class="panel gauge-panel">
       <div class="gauge-badge" id="gbadge-ach"></div>
@@ -155,10 +162,6 @@
       <h2><span class="section-icon rose">⚠</span>우선 리스크</h2>
       <div id="riskList" style="display:flex;flex-direction:column;gap:7px"></div>
     </article>
-    <article class="panel">
-      <h2><span class="section-icon navy">✓</span>데이터 정합성</h2>
-      <div id="auditList" style="display:flex;flex-direction:column;gap:4px"></div>
-    </article>
   </section>
 
   <div class="chart-master-grid">
@@ -175,7 +178,6 @@
       <h2>구독 엔진</h2>
       <p class="sub">유지·신규·해지·순증감 월별 흐름</p>
       <div class="chart lg"><canvas id="subscriptionChart"></canvas></div>
-      <div id="churnClassPanel" style="margin-top:16px"></div>
     </article>
     <article class="panel col-6">
       <!-- ① 가동률 추이 -->
@@ -360,6 +362,6 @@
     </article>
   </section>
 </div>
-<script src="./app.js?v=20260918"></script>
+<script src="./app.js?v=20260922"></script>
 </body>
 </html>
