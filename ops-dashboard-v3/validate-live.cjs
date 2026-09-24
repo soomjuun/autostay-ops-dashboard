@@ -37,7 +37,7 @@ function createDashboardApi() {
       parseStore, parseOps, parseOverall, applyPortfolioCouponDiscounts,
       parseSummary, aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
       runAudit, buildCapacityData,
-      sourceDateKey, isSourceCheckPending, dateContract, usagePresentation,
+      sourceDateKey, isSourceCheckPending, dateContract, usagePresentation, utilizationDataset, sparkline,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
       setState: value => { state = value; }
@@ -371,12 +371,14 @@ async function main() {
         return;
       }
       storeFields.forEach(([field, percentage]) => {
-        if (!metricClose(actual[field], expected[field], percentage)) {
+        const displayed = field === 'usage' ? expected.usage ?? expected.observedUsage
+          : field === 'utilization' ? api.usagePresentation(expected).value : expected[field];
+        if (!metricClose(actual[field], displayed, percentage)) {
           storeTabDiscrepancies.push({
             key:`${store.name}|${expected.monthNum}`,
             field,
-            actual:Number(actual[field] || 0),
-            expected:Number(expected[field] || 0)
+            actual:actual[field] ?? null,
+            expected:displayed ?? null
           });
         }
       });
@@ -455,8 +457,8 @@ async function main() {
     ['totalNet', cumulativePortfolio.net, false],
     ['achievement', cumulativePortfolio.achievement, true],
       ['grossAchievement', cumulativePortfolio.grossAchievement, true],
-      ['contributionRevenue', cumulativePortfolio.contributionRevenue, false],
-      ['allPassAttributedRevenue', cumulativePortfolio.allPassAttributedRevenue, false],
+      ['contributionRevenue', cumulativePortfolio.contributionRevenue ?? cumulativePortfolio.observedContributionRevenue, false],
+      ['allPassAttributedRevenue', cumulativePortfolio.allPassAttributedRevenue ?? cumulativePortfolio.observedAllPassAttributedRevenue, false],
     ['refundRate', cumulativePortfolio.refundRate, true],
     ['sameStoreNetYoY', cumulativePortfolio.netYoY, true],
     ['totalNetGrowth', cumulativePortfolio.totalNetGrowth, true]
@@ -541,10 +543,11 @@ async function main() {
     const derived = overall[index] || {};
     const differs = [
       ['gross', 1], ['net', 1], ['usage', 1], ['churn', 0.05], ['arpu', 1]
-    ].some(([key, absoluteTolerance]) =>
-      Math.abs(Number(legacy[key] || 0) - Number(derived[key] || 0)) >
-      Math.max(absoluteTolerance, Math.abs(Number(derived[key] || 0)) * 0.001)
-    );
+    ].some(([key, absoluteTolerance]) => {
+      const expected = key === 'usage' ? derived.usage ?? derived.observedUsage : derived[key];
+      return Math.abs(Number(legacy[key] || 0) - Number(expected || 0)) >
+        Math.max(absoluteTolerance, Math.abs(Number(expected || 0)) * 0.001);
+    });
     return count + (differs ? 1 : 0);
   }, 0);
   const result = {

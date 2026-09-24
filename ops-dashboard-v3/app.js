@@ -630,13 +630,14 @@ function sourceMonthDate(monthNum, latest) {
 
 function sourceQuality(key, storeName, monthNum) {
   const rows = sourceSnapshot?.sheets?.[key];
-  if (!rows) return { complete:true, observed:null, status:'LEGACY' };
+  if (!rows) return { complete:true, usable:true, observed:null, status:'LEGACY' };
   const headers = rows[0] || [];
   const get = (row, name) => row[headers.indexOf(name)];
   const row = rows.slice(1).find(row => get(row,'매장') === storeName && Number(get(row,'월')) === monthNum);
   const status = row ? get(row,'품질상태') : 'MISSING';
   const clean = row && ['중복행','잘못된 값','매출 분해 불일치'].every(key => Number(get(row,key)) === 0);
   return { complete:status === 'OK' || status === 'PREOPEN', status,
+    usable:status === 'PREOPEN' || Boolean(clean && num(get(row,'수신일')) > 0),
     expected:row ? num(get(row,'기대일')) : 0, received:row ? num(get(row,'수신일')) : 0,
     observed:clean && num(get(row,'수신일')) > 0 ? num(get(row,'관측 이용량')) : null };
 }
@@ -649,6 +650,11 @@ function applySourceQuality(item, storeName) {
   const stores = Object.values(GID.stores).map(s=>s.name);
   const sharedComplete = stores.every(name => sourceQuality('usageQuality',name,item.monthNum).complete &&
     sourceQuality('salesQuality',name,item.monthNum).complete);
+  const sharedUsable = stores.every(name => sourceQuality('usageQuality',name,item.monthNum).usable &&
+    sourceQuality('salesQuality',name,item.monthNum).usable);
+  const attributionAvailable = sharedUsable && item.salesSourceDate && item.salesSourceDate === item.usageSourceDate;
+  item.observedContributionRevenue = attributionAvailable ? item.contributionRevenue : null;
+  item.observedAllPassAttributedRevenue = attributionAvailable ? item.allPassAttributedRevenue : null;
   item.hasUsageData = usage.complete;
   item.hasSalesData = sales.complete;
   item.usageQuality = usage;
@@ -998,6 +1004,8 @@ function aggregatePortfolioMonths(stores) {
       hasArpwData:records.every(row=>row.hasArpwData!==false),
       salesComparable:records.every(row=>row.salesComparable!==false),
       contributionRevenue:records.every(row=>row.contributionRevenue!=null) ? sum('contributionRevenue') : null,
+      observedContributionRevenue:records.every(row=>row.observedContributionRevenue!=null) ? sum('observedContributionRevenue') : null,
+      observedAllPassAttributedRevenue:records.every(row=>row.observedAllPassAttributedRevenue!=null) ? sum('observedAllPassAttributedRevenue') : null,
       allPassAttributedRevenue:records.every(row=>row.allPassAttributedRevenue!=null) ? sum('allPassAttributedRevenue') : null,
       gross, grossPrev,
       comparableGross, comparableGrossPrev,
@@ -1106,6 +1114,8 @@ function aggMonths(months) {
     salesSourceDate:last.salesSourceDate || null,
     usageSourceDate:last.usageSourceDate || null,
     contributionRevenue:months.every(m=>m.contributionRevenue!=null) ? months.reduce((s,m)=>s+m.contributionRevenue,0) : null,
+    observedContributionRevenue:months.every(m=>m.observedContributionRevenue!=null) ? months.reduce((s,m)=>s+m.observedContributionRevenue,0) : null,
+    observedAllPassAttributedRevenue:months.every(m=>m.observedAllPassAttributedRevenue!=null) ? months.reduce((s,m)=>s+m.observedAllPassAttributedRevenue,0) : null,
     allPassAttributedRevenue:months.every(m=>m.allPassAttributedRevenue!=null) ? months.reduce((s,m)=>s+m.allPassAttributedRevenue,0) : null,
     target:t.target, gross:t.gross, grossPrev:t.grossPrev, net:t.net, netPrev:t.netPrev,
     grossYoY: t.comparableGrossPrev?(t.comparableGross-t.comparableGrossPrev)/t.comparableGrossPrev*100:0,
@@ -1296,6 +1306,15 @@ function parseSummary(rows) {
     }
     return null;
   };
+  // Only numeric cumulative cells use the explicitly declared display unit.
+  const getAmount = keys => {
+    const scale = /누적 금액:\s*억원/.test(tx(map.get('단위/결측 안내')?.[1])) ? 1e8 : 1;
+    for (const key of keys) {
+      const value = get([key]);
+      if (value != null) return value * (key.startsWith('누적 ') && typeof map.get(key)?.[1] === 'number' ? scale : 1);
+    }
+    return null;
+  };
   const getPct = (keys, col=1) => {
     for (const k of keys) {
       const r = map.get(k);
@@ -1318,11 +1337,11 @@ function parseSummary(rows) {
     ? subscriptionSummaryText.split('/').map(num)
     : [];
   return {
-    totalTarget:  get(['누적 목표매출','목표매출 합계']),
-    totalGross:   get(['누적 실결제매출(구 총매출)','누적 실결제매출','실결제매출(구 총매출)','실결제매출','누적 총매출','총매출','매출합계','Total Revenue','total_gross']),
-    totalNet:     get(['누적 순매출','순매출','Net Revenue']),
-    contributionRevenue: get(['누적 운영기여매출(환불 전)']),
-    allPassAttributedRevenue: get(['누적 올패스 운영귀속매출(환불 전)']),
+    totalTarget:  getAmount(['누적 목표매출','목표매출 합계']),
+    totalGross:   getAmount(['누적 실결제매출(구 총매출)','누적 실결제매출','실결제매출(구 총매출)','실결제매출','누적 총매출','총매출','매출합계','Total Revenue','total_gross']),
+    totalNet:     getAmount(['누적 순매출','순매출','Net Revenue']),
+    contributionRevenue: getAmount(['누적 운영기여매출(환불 전)']),
+    allPassAttributedRevenue: getAmount(['누적 올패스 운영귀속매출(환불 전)']),
     achievement:  getPct(['누적 순매출 달성률(대표)','누적 달성률(순매출)','누적 순매출 달성률']),
     grossAchievement: getPct(['누적 실결제매출 달성률(보조)','누적 실결제매출 달성률']),
     refundRate: getPct(['누적 환불율','누적 환불률']),
@@ -1696,12 +1715,12 @@ function getEntity() {
 }
 
 /* ── 10. GAUGE ──────────────────────────────────────────────── */
-function makeGauge(wrapId, valId, subId, score, valText, subText) {
+function makeGauge(wrapId, valId, subId, score, valText, subText, reference = false) {
   const wrap = $(wrapId);
   if (!wrap) return;
   const r = 80, cx = 100, cy = 105, perim = Math.PI * r;
   const s = Math.max(0, Math.min(100, score));
-  const color = s >= 72 ? '#216552' : s >= 45 ? '#c07b48' : '#b24c58';
+  const color = reference ? '#c07b48' : s >= 72 ? '#216552' : s >= 45 ? '#c07b48' : '#b24c58';
   const trackColor = '#f0ebe3';
   const theta = Math.PI * (1 - s/100);
   const nx = (cx + r * Math.cos(theta)).toFixed(1);
@@ -1758,7 +1777,8 @@ function renderGauges(ent) {
   // ★ 실제 값 보존: 게이지 호(arc) 각도는 100% 기준으로 클램프하되,
   //   표시 숫자는 실제 값(>100% 가능)을 그대로 보여줌
   const achRaw  = c.achievement||0;
-  const utilRaw = c.hasUsageData === false ? 0 : usageValue(c);
+  const utilDisplay = usagePresentation(c);
+  const utilRaw = utilDisplay.value ?? 0;
   const ach  = Math.min(100, achRaw);
   const util = Math.min(100, utilRaw);
   const churnH = hasSubscriptionData ? Math.max(0, 100 - ((c.churn||0)/12)*100) : 50;
@@ -1813,8 +1833,8 @@ function renderGauges(ent) {
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
     util, usagePresentation(c).label, c.hasUsageData === false
       ? usagePresentation(c).note
-      : `총사용 ${fmtN(c.usage||0)}회 / 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}회${periodLabel}`);
-  if (c.hasUsageData === false) $('gsvg-util').innerHTML = '';
+      : `총사용 ${fmtN(c.usage||0)}회 / 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}회${periodLabel}`, utilDisplay.partial);
+  if (utilDisplay.value == null) $('gsvg-util').innerHTML = '';
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
     churnH, hasSubscriptionData ? fmtP(c.churn||0) : '—', !hasSubscriptionData
       ? `${subscriptionBasisLabel(c)}${periodLabel}`
@@ -1860,7 +1880,7 @@ const KPI_TOOLTIPS = {
   '실결제매출':  { formula:'환불 차감 전 실결제 기준 매출. 목표 달성 판단은 순매출 달성률을 우선 적용', benchmark:'실결제매출 달성률은 보조 지표' },
   '순매출':  { formula:'순매출 = 실결제매출 − 환불', benchmark:'정상가 GMV는 원천 미보유, 환불율 < 5%' },
   'MRR':    { formula:'활성 구독 기반 반복매출 런레이트. 전체는 단일 PASS+ALL PASS, 매장별은 단일 PASS 기준', benchmark:'YoY +10% 이상 = 성장 안정' },
-  '가동률':  { formula:'총사용 ÷ 원천 MTD Capacity\n마감월은 월 Capacity, 미마감월은 유효 경과일 기준 MTD Capacity 사용', benchmark:'≥ 80% 우수 · 65~80% 양호 · < 65% 주의' },
+  '가동률':  { formula:'총사용 ÷ 원천 MTD Capacity\n마감월은 월 Capacity, 미마감월은 유효 경과일 기준 MTD Capacity 사용', benchmark:'시트 기준: 70% 미만 주의. 일부 수신 잠정값은 판정 제외' },
   '이탈률':  { formula:'해지 건수 ÷ 구독자-월 노출량 × 100. 진행월은 경과일/월일수로 월환산', benchmark:'< 4% 건강 · 4~8% 경계 · > 8% 위험' },
   '순증감':  { formula:'신규 구독 − 해지 구독', benchmark:'≥ 0 구독 성장 · < 0 구독 감소' },
   'ARR':    { formula:'MRR × 12 (연간 반복 매출)', benchmark:'YoY +20% 이상 = 고성장' },
@@ -1885,7 +1905,7 @@ function renderKpis(ent) {
   const grossTrend = ms.map(m=>m.gross);
   const netTrend   = ms.map(m=>m.net);
   const mrrTrend   = ms.map(m=>m.hasSubscriptionData === false ? null : m.mrr);
-  const utilTrend  = ms.map(m=>m.utilization);
+  const utilTrend  = ms.map(m=>usagePresentation(m).value);
   const churnTrend = ms.map(m=>m.hasSubscriptionData === false ? null : m.churn);
   const addsTrend  = ms.map(m=>m.hasSubscriptionData === false ? null : m.netAdds);
 
@@ -1924,7 +1944,7 @@ function renderKpis(ent) {
     { label:'가동률',  val:usagePresentation(c).label,
       delta:null, deltaSuffix:'%p',
       sub:usagePresentation(c).note,
-      color:'amber', spark:c.hasUsageData === false ? null : utilTrend, sparkColor:'#c07b48',
+      color:'amber', spark:utilTrend, sparkColor:'#c07b48', sparkPartial:ms.map(m=>m.hasUsageData === false),
       projection: c.hasUsageData !== false && (c.achievement||0)>0 && (c.achievement||0)<100
         ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(usageValue(c)) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
     { label:'이탈률',  val:hasSubscriptionData ? fmtP(c.churn||0) : '—',
@@ -1954,7 +1974,7 @@ function renderKpis(ent) {
       ? `${(k.delta||0)>=0?'▲':'▼'} ${k.isRaw ? fmtN(absD) : absD.toFixed(1)}${suffix} ${k.deltaContext || _kpiMomCtx}`
       : '';
     const prog = k.prog != null ? `<div class="kpi-progress"><div class="kpi-bar ${k.color}" style="width:${Math.min(100,k.prog||0)}%"></div></div>` : '';
-    const spark = k.spark && k.spark.some(v=>v>0) && k.spark.length>=2 ? `<div class="kpi-spark">${sparkline(k.spark, k.sparkColor)}</div>` : '';
+    const spark = k.spark && k.spark.length>=2 ? `<div class="kpi-spark">${sparkline(k.spark, k.sparkColor, 28, 80, k.sparkPartial)}</div>` : '';
     const proj = k.projection ? `<div class="kpi-projection">${k.projection}</div>` : '';
     return `<div class="kpi ${k.color}">
       <div class="kpi-label">${k.label}${kpiTooltipIcon(k.label)}</div>
@@ -2041,8 +2061,10 @@ function renderInsights(ent) {
   const periodRangeLabel = ms.length > 1 ? `${firstM}~${lastPeriodLabel}` : lastPeriodLabel;
   const _insActiveN = getActiveOpsStores().length;
   const summaryNotes = [];
-  if (c.contributionRevenue != null) {
-    summaryNotes.push(`<strong>운영기여매출 (보조)</strong><span>${fmtS(c.contributionRevenue)} / 올패스 운영귀속 ${fmtS(c.allPassAttributedRevenue)} / 환불 전 사용량 귀속 관리값</span>`);
+  const contribution = c.contributionRevenue ?? c.observedContributionRevenue;
+  if (contribution != null) {
+    const provisional = c.contributionRevenue == null;
+    summaryNotes.push(`<strong>운영기여매출 (${provisional ? '잠정 / 보조' : '보조'})</strong><span>${fmtS(contribution)} / 올패스 운영귀속 ${fmtS(c.allPassAttributedRevenue ?? c.observedAllPassAttributedRevenue)} / 환불 전 사용량 귀속 관리값${provisional ? ' / 공동 모수 일부 누락' : ''}</span>`);
   }
   if (c.salesSourceDate || c.usageSourceDate) {
     summaryNotes.push(`<strong>원천 기준일</strong><span>매출 ${c.salesSourceDate || '미수신'} / 사용 ${c.usageSourceDate || '미수신'} / 구독 ${c.subscriptionSourceDate || '미수신'}</span>`);
@@ -2202,11 +2224,26 @@ function usagePresentation(c) {
   const reference = partial && c.observedUsage != null && c.mtdCapacity > 0
     ? c.observedUsage / c.mtdCapacity * 100 : null;
   return {
-    partial, reference,
-    label:partial ? (reference == null ? '—' : `참고 ${fmtP(reference)}`) : fmtP(c.utilization),
+    partial, reference, value:partial ? reference : c.utilization ?? null,
+    label:partial ? (reference == null ? '—' : `잠정 ${fmtP(reference)}`) : fmtP(c.utilization),
     note:partial
       ? reference == null ? '이용량 자료 확인 중' : `관측 ${fmtN(c.observedUsage)}회 / ${fmtN(c.usageMissingDays)}점포일 누락`
       : `${fmtN(c.usage)}회 사용`
+  };
+}
+
+function utilizationDataset(months) {
+  const points = months.map(usagePresentation);
+  const provisionalSegment = ctx => points[ctx.p0DataIndex]?.partial || points[ctx.p1DataIndex]?.partial;
+  return {
+    type:'line', label:points.some(p=>p.partial && p.value != null) ? '가동률 % (잠정: 점선)' : '가동률 %',
+    data:points.map(p=>p.value), borderColor:PALETTE.green, borderWidth:2.5,
+    pointRadius:4, pointStyle:points.map(p=>p.partial ? 'triangle' : 'circle'),
+    pointBackgroundColor:points.map(p=>p.partial ? PALETTE.amber : PALETTE.green),
+    pointBorderColor:points.map(p=>p.partial ? PALETTE.amber : PALETTE.green),
+    segment:{borderColor:ctx=>provisionalSegment(ctx) ? PALETTE.amber : PALETTE.green,
+      borderDash:ctx=>provisionalSegment(ctx) ? [5,4] : []},
+    fill:false, tension:0.25, spanGaps:false
   };
 }
 
@@ -2402,13 +2439,13 @@ function renderSubscriptionChart(ent) {
 /* ① 가동률 추이 */
 function renderOpsUtilChart(ent) {
   const ms = ent.months;
-  // ★ 인라인 플러그인: 75% 기준선 — 이 차트에만 적용 (Chart.register 미사용)
+  // Match the source definition's utilization warning threshold.
   const refLinePlugin = {
     id: 'opsUtilRefLine',
     afterDraw(chart) {
       const { ctx, chartArea, scales } = chart;
       if (!chartArea || !scales.y) return;
-      const yPx = scales.y.getPixelForValue(75);
+      const yPx = scales.y.getPixelForValue(70);
       ctx.save();
       ctx.setLineDash([5, 4]);
       ctx.strokeStyle = '#c07b48';
@@ -2421,7 +2458,7 @@ function renderOpsUtilChart(ent) {
       ctx.fillStyle = '#c07b48';
       ctx.font = '9px Pretendard Variable, sans-serif';
       ctx.textAlign = 'right';
-      ctx.fillText('목표 75%', chartArea.right - 2, yPx - 3);
+      ctx.fillText('주의 기준 70%', chartArea.right - 2, yPx - 3);
       ctx.restore();
     }
   };
@@ -2429,13 +2466,7 @@ function renderOpsUtilChart(ent) {
     plugins: [refLinePlugin],   // ← Chart.js 4: 인라인 플러그인 배열
     data:{
       labels: ms.map(m=>chartMonthLabel(m)),
-      datasets:[
-        { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization),
-          borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
-          fill:true, backgroundColor:makeGrad(null,33,101,82,.18,0), tension:0.4, spanGaps:false },
-        { type:'line', label:'참고 가동률 (일부 수신)', data:ms.map(m=>usagePresentation(m).reference),
-          showLine:false, pointRadius:5, pointStyle:'triangle', borderColor:PALETTE.amber, backgroundColor:PALETTE.amber }
-      ]
+      datasets:[utilizationDataset(ms)]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
@@ -2454,12 +2485,11 @@ function renderOpsUtilStats(ent) {
   const ms = ent.months;
   if (!ms || ms.length === 0) { el.innerHTML = ''; return; }
 
-  // 색상 기준: ≥85% 녹색 / 75-85% 주황 / <75% 빨강
   function utilColor(v) {
-    return v >= 85 ? 'var(--green)' : v >= 75 ? 'var(--amber)' : 'var(--rose)';
+    return v >= 70 ? 'var(--green)' : 'var(--rose)';
   }
   function utilBg(v) {
-    return v >= 85 ? '#e8f5f0' : v >= 75 ? '#fff3e0' : '#fce8ea';
+    return v >= 70 ? '#e8f5f0' : '#fce8ea';
   }
 
   el.innerHTML = `
@@ -2468,17 +2498,17 @@ function renderOpsUtilStats(ent) {
         <tr style="border-bottom:1px solid var(--border)">
           <th style="text-align:left;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">월</th>
           <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--green);font-size:10.5px">가동률</th>
-          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--muted);font-size:10.5px">vs 목표</th>
+          <th style="text-align:right;padding:3px 6px;font-weight:600;color:var(--muted);font-size:10.5px">vs 기준</th>
           <th style="text-align:right;padding:3px 0;font-weight:600;color:var(--muted);font-size:10.5px">판정</th>
         </tr>
       </thead>
       <tbody>
         ${ms.map(m => {
-          if (m.hasUsageData === false) return `<tr class="reference-row"><td>${esc(m.month)}</td><td>${usagePresentation(m).label}</td><td>—</td><td>일부 수신</td></tr>`;
+          if (m.hasUsageData === false) return `<tr class="reference-row"><td>${esc(m.month)}</td><td>${usagePresentation(m).label}</td><td>—</td><td>${usagePresentation(m).value == null ? '확인 필요' : '잠정'}</td></tr>`;
           const u    = m.utilization || 0;
-          const diff = (u - 75).toFixed(1);
+          const diff = (u - 70).toFixed(1);
           const sign = diff >= 0 ? '+' : '';
-          const verdict = u >= 85 ? '✅ 양호' : u >= 75 ? '🔶 관리' : '🔴 저가동';
+          const verdict = u >= 70 ? '정상' : '주의';
           return `<tr style="border-bottom:1px solid var(--bg2)">
             <td style="padding:4px 0;font-weight:700;color:var(--text-2)">${m.month}</td>
             <td style="padding:4px 6px;text-align:right;font-weight:700;color:${utilColor(u)};background:${utilBg(u)};border-radius:4px">${u.toFixed(1)}%</td>
@@ -2491,10 +2521,9 @@ function renderOpsUtilStats(ent) {
         <tr>
           <td colspan="4" style="padding:6px 0 2px;font-size:10px;color:var(--muted);border-top:1px solid var(--border)">
             판정 기준&nbsp;:&nbsp;
-            <span style="color:var(--rose);font-weight:600">🔴 저가동 &lt;75%</span>&nbsp;|&nbsp;
-            <span style="color:var(--amber);font-weight:600">🔶 관리 75~85%</span>&nbsp;|&nbsp;
-            <span style="color:var(--green);font-weight:600">✅ 양호 ≥85%</span>
-            &nbsp;&nbsp;(목표 기준 75%)
+            <span style="color:var(--rose);font-weight:600">주의 &lt;70%</span> /
+            <span style="color:var(--green);font-weight:600">정상 ≥70%</span>
+            (시트 정의 기준, 잠정값 판정 제외)
           </td>
         </tr>
       </tfoot>
@@ -2711,7 +2740,7 @@ function renderBridgeChart(ent) {
       scales:{y:{beginAtZero:true,ticks:{callback:fmtA}},x:{grid:{display:false}}}
     }
   });
-  $('bridgeTitle').textContent = ent.isAll ? '포트폴리오 수익 브리지' : ent.name + ' 수익 브리지';
+  $('bridgeTitle').textContent = ent.isAll ? '포트폴리오 수익 브릿지' : ent.name + ' 수익 브릿지';
   const sub = document.querySelector('#bridgeTitle + .sub');
   if (sub) sub.textContent = '실결제매출 → 환불 차감 → 순매출. 정상가 원천이 없어 할인 전 매출은 산출하지 않습니다. 지정 쿠폰 할인액은 별도 참고값입니다.';
 }
@@ -2846,13 +2875,6 @@ function renderQuarterChart(ent) {
     'rgba(36,52,79,.65)',
     'rgba(36,52,79,.85)'
   ];
-  const addColors = [
-    'rgba(192,123,72,.6)',
-    'rgba(192,123,72,.85)',
-    'rgba(143,66,25,.6)',
-    'rgba(143,66,25,.85)'
-  ];
-
   mkChart('quarterChart', {
     type:'bar',
     data:{
@@ -2860,13 +2882,19 @@ function renderQuarterChart(ent) {
       datasets:[
         { label:'실결제매출', data:quarterAggs.map(q=>q.gross||0), backgroundColor:chartQuarters.map((_,i)=>colors[i % colors.length]), borderRadius:6 },
         { label:'순매출', data:quarterAggs.map(q=>q.net||0), backgroundColor:chartQuarters.map((_,i)=>netColors[i % netColors.length]), borderRadius:6 },
-        { label:'순증감 (구독 수신월)', data:quarterAggs.map(q=>q.netAdds||0), backgroundColor:chartQuarters.map((_,i)=>addColors[i % addColors.length]), borderRadius:6 }
+        { type:'line', label:'순증감 (건, 우측)', yAxisID:'subscriptions',
+          data:quarterAggs.map(q=>q.hasSubscriptionData === false ? null : q.netAdds ?? null),
+          borderColor:PALETTE.amber, backgroundColor:PALETTE.amber, borderWidth:2,
+          pointRadius:4, fill:false, tension:0.2 }
       ]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{position:'top',labels:{boxWidth:10}} },
-      scales:{ y:{ticks:{callback:fmtA},grid:{color:'#f0ebe3'}}, x:{grid:{display:false}} }
+      plugins:{ legend:{position:'top',labels:{boxWidth:10}},
+        tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.dataset.yAxisID === 'subscriptions' ? fmtN(ctx.parsed.y)+'건' : fmtS(ctx.parsed.y)}`}} },
+      scales:{ y:{ticks:{callback:fmtA},grid:{color:'#f0ebe3'},beginAtZero:true},
+        subscriptions:{position:'right',ticks:{callback:v=>fmtN(v)+'건'},grid:{drawOnChartArea:false},beginAtZero:true},
+        x:{grid:{display:false}} }
     }
   });
 }
@@ -3005,7 +3033,7 @@ function renderScatterChart(ent) {
           ]
         } },
         datalabels:{
-          display:true, anchor:'center', clamp:true, clip:false, offset:5,
+          display:ctx=>ctx.dataset.label === selName ? true : 'auto', anchor:'center', clamp:true, clip:false, offset:5,
           align:ctx=>['top','right','bottom','left'][ctx.datasetIndex%4],
           formatter:(v,ctx)=>ctx.chart.data.datasets[ctx.datasetIndex].label,
           font:ctx=>({size:ctx.chart.data.datasets[ctx.datasetIndex].label===selName?11:10,weight:700}),
@@ -3043,13 +3071,11 @@ function renderMomentumChart(ent) {
     data:{
       labels: ms.map(m=>chartMonthLabel(m)),
       datasets:[
-        { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.achievement||0),
+        { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.hasSalesData === false ? null : m.achievement ?? null),
           borderColor:PALETTE.accent, borderWidth:2.5, pointRadius:4,
           fill:true, backgroundColor:makeGrad(null,143,66,25,.13,0), tension:0.4 },
-        { type:'line', label:'가동률 %', data:ms.map(m=>m.utilization),
-          borderColor:PALETTE.green, borderWidth:2.5, pointRadius:4,
-          fill:false, tension:0.4 },
-        { type:'line', label:'이탈률 %', data:ms.map(m=>m.churn||0),
+        utilizationDataset(ms),
+        { type:'line', label:'이탈률 %', data:ms.map(m=>m.hasSubscriptionData === false ? null : m.churn ?? null),
           borderColor:PALETTE.rose, borderWidth:2, pointRadius:3,
           borderDash:[4,3], fill:false, tension:0.4 }
       ]
@@ -3068,7 +3094,7 @@ function renderMomentumChart(ent) {
   const momArt = $('momentumTitle')?.closest('article');
   if (momArt) {
     const sub = momArt.querySelector('.sub');
-    if (sub) sub.textContent = '순매출 달성률 · 가동률 · 이탈률 — 운영 건전성 3종 월별 흐름';
+    if (sub) sub.textContent = '순매출 달성률 / 가동률 / 이탈률. 가동률 점선은 일부 수신 잠정값';
   }
 }
 
@@ -3171,11 +3197,11 @@ function renderHeroKpis(ent) {
     { label:'순매출 달성률', val: fmtP(c.achievement||0), note: `순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`, good: (c.achievement||0)>=100 }
   ];
   el.innerHTML = items.map(it => {
-    const color = it.invert ? (it.good?'#1d6450':'#ae3f4d') : (it.good?'#1d6450':'#b87030');
+    const color = it.good == null ? '#f4ce91' : it.good ? '#9ae6c6' : it.invert ? '#ffacb7' : '#f4ce91';
     return `<div class="hero-kpi">
       <div class="hero-kpi-label">${it.label}</div>
       <div class="hero-kpi-val" style="color:${color}">${it.val}</div>
-      <div class="hero-kpi-delta" style="color:rgba(255,255,255,.45)">${it.note}</div>
+      <div class="hero-kpi-delta">${it.note}</div>
     </div>`;
   }).join('');
 
@@ -3280,19 +3306,21 @@ function renderAlerts(ent) {
 }
 
 /* ── 15-C. SVG 스파크라인 ─────────────────────────────────────── */
-function sparkline(values, color='#8f4219', height=28, width=80) {
-  const cleanValues = (values || []).filter(value => value !== null && value !== undefined && Number.isFinite(Number(value)));
+function sparkline(values, color='#8f4219', height=28, width=80, partial=[]) {
+  const valid = value => value !== null && value !== undefined && Number.isFinite(Number(value));
+  const cleanValues = (values || []).filter(valid);
   if (cleanValues.length < 2) return '';
   const min = Math.min(...cleanValues), max = Math.max(...cleanValues);
   const range = max - min || 1;
-  const pts = cleanValues.map((v,i) => {
-    const x = (i/(cleanValues.length-1) * width).toFixed(1);
-    const y = (height - ((v-min)/range * (height-4) + 2)).toFixed(1);
-    return `${x},${y}`;
-  }).join(' ');
+  const points = values.map((value,i)=>valid(value) ? {
+    x:(i/(values.length-1)*width).toFixed(1),
+    y:(height-((value-min)/range*(height-4)+2)).toFixed(1)
+  } : null);
+  const lines = points.map((point,i)=>point && points[i-1]
+    ? `<line x1="${points[i-1].x}" y1="${points[i-1].y}" x2="${point.x}" y2="${point.y}" stroke="${color}" stroke-width="1.8"${partial[i] || partial[i-1] ? ' stroke-dasharray="3 2"' : ''}/>` : '').join('');
+  const dots = points.map(point=>point ? `<circle cx="${point.x}" cy="${point.y}" r="1.8" fill="${color}"/>` : '').join('');
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle cx="${width}" cy="${(height-((cleanValues[cleanValues.length-1]-min)/range*(height-4)+2)).toFixed(1)}" r="2.5" fill="${color}"/>
+    ${lines}${dots}
   </svg>`;
 }
 

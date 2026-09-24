@@ -109,9 +109,9 @@ body{
   background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);
   border-radius:var(--r-md);padding:11px 16px;min-width:0;overflow-wrap:anywhere;
 }
-.hero-kpi-label{font-size:9.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(255,255,255,.42);margin-bottom:4px}
+.hero-kpi-label{font-size:9.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(255,255,255,.72);margin-bottom:4px}
 .hero-kpi-val{font-size:19px;font-weight:900;letter-spacing:-.04em}
-.hero-kpi-delta{font-size:11px;font-weight:700;margin-top:2px}
+.hero-kpi-delta{font-size:11px;font-weight:700;margin-top:2px;color:rgba(255,255,255,.76)}
 .dp{color:#6ce8b0}.dn{color:#ff8fa0}.dz{color:rgba(255,255,255,.4)}
 
 .hero-focus{
@@ -409,6 +409,15 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 .dashboard-row .chart.lg{height:240px}
 .dashboard-row .chart.xl{height:270px}
 .dashboard-row .chart.lg canvas,.dashboard-row .chart.xl canvas{height:100%!important}
+.revenue-row{align-items:stretch}
+.revenue-row:has(#bridgeWrap.collapsed){align-items:flex-start}
+.bridge-panel{display:flex;flex-direction:column}
+.bridge-panel #bridgeWrap:not(.collapsed){display:flex;flex:1}
+.bridge-panel #bridgeWrap:not(.collapsed) .chart{flex:1;height:auto;min-height:240px;position:relative}
+.bridge-panel #bridgeWrap .chart canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+.reference-row td{padding:4px 6px;text-align:right;color:var(--amber);font-variant-numeric:tabular-nums}
+.reference-row td:first-child{text-align:left;padding-left:0;color:var(--text-2);font-weight:700}
+.reference-row td:last-child{padding-right:0}
 .ops-trend-row .chart-section-head{min-height:70px;align-items:flex-start;gap:10px}
 .ops-trend-row .chart{height:200px!important}
 .ops-trend-row .chart canvas{height:100%!important}

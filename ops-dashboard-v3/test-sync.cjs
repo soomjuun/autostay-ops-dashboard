@@ -77,6 +77,65 @@ test('compact Summary monetary units retain won scale',()=>{
   assert.equal(summary.contributionRevenue,4775000000);
 });
 
+test('numeric cumulative Summary amounts follow declared units without scaling percentages or stocks',()=>{
+  const api=createDashboardApi();
+  const rows=[['단위/결측 안내','누적 금액: 억원. 월별 금액: 백만원. 상세: 원, 회, 건, %.'],
+    ['누적 운영기여매출(환불 전)',48.79354563],['누적 올패스 운영귀속매출(환불 전)',7.88960243],
+    ['누적 목표매출','45.83억원'],['누적 순매출 달성률(대표)',0.934],['MRR',494885950]];
+  const value=api.parseSummary(rows);
+  assert.ok(Math.abs(value.contributionRevenue-4879354563)<0.01);
+  assert.ok(Math.abs(value.allPassAttributedRevenue-788960243)<0.01);
+  assert.equal(value.totalTarget,4583000000); assert.equal(value.achievement,93.4);
+  assert.equal(value.totalMrr,494885950);
+  assert.equal(api.parseSummary([['누적 운영기여매출(환불 전)',9500]]).contributionRevenue,9500);
+});
+
+test('utilization chart preserves real zero and gaps, and distinguishes provisional segments',()=>{
+  const api=createDashboardApi();
+  const rows=[{hasUsageData:true,utilization:75},
+    {hasUsageData:false,observedUsage:700,mtdCapacity:1000,utilization:null},
+    {hasUsageData:false,observedUsage:null,mtdCapacity:1000,utilization:null},
+    {hasUsageData:true,utilization:0},{hasUsageData:true,utilization:118.2}];
+  const data=api.utilizationDataset(rows);
+  assert.deepEqual(Array.from(data.data),[75,70,null,0,118.2]);
+  assert.equal(data.spanGaps,false);
+  assert.deepEqual(Array.from(data.segment.borderDash({p0DataIndex:0,p1DataIndex:1})),[5,4]);
+  assert.deepEqual(Array.from(data.segment.borderDash({p0DataIndex:3,p1DataIndex:4})),[]);
+  assert.equal(data.pointStyle[1],'triangle'); assert.equal(rows[1].utilization,null);
+});
+
+test('sparklines keep missing months as gaps and display zero and negative series',()=>{
+  const api=createDashboardApi();
+  const svg=api.sparkline([10,null,20,30],'#abc',28,80,[false,false,true,false]);
+  assert.equal((svg.match(/<line /g)||[]).length,1);
+  assert.equal((svg.match(/<circle /g)||[]).length,3);
+  assert.ok(svg.includes('stroke-dasharray="3 2"'));
+  assert.ok(api.sparkline([0,0]).includes('<line'));
+  assert.ok(api.sparkline([-2,-1]).includes('<line'));
+  assert.equal(api.sparkline([null,null]),'');
+});
+
+test('provisional contribution needs usable shared sources and aligned dates, without becoming official',()=>{
+  const api=createDashboardApi();
+  const names=['일산','하남','고양','자유로','광명','성수','안성'];
+  const quality=usageQuality('MISSING',8);
+  quality.push(...names.slice(1).map(name=>[name,month,9,9,0,0,0,0,'OK',700]));
+  const sheets={cfg:[['usage_local_latest_date',day(9)]],usageQuality:quality,salesQuality:quality};
+  api.setSourceSnapshot({sheets});
+  let row=api.parseFactMonthly(fact()).get('일산')[0];
+  assert.equal(row.contributionRevenue,null); assert.equal(row.observedContributionRevenue,9500);
+  assert.equal(api.aggMonths([row]).observedContributionRevenue,9500);
+  assert.equal(api.aggregatePortfolioMonths([{name:'일산',months:[row]}]).find(m=>m.monthNum===month).observedContributionRevenue,9500);
+  sheets.cfg=[['usage_local_latest_date',day(8)]];
+  row=api.parseFactMonthly(fact()).get('일산')[0];
+  assert.equal(row.observedContributionRevenue,null);
+  sheets.cfg=[['usage_local_latest_date',day(9)]];
+  quality[2][3]=0;
+  assert.equal(api.parseFactMonthly(fact()).get('일산')[0].observedContributionRevenue,null);
+  quality[2][3]=9; quality[2][5]=1;
+  assert.equal(api.parseFactMonthly(fact()).get('일산')[0].observedContributionRevenue,null);
+});
+
 test('typed hold text never becomes a monetary amount or a percentage',()=>{
   const api=createDashboardApi();
   const result=api.parseSummary([['누적 운영기여매출(환불 전)','귀속 보류\n15점포일 누락'],
@@ -110,7 +169,7 @@ test('partial reference utilization never replaces official utilization or fabri
   const api=createDashboardApi();
   const row={hasUsageData:false,observedUsage:700,mtdCapacity:1000,usageMissingDays:1,utilization:null};
   const display=api.usagePresentation(row);
-  assert.equal(display.label,'참고 70.0%'); assert.equal(row.utilization,null);
+  assert.equal(display.label,'잠정 70.0%'); assert.equal(row.utilization,null);
   assert.equal(api.usagePresentation({...row,observedUsage:null}).reference,null);
   assert.equal(api.usagePresentation({...row,observedUsage:0}).reference,0);
   api.setState({quarter:'H2',store:'all'});

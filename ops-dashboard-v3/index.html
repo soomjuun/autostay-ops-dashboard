@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20260922-layout2">
+  <link rel="stylesheet" href="./style.css?v=20260924-sync">
   <!-- 인증 가드: 쿠키 없이 직접 접근 시 로그인 페이지로 이동 -->
   <script>
     (function() {
@@ -198,7 +198,7 @@
         <div class="chart-section-head" style="margin-bottom:6px">
           <div>
             <h2 style="font-size:13.5px;margin:0">① 가동률 추이</h2>
-            <p class="sub" style="margin:0">목표 75% 기준선 · 원천 MTD Capacity 적용</p>
+            <p class="sub" style="margin:0">주의 기준 70% / 기간 전체 Capacity / 잠정값은 점선</p>
           </div>
           <button class="collapse-toggle collapsed" data-target="opsUtilDetail" aria-label="상세 보기">
             <span class="arrow">▾</span><span class="toggle-label">상세</span>
@@ -249,10 +249,10 @@
       </div>
     </article>
   </div>
-  <div class="dashboard-row">
-    <article class="panel">
+  <div class="dashboard-row revenue-row">
+    <article class="panel bridge-panel">
       <div class="chart-section-head">
-        <div><h2 id="bridgeTitle">수익 브리지</h2><p class="sub">실결제매출 → 환불 → 순매출</p></div>
+        <div><h2 id="bridgeTitle">포트폴리오 수익 브릿지</h2><p class="sub">실결제매출 → 환불 → 순매출</p></div>
         <button class="collapse-toggle" data-target="bridgeWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="bridgeWrap" class="collapsible-content">
@@ -376,6 +376,6 @@
     </article>
   </section>
 </div>
-<script src="./app.js?v=20260922-layout2"></script>
+<script src="./app.js?v=20260924-sync"></script>
 </body>
 </html>
