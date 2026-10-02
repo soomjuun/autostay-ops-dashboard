@@ -297,7 +297,37 @@ test('final completed audit blockers and changed seals reject a mixed snapshot',
   }
 });
 
-test('completed quality tables require matching execution IDs in every populated row',async()=>{
+test('completed quality tables accept a table-level execution ID with unsealed later rows',async()=>{
+  const source=mockSource(['complete']);const original=source.fetchImpl;
+  source.fetchImpl=async(url,options)=>{
+    const response=await original(url,options);
+    if(String(url).includes('oauth2.googleapis.com'))return response;
+    const payload=await response.json();
+    for(const range of payload.valueRanges)if(range.values[0]?.includes('실행본'))
+      range.values.push(['하남',month,'OK'],['고양',month,'OK',''],['자유로',month,'OK','  ']);
+    return {ok:true,json:async()=>payload};
+  };
+  const snapshot=await fetchSnapshot(source);
+  assert.equal(snapshot.readiness.mode,'complete');
+  assert.equal(snapshot.sheets.usageQuality.length,5);
+});
+
+test('completed quality tables require the table seal even if a later row has a current ID',async()=>{
+  const source=mockSource(['complete']);const original=source.fetchImpl;
+  source.fetchImpl=async(url,options)=>{
+    const response=await original(url,options);
+    if(String(url).includes('oauth2.googleapis.com'))return response;
+    const payload=await response.json();
+    for(const range of payload.valueRanges)if(range.values[0]?.includes('실행본')) {
+      range.values[1][3]='';
+      range.values.push(['하남',month,'OK','run-1']);
+    }
+    return {ok:true,json:async()=>payload};
+  };
+  await assert.rejects(fetchSnapshot(source),{code:'SOURCE_QUALITY_PENDING'});
+});
+
+test('completed quality tables reject conflicting explicit execution IDs in later rows',async()=>{
   const source=mockSource(['complete']);const original=source.fetchImpl;
   source.fetchImpl=async(url,options)=>{
     const response=await original(url,options);

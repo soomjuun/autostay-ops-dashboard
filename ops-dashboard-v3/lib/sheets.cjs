@@ -142,9 +142,15 @@ async function fetchSnapshot({env=process.env,fetchImpl=fetch}={}) {
     throw new SourceError('SOURCE_CHANGED','조회 중 원천 감사 결과가 변경되어 갱신을 보류했습니다. 다음 조회에 다시 반영합니다.');
   for (const key of ['usageQuality','usageQualityPrev','salesQuality','salesQualityPrev']) {
     const rows = sheets[key];
-    const runColumn = rows?.[0]?.indexOf('실행본');
+    const runColumn = rows?.[0]?.indexOf('실행본') ?? -1;
     const populated=rows?.slice(1).filter(row=>row.some(value=>value!=='' && value!=null)) || [];
-    if (runColumn < 0 || !populated.length || populated.some(row=>row[runColumn]!==before.runId) || !rows?.[0]?.includes('품질상태'))
+    // The first data row seals the table; later rows may omit the execution ID.
+    const tableRunId=String(rows?.[1]?.[runColumn] ?? '').trim();
+    const conflictingRow=populated.some(row=>{
+      const runId=String(row[runColumn] ?? '').trim();
+      return runId && runId!==before.runId;
+    });
+    if (runColumn < 0 || tableRunId!==before.runId || conflictingRow || !rows?.[0]?.includes('품질상태'))
       throw new SourceError('SOURCE_QUALITY_PENDING','일별 원천 품질표가 현재 실행본과 일치하지 않아 갱신을 보류합니다.');
   }
   if (!sheets.factMonthly?.[0]?.includes('월번호') || !sheets.overallMonthly?.[0]?.includes('월번호'))
