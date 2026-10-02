@@ -41,6 +41,10 @@ function createDashboardApi(elements = {}, documentOverrides = {}) {
       readCachedSnapshot, saveCachedSnapshot,
       renderOpsArpuChart, renderSubscriptionPipeline, renderReviewed, renderSignals, renderDetail,
       renderPaymentPanel, renderHeatmap, renderTable,
+      computeScore, scoreComponents, buildScoreReview, buildHealthReview,
+      selectedStoreMonths, capacityScope, buildCapacityReview, seasonPoint, buildPaymentReview,
+      renderScoreChart, renderHealthChart, renderCapacityPanel, renderSeasonChart, renderQuarterChart,
+      renderInlineStoreDetail,
       getChartConfig: id => charts[id]?.config,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
@@ -418,6 +422,8 @@ async function main() {
   const periods = {};
   const opportunityDiscrepancies = [];
   const opportunityPeriods = {};
+  const analysisDiscrepancies = [];
+  const analysisPeriods = {};
   const qualityRow = (key, row) => {
     const table=sheets[key] || [], headers=table[0] || [];
     const quality=table.slice(1).find(item=>String(item[headers.indexOf('매장')])===rawText(row,'매장')
@@ -455,6 +461,30 @@ async function main() {
     if (!metricClose(review.loss,expectedLoss) || review.totalCount!==eligibleRaw.length || review.readyCount!==usableRaw.length)
       opportunityDiscrepancies.push({period,expectedLoss,actualLoss:review.loss,expectedCount:usableRaw.length,
         actualCount:review.readyCount,expectedTotal:eligibleRaw.length,actualTotal:review.totalCount});
+    const ent={isAll:true,months,current:portfolio};
+    const capacityReview=api.buildCapacityReview(ent).total;
+    const expectedCapacity=eligibleRaw.reduce((sum,row)=>sum+rawNumber(row,'MTD_Capacity_2026'),0);
+    const expectedObserved=eligibleRaw.reduce((sum,row)=>sum+Number(qualityRow('usageQuality',row)?.[
+      sheets.usageQuality[0].indexOf('관측 이용량')] ?? 0),0);
+    const pairedRaw=eligibleRaw.filter(row=>qualityComplete('usageQuality',row) && qualityComplete('salesQuality',row)
+      && api.sourceDateKey(row[index['최신매출일_2026']])===api.sourceDateKey(row[index['최신사용일_2026']]
+        ?? qualityRow('usageQuality',row)?.[sheets.usageQuality[0].indexOf('집계 기준일')]));
+    const pairSum=key=>pairedRaw.reduce((sum,row)=>sum+rawNumber(row,key),0);
+    const expectedUsage=pairSum('총사용_2026');
+    const payment=api.buildPaymentReview(ent),score=api.buildScoreReview(ent),health=api.buildHealthReview(ent);
+    const expected={capacity:expectedCapacity,observed:expectedObserved,
+      utilization:expectedCapacity>0?expectedObserved/expectedCapacity*100:null,
+      grossPerWash:expectedUsage>0?pairSum('총매출_2026')/expectedUsage:null,
+      netPerWash:expectedUsage>0?pairSum('순매출_2026')/expectedUsage:null};
+    for(const key of ['capacity','observed','utilization','grossPerWash','netPerWash']) {
+      const actual=key.endsWith('PerWash')?payment[key]:capacityReview[key];
+      if (!metricClose(actual,expected[key],key==='utilization')) analysisDiscrepancies.push({period,key,actual,expected:expected[key]});
+    }
+    if (payment.count!==pairedRaw.length) analysisDiscrepancies.push({period,key:'payment coverage',actual:payment.count,expected:pairedRaw.length});
+    analysisPeriods[period]={capacity:capacityReview.capacity,observed:capacityReview.observed,
+      utilization:capacityReview.utilization,complete:capacityReview.complete,
+      paymentPairs:payment.count,paymentTotal:payment.total,grossPerWash:payment.grossPerWash,netPerWash:payment.netPerWash,
+      commonScoreDimensions:score.common.length,healthCoverage:health.axes.map(axis=>({key:axis.key,count:axis.count,total:axis.total}))};
     periods[period] = {
       months: months.map(month => month.month),
       target: portfolio.target || 0,
@@ -475,6 +505,26 @@ async function main() {
       mrrSubscribers: portfolio.mrrSubscribers || 0,
       arpu: portfolio.arpu ?? null
     };
+  }
+
+  // Reconcile chart inputs with raw sheet baselines, rather than the renderer's own totals.
+  for(const store of stores) for(const month of store.months) {
+    const raw=rawRows.find(row=>rawText(row,'매장')===store.name && rawNumber(row,'월번호')===month.monthNum);
+    if (!raw) continue;
+    const point=api.seasonPoint(month),base=rawNumber(raw,'계절기준선_2026');
+    const observed=Number(qualityRow('usageQuality',raw)?.[sheets.usageQuality[0].indexOf('관측 이용량')] ?? NaN);
+    const progress=month.status==='mtd'?rawNumber(raw,'경과일수_2026')/rawNumber(raw,'월일수_2026'):1;
+    const expectedIndex=base>0&&progress>0&&Number.isFinite(observed)?observed/(base*progress):null;
+    if (expectedIndex==null ? point.index!=null : !Number.isFinite(point.index) || Math.abs(point.index-expectedIndex)>1e-9)
+      analysisDiscrepancies.push({store:store.name,month:month.month,key:'season index',actual:point.index,expected:expectedIndex});
+    if (qualityComplete('usageQuality',raw)) {
+      const sourceKey=month.status==='mtd'?'계절지수_MTD_2026':'계절지수_확정_2026';
+      if (rawText(raw,sourceKey)!=='' && (!Number.isFinite(point.index) || Math.abs(point.index-rawNumber(raw,sourceKey))>1e-9))
+        analysisDiscrepancies.push({store:store.name,month:month.month,key:sourceKey,actual:point.index,expected:rawNumber(raw,sourceKey)});
+      if (month.status==='mtd' && rawText(raw,'계절지수_예상_2026')!==''
+        && (!Number.isFinite(point.projectedIndex) || Math.abs(point.projectedIndex-rawNumber(raw,'계절지수_예상_2026'))>1e-9))
+        analysisDiscrepancies.push({store:store.name,month:month.month,key:'projected season index',actual:point.projectedIndex,expected:rawNumber(raw,'계절지수_예상_2026')});
+    }
   }
 
   const summaryDiscrepancies = [];
@@ -610,6 +660,8 @@ async function main() {
     periods,
     opportunityDiscrepancies,
     opportunityPeriods,
+    analysisDiscrepancies,
+    analysisPeriods,
     currentCapacity: {
       capacity: capacityComplete ? mtdCapacity : null,
       usage: capacityComplete ? mtdUsage : null,
@@ -641,7 +693,8 @@ async function main() {
     ...opsDiscrepancies,
     ...summaryDiscrepancies,
     ...sourceBlockingIssues,
-    ...opportunityDiscrepancies
+    ...opportunityDiscrepancies,
+    ...analysisDiscrepancies
   ];
   if (factByStore.size !== storeNames.length || legacyAggregateMismatchMonths || blockingIssues.length) {
     process.exitCode = 1;

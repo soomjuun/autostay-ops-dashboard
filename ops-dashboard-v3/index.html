@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-  <link rel="stylesheet" href="./style.css?v=20261002-action-review">
+  <link rel="stylesheet" href="./style.css?v=20261002-analysis-coverage">
   <!-- 인증 가드: 쿠키 없이 직접 접근 시 로그인 페이지로 이동 -->
   <script>
     (function() {
@@ -173,8 +173,9 @@
     </article>
     <article class="panel">
       <h2 id="scoreTitle">운영 레버 스코어</h2>
-      <p class="sub" id="scoreSub">6개 지표 가중 종합 점수</p>
+      <p class="sub" id="scoreSub">공통 확인 지표의 동일 가중 평균</p>
       <div class="chart lg"><canvas id="scoreChart"></canvas></div>
+      <p class="analysis-note" id="scoreNote"></p>
     </article>
   </div>
   <div class="dashboard-row">
@@ -271,6 +272,7 @@
       <h2>건강도 레이더</h2>
       <p class="sub" id="healthSub">선택 매장 vs 포트폴리오 평균</p>
       <div class="chart lg"><canvas id="healthChart"></canvas></div>
+      <p class="analysis-note" id="healthNote"></p>
     </article>
   </div>
   <div class="dashboard-row">
@@ -288,7 +290,7 @@
   <div class="dashboard-row">
     <article class="panel">
       <div class="chart-section-head">
-        <div><h2>분기 스냅샷</h2><p class="sub">분기별 누적 매출 및 순증감</p></div>
+        <div><h2>분기 스냅샷</h2><p class="sub" id="quarterSub">선택 기간에 포함된 분기별 누적 매출 및 순증감</p></div>
         <button class="collapse-toggle" data-target="quarterWrap" aria-label="접기"><span class="arrow">▾</span><span class="toggle-label">접기</span></button>
       </div>
       <div id="quarterWrap" class="collapsible-content">
@@ -319,7 +321,7 @@
     <div class="section-header">
       <div>
         <h2><span class="section-icon amber">⚙</span>가동률 심층 분석</h2>
-        <p class="sub" style="margin-bottom:0">매장별 원천 Capacity · 유휴 대수 · 기회금액 상한 · 계절 지수</p>
+        <p class="sub" style="margin-bottom:0">관측 사용량 / 기간 전체 Capacity / 확인 구간 유휴량과 기회금액 상한</p>
       </div>
       <span class="section-tag">OPS</span>
     </div>
@@ -329,8 +331,9 @@
   <div class="dashboard-row">
     <article class="panel">
       <h2>계절 지수 트렌드</h2>
-      <p class="sub">월별 세차 대수 (막대) + 계절 지수 (선) — 기준선 1.0 = 연평균 45,741대/월</p>
+      <p class="sub" id="seasonSub">월별 사용량과 원천 계절 기준선에 따른 지수</p>
       <div class="chart lg"><canvas id="seasonChart"></canvas></div>
+      <p class="analysis-note" id="seasonNote"></p>
     </article>
     <article class="panel">
       <h2>결제 단가와 매장PASS ARPU 요약</h2>
@@ -341,7 +344,7 @@
 
   <section class="panel heatmap-section">
     <h2>매장 성과 히트맵</h2>
-    <p class="sub">선택 기간 운영 매장의 비교 가능한 핵심 지표. 초록=우수, 빨강=주의. 행 클릭으로 매장 선택. 해당 기간 미운영 매장은 KPI 집계에서 제외.</p>
+    <p class="sub">선택 기간 운영 매장의 핵심 지표. 초록=우수, 빨강=주의. 잠정 가동률과 부분 기회금액은 중립 표시하며 순위에서 제외합니다. 행 클릭으로 매장 선택.</p>
     <div id="heatmapGrid"></div>
   </section>
 
@@ -378,6 +381,6 @@
     </article>
   </section>
 </div>
-<script src="./app.js?v=20261002-action-review"></script>
+<script src="./app.js?v=20261002-analysis-coverage"></script>
 </body>
 </html>

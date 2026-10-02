@@ -316,6 +316,188 @@ test('heatmap keeps five core columns and neutral cells for unavailable usage an
   assert.equal((panel.innerHTML.match(/title="원천 자료 확인 후 표시">—/g)||[]).length,3);
   assert.doesNotMatch(panel.innerHTML,/NaN|Infinity/);
 });
+
+function analysisApi(stores=[]) {
+  const dom=reviewDom();
+  for(const id of ['scoreChart','scoreTitle','scoreSub','scoreNote','healthChart','healthSub','healthNote',
+    'seasonChart','seasonSub','seasonNote','capacityPanel','paymentPanel','quarterChart','quarterSub']) dom.add(id);
+  const api=createDashboardApi(dom.elements,{createElement:dom.createElement});
+  api.setDashboard({stores,opsStores:[]});api.setState({quarter:'all',store:'all'});
+  return {api,dom};
+}
+
+test('score components never turn missing growth or provisional utilization into a zero score',()=>{
+  const {api}=analysisApi();
+  const c={achievement:95,utilization:50,churn:4,refundRate:2,mrrYoY:0,grossYoY:0,
+    hasUsageData:false,hasMrrYoY:false,hasGrossYoY:false};
+  assert.deepEqual(Array.from(api.scoreComponents(c),d=>d.value),[95,null,80,94,null,null]);
+  assert.equal(api.computeScore(c),null);
+  const complete={...c,hasUsageData:true,hasMrrYoY:true,hasGrossYoY:true};
+  assert.equal(api.computeScore(complete),Math.round((95+50+80+94+50+50)/6));
+  assert.deepEqual(Array.from(api.scoreComponents({...complete,achievement:150,mrrYoY:-80,grossYoY:110}),d=>d.value),
+    [100,50,80,94,0,100]);
+});
+
+test('store score comparisons use the same confirmed dimensions for every participating store',()=>{
+  const full=opportunityFixture({mrr:120,mrrPrev:100,grossPrev:500,utilization:60});
+  const partial={...full,hasUsageData:false,usage:null,observedUsage:50};
+  const {api,dom}=analysisApi([{name:'일산',months:[full]},{name:'하남',months:[partial]}]);
+  const ent={isAll:true,current:api.aggMonths([partial]),months:[partial]};
+  const review=api.buildScoreReview(ent);
+  assert.equal(review.common.length,5);assert.equal(review.common.includes(1),false);
+  assert.ok(review.rows.every(row=>Number.isFinite(row.score)));
+  assert.equal(review.rows[0].score,review.rows[1].score);
+  api.renderScoreChart(ent);
+  assert.equal(api.getChartConfig('scoreChart').data.datasets[0].data.length,2);
+  assert.match(dom.elements.scoreSub.textContent,/공통 5\/6개.*부분 비교/);
+});
+
+test('health averages use available stores per axis and leave missing radar axes disconnected',()=>{
+  const full=opportunityFixture({mrr:120,mrrPrev:100,grossPrev:500,utilization:60});
+  const partial={...full,hasUsageData:false,usage:null,observedUsage:50};
+  const {api,dom}=analysisApi([{name:'일산',months:[full]},{name:'하남',months:[partial]}]);
+  const ent={isAll:false,name:'하남',months:[partial],current:api.aggMonths([partial])};
+  const axes=api.buildHealthReview(ent).axes;
+  assert.equal(axes[1].count,1);assert.equal(axes[1].total,2);assert.equal(axes[1].average,60);
+  assert.equal(axes[1].value,null);
+  api.renderHealthChart(ent);
+  const dataset=api.getChartConfig('healthChart').data.datasets[0];
+  assert.equal(dataset.data[1],null);assert.equal(dataset.fill,false);assert.equal(dataset.spanGaps,false);
+  assert.match(dom.elements.healthNote.textContent,/가동률 평균 1\/2개/);
+});
+
+test('capacity review keeps observed activity, full capacity and eligible monetary scopes separate',()=>{
+  const rows=[opportunityFixture(),opportunityFixture({month:'2월',monthNum:2,usage:null,
+    hasUsageData:false,observedUsage:20}),opportunityFixture({month:'3월',monthNum:3,usage:120,net:1200})];
+  const {api,dom}=analysisApi([{name:'일산',months:rows}]);
+  const scope=api.capacityScope(rows);
+  assert.equal(scope.observed,200);assert.equal(scope.capacity,300);
+  assert.ok(Math.abs(scope.utilization-200/300*100)<1e-9);
+  assert.equal(scope.complete,false);assert.equal(scope.idle,40);assert.equal(scope.loss,400);
+  assert.equal(scope.moneyCount,2);assert.equal(scope.completeCount,2);
+  api.renderCapacityPanel({isAll:true,months:rows});
+  assert.match(dom.elements.capacityPanel.innerHTML,/잠정 66.7%/);
+  assert.match(dom.elements.capacityPanel.innerHTML,/금액 산출 2\/3개/);
+  assert.doesNotMatch(dom.elements.capacityPanel.innerHTML,/선택 기간 자료 확인 후 표시|NaN|Infinity/);
+  const missing=api.capacityScope([{...rows[0],usage:null,observedUsage:null,hasUsageData:false}]);
+  assert.equal(missing.observed,null);assert.equal(missing.utilization,null);assert.equal(missing.loss,null);
+  assert.equal(api.capacityScope([]).capacity,null);
+});
+
+test('season index uses source baselines and source elapsed days, including new-store baselines',()=>{
+  const {api}=analysisApi();
+  const point=api.seasonPoint({status:'mtd',usage:100,hasUsageData:true,seasonBase:3100,
+    elapsedDays:1,daysInSourceMonth:31,usagePrev:80,hasUsagePrevData:true,usageComparable:true,
+    usageSourceDate:'2026-10-01',usagePrevSourceDate:'2025-10-01'});
+  assert.equal(point.index,1);assert.equal(point.projectedIndex,1);assert.equal(point.yoy,25);
+  const newer=api.seasonPoint({status:'confirmed',usage:477,seasonBase:15185.230414746544,priorUsageApplicable:false});
+  assert.ok(Math.abs(newer.index-0.031412101559998726)<1e-12);assert.equal(newer.previous,null);
+  assert.equal(api.seasonPoint({...point,status:'confirmed',usage:0,seasonBase:100}).index,0);
+});
+
+test('partial season points preserve received bars but cannot manufacture forecasts or aligned YoY',()=>{
+  const {api,dom}=analysisApi();
+  const month={month:'10월',status:'mtd',monthNum:10,hasUsageData:false,usage:null,observedUsage:50,
+    seasonBase:3100,elapsedDays:1,daysInSourceMonth:31,hasUsagePrevData:false,observedUsagePrev:40};
+  let point=api.seasonPoint(month);
+  assert.equal(point.index,.5);assert.equal(point.previous,40);assert.equal(point.yoy,null);
+  assert.equal(point.projectedIndex,null);
+  point=api.seasonPoint({...month,hasUsageData:true,usage:50,hasUsagePrevData:true,usagePrev:40,
+    usageSourceDate:'2026-10-01',usagePrevSourceDate:'2025-10-02'});
+  assert.equal(point.yoy,null);
+  api.renderSeasonChart({months:[month]});
+  const datasets=api.getChartConfig('seasonChart').data.datasets;
+  assert.equal(datasets.length,3);
+  assert.equal(datasets.find(d=>d.label==='관측 사용 (일부 수신)').data[0],50);
+  assert.match(dom.elements.seasonNote.textContent,/미수신을 0으로 채우지/);
+  api.renderSeasonChart({months:[{...month,seasonBase:null}]});
+  assert.ok(api.getChartConfig('seasonChart').data.datasets.some(d=>d.label==='관측 사용 (일부 수신)'));
+});
+
+test('per-wash prices use only matching received store-month pairs, never total sales over subset usage',()=>{
+  const rows=[opportunityFixture({usage:50,gross:1000,net:900}),
+    opportunityFixture({month:'2월',monthNum:2,usage:null,hasUsageData:false,gross:10000,net:9000}),
+    opportunityFixture({month:'3월',monthNum:3,usage:100,gross:4000,net:3600})];
+  const {api,dom}=analysisApi([{name:'일산',months:rows}]);
+  const ent={isAll:true,months:rows,current:api.aggMonths(rows)};
+  const review=api.buildPaymentReview(ent);
+  assert.equal(review.count,2);assert.equal(review.total,3);assert.equal(review.usage,150);
+  assert.equal(review.grossPerWash,5000/150);assert.equal(review.netPerWash,4500/150);
+  api.renderPaymentPanel(ent);assert.match(dom.elements.paymentPanel.innerHTML,/확인 구간 2\/3개/);
+});
+
+test('payment zeros remain visible while zero usage never becomes a zero per-wash price',()=>{
+  const row=opportunityFixture({usage:0,gross:0,net:0,storePassRevenue:0,arpu:0,arr:0,ltv:0,cancelSubs:2});
+  const {api,dom}=analysisApi([{name:'일산',months:[row]}]);
+  const ent={isAll:false,name:'일산',months:[row],current:{...row,hasArpuData:true}};
+  const review=api.buildPaymentReview(ent);
+  assert.equal(review.grossPerWash,null);assert.equal(review.netPerWash,null);assert.equal(review.arpu,0);
+  api.renderPaymentPanel(ent);
+  assert.equal((dom.elements.paymentPanel.innerHTML.match(/class="pay-val">—/g)||[]).length,2);
+  assert.equal((dom.elements.paymentPanel.innerHTML.match(/class="pay-val">0원/g)||[]).length,3);
+  assert.equal(api.filterMonths([row]).length,1);
+});
+
+test('heatmap provisional values are neutral and do not receive confirmed ranks',()=>{
+  const panel={innerHTML:'',querySelectorAll:()=>[]};const api=createDashboardApi({heatmapGrid:panel});
+  const rows=[opportunityFixture({observedUsage:60}),opportunityFixture({month:'2월',monthNum:2,
+    hasUsageData:false,usage:null,observedUsage:20})];
+  api.setDashboard({stores:[{name:'일산',months:rows}],opsStores:[]});api.setState({quarter:'all',store:'all'});
+  api.renderHeatmap({isAll:true});
+  assert.match(panel.innerHTML,/hm-reference.*순위 제외/);assert.match(panel.innerHTML,/잠정 40.0%/);
+  assert.match(panel.innerHTML,/부분 400원/);assert.match(panel.innerHTML,/금액 산출 1\/2개/);
+});
+
+test('zero period ARPU does not fall back to a stale monthly value, and absent exposure is not zero ARPU',()=>{
+  const {api}=analysisApi();
+  const row=opportunityFixture({storePassRevenue:0,arpu:1500});
+  assert.equal(api.aggMonths([row]).arpu,0);
+  const missing=api.aggMonths([{...row,retained:0,retainedExposure:0}]);
+  assert.equal(missing.arpu,null);assert.equal(missing.hasArpuData,false);
+  assert.equal(api.buildPaymentReview({isAll:false,months:[],current:{}}).total,0);
+});
+
+test('partial inline detail preserves confirmed financial cards without stale scores or zero idle estimates',()=>{
+  const panel={innerHTML:'stale',style:{}};
+  const api=createDashboardApi({inlineStoreDetail:panel});api.setState({quarter:'all',store:'all'});
+  const row=opportunityFixture({hasUsageData:false,usage:null,observedUsage:20,storePassRevenue:6000});
+  api.setDashboard({stores:[{name:'일산',months:[row]}],opsStores:[]});
+  api.renderInlineStoreDetail({isAll:false,name:'일산',months:[row],current:api.aggMonths([row])});
+  assert.match(panel.innerHTML,/잠정 20.0%/);assert.match(panel.innerHTML,/실결제매출/);
+  assert.equal((panel.innerHTML.match(/class="d-item"/g)||[]).length,6);
+  assert.doesNotMatch(panel.innerHTML,/선택 기간 자료 확인 후 표시|stale|0점|유휴 Capacity/);
+  api.renderInlineStoreDetail({isAll:false,name:'안성',months:[],current:{}});
+  assert.equal(panel.style.display,'none');
+});
+
+test('legacy capacity consumers use the same source season baseline for new stores and real zero indices',()=>{
+  const {api}=analysisApi();
+  const row=opportunityFixture({usage:0,seasonBase:12345,lossUnitPrice:0,net:0});
+  const result=api.buildCapacityData({isAll:false,name:'안성',months:[row]})[0];
+  assert.equal(result.confirmedSeasonIdx[0].base,12345);assert.equal(result.confirmedSeasonIdx[0].idx,0);
+  const mtd={...row,monthNum:10,status:'mtd',usage:100,seasonBase:3100,elapsedDays:1,daysInSourceMonth:31,lossUnitPrice:10,net:1000};
+  const current=api.buildCapacityData({isAll:false,name:'안성',months:[mtd]})[0];
+  assert.equal(current.mtdSeasonIdx.idx_mtd,1);assert.equal(current.mtdSeasonIdx.idx_proj,1);
+  assert.equal(api.capacityScope([mtd]).seasonIndex,1);
+});
+
+test('all selected periods render analyses with source-specific gaps instead of section-wide holds',()=>{
+  const rows=Array.from({length:month},(_,i)=>opportunityFixture({month:`${i+1}월`,monthNum:i+1,
+    quarter:`Q${Math.ceil((i+1)/3)}`,seasonBase:100,usagePrev:50,hasUsagePrevData:true,
+    mrr:120,mrrPrev:100,grossPrev:500,hasUsageData:i!==1,usage:i===1?null:60,observedUsage:60}));
+  const {api,dom}=analysisApi([{name:'일산',months:rows}]);
+  for(const period of ['all','H1','H2','Q1','Q2','Q3','Q4']) {
+    api.setState({quarter:period,store:'all'});
+    const selected=api.filterMonths(rows),ent={isAll:true,months:selected,current:api.aggMonths(selected)||{}};
+    api.renderScoreChart(ent);api.renderHealthChart(ent);api.renderCapacityPanel(ent);
+    api.renderSeasonChart(ent);api.renderPaymentPanel(ent);api.renderQuarterChart(ent);
+    for(const id of ['scoreChart','healthChart','seasonChart','quarterChart']) assert.ok(api.getChartConfig(id),`${period}/${id}`);
+    assert.equal(api.getChartConfig('seasonChart').data.labels.length,selected.length,period);
+    const quarters=new Set(selected.map(m=>m.quarter));
+    assert.equal(api.getChartConfig('quarterChart').data.labels.length,quarters.size,period);
+    for(const id of ['capacityPanel','paymentPanel']) assert.doesNotMatch(dom.elements[id].innerHTML,/선택 기간 자료 확인 후 표시|NaN|Infinity/);
+  }
+});
 test('subscription exposure uses its own date and mismatched ARPU stays null through aggregation',()=>{
   const api=apiWithDates(); const row=api.parseFactMonthly(fact()).get('일산')[0];
   assert.ok(Math.abs(row.retainedExposure-100*7/30)<1e-9);
