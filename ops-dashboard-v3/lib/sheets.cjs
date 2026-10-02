@@ -1,4 +1,5 @@
 const { createSign, createHash } = require('node:crypto');
+const { preparePartial } = require('./partial.cjs');
 
 const SHEET_ID = '1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo';
 const SOURCES = {
@@ -87,7 +88,7 @@ async function readRanges(ranges, env, fetchImpl) {
       throw new SourceError('SOURCE_TIMEOUT','Google 시트 응답이 지연되어 조회를 완료하지 못했습니다. 잠시 후 다시 시도하세요.');
     throw error;
   }
-  if (!response.ok) throw new SourceError('SOURCE_READ_FAILED',
+  if (!response.ok) throw new SourceError([401,403].includes(response.status) ? 'SOURCE_ACCESS_DENIED' : 'SOURCE_READ_FAILED',
     response.status===403 ? 'Google 시트 읽기 권한 또는 Sheets API 사용 설정을 확인해야 합니다.' : 'Google 시트 조회에 실패했습니다. 잠시 후 다시 시도하세요.');
   const payload=await response.json();
   if (payload.valueRanges?.length !== ranges.length) throw new SourceError('SOURCE_INCOMPLETE','일부 원천 범위가 응답에서 누락됐습니다.');
@@ -97,25 +98,41 @@ async function readRanges(ranges, env, fetchImpl) {
 async function fetchSnapshot({env=process.env,fetchImpl=fetch}={}) {
   const before=buildState((await readRanges([SOURCES.cfg.range],env,fetchImpl))[0]);
   if (!before.status || !before.runId) throw new SourceError('SOURCE_STATE_MISSING','시트 생성 상태를 확인할 수 없어 갱신을 보류합니다.');
-  if (before.pending || before.failed) throw new SourceError(before.failed?'SOURCE_BUILD_FAILED':'SOURCE_BUILD_PENDING',
-    before.failed?'원천 시트 생성이 실패했습니다. 마지막 정상 화면을 유지합니다.':'원천 시트를 재생성 중입니다. 완료 후 자동으로 다시 조회합니다.');
-  if (!['complete','completed','success','done'].includes(before.status))
+  if (before.failed) throw new SourceError('SOURCE_BUILD_FAILED','원천 시트 생성이 실패했습니다. 마지막 정상 화면을 유지합니다.');
+  if (!before.pending && !['complete','completed','success','done'].includes(before.status))
     throw new SourceError('SOURCE_STATE_MISSING','시트 생성 완료 상태를 확인할 수 없어 갱신을 보류합니다.');
-  const keys=Object.keys(SOURCES);
+  const coreKeys=['factMonthly','overallMonthly','usageQuality','usageQualityPrev','salesQuality','salesQualityPrev','cfg'];
+  const keys=before.pending ? coreKeys : Object.keys(SOURCES);
   const values=await readRanges(keys.map(key=>SOURCES[key].range),env,fetchImpl);
-  const after=buildState((await readRanges([SOURCES.cfg.range],env,fetchImpl))[0]);
-  if (after.pending || after.failed || before.runId!==after.runId || before.status!==after.status)
-    throw new SourceError('SOURCE_CHANGED','조회 중 원천 시트가 변경되어 갱신을 보류했습니다. 다음 조회에 다시 반영합니다.');
   const sheets=Object.fromEntries(keys.map((key,index)=>[key,values[index]]));
   const captured=buildState(sheets.cfg);
   if (captured.status!==before.status || captured.runId!==before.runId)
     throw new SourceError('SOURCE_CHANGED','조회 중 원천 실행본이 변경되어 갱신을 보류했습니다.');
   const cfg=Object.fromEntries(sheets.cfg || []);
-  if (cfg.dashboard_audit_run_id !== before.runId || String(cfg.dashboard_audit_blocking ?? '').trim() === '' ||
-      !Number.isFinite(Number(cfg.dashboard_audit_blocking)))
-    throw new SourceError('SOURCE_AUDIT_PENDING','현재 원천 실행본의 최종 점검이 완료되지 않아 갱신을 보류합니다.');
-  if (Number(cfg.dashboard_audit_blocking)>0)
+  const auditCurrent=cfg.dashboard_audit_run_id === before.runId && String(cfg.dashboard_audit_blocking ?? '').trim() !== '' &&
+    Number.isFinite(Number(cfg.dashboard_audit_blocking));
+  if (auditCurrent && Number(cfg.dashboard_audit_blocking)>0)
     throw new SourceError('SOURCE_AUDIT_FAILED','원천 시트의 차단 오류가 남아 있어 갱신을 보류합니다.');
+  if (before.pending || !auditCurrent) {
+    const secondValues=await readRanges(coreKeys.map(key=>SOURCES[key].range),env,fetchImpl);
+    const second=Object.fromEntries(coreKeys.map((key,index)=>[key,secondValues[index]]));
+    const after=buildState(second.cfg);
+    const latestCfg=Object.fromEntries(second.cfg || []);
+    if (latestCfg.dashboard_audit_run_id===after.runId && Number(latestCfg.dashboard_audit_blocking)>0)
+      throw new SourceError('SOURCE_AUDIT_FAILED','원천 시트의 차단 오류가 남아 있어 갱신을 보류합니다.');
+    const freshness=rows=>(rows || []).filter(row=>/^(current_year|current_month|.*_latest_date|dashboard_run_id|dashboard_build_status)$/.test(row[0]));
+    if (after.runId!==before.runId || after.status!==before.status ||
+        JSON.stringify(freshness(second.cfg))!==JSON.stringify(freshness(sheets.cfg)) ||
+        coreKeys.filter(key=>key!=='cfg').some(key=>JSON.stringify(sheets[key])!==JSON.stringify(second[key])))
+      throw new SourceError('SOURCE_CHANGED','조회 중 원천 데이터가 변경되어 마지막 확인값을 유지합니다. 다음 조회에 다시 반영합니다.');
+    let partial;
+    try { partial=preparePartial(second,after); }
+    catch { throw new SourceError('SOURCE_PARTIAL_PENDING','원천 갱신 중입니다. 합계와 수신 상태가 확인된 항목부터 다음 조회에 반영합니다.'); }
+    return {schemaVersion:1,sheetId:SHEET_ID,fetchedAt:new Date().toISOString(),build:after,...partial};
+  }
+  const after=buildState((await readRanges([SOURCES.cfg.range],env,fetchImpl))[0]);
+  if (after.failed || after.pending || before.runId!==after.runId || before.status!==after.status)
+    throw new SourceError('SOURCE_CHANGED','조회 중 원천 시트가 변경되어 갱신을 보류했습니다. 다음 조회에 다시 반영합니다.');
   for (const key of ['usageQuality','usageQualityPrev','salesQuality','salesQualityPrev']) {
     const rows = sheets[key];
     const runColumn = rows?.[0]?.indexOf('실행본');
@@ -124,7 +141,7 @@ async function fetchSnapshot({env=process.env,fetchImpl=fetch}={}) {
   }
   if (!sheets.factMonthly?.[0]?.includes('월번호') || !sheets.overallMonthly?.[0]?.includes('월번호'))
     throw new SourceError('SOURCE_SCHEMA_CHANGED','공식 월별 원천의 필수 열을 찾지 못했습니다.');
-  return {schemaVersion:1,sheetId:SHEET_ID,fetchedAt:new Date().toISOString(),build:after,sheets};
+  return {schemaVersion:1,sheetId:SHEET_ID,fetchedAt:new Date().toISOString(),build:after,readiness:{mode:'complete'},sheets};
 }
 
 module.exports={SHEET_ID,SOURCES,SourceError,buildState,fetchSnapshot};

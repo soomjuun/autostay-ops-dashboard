@@ -38,6 +38,7 @@ function createDashboardApi() {
       parseSummary, aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
       runAudit, buildCapacityData,
       sourceDateKey, isSourceCheckPending, dateContract, usagePresentation, utilizationDataset, sparkline,
+      readCachedSnapshot, saveCachedSnapshot,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
       setState: value => { state = value; }

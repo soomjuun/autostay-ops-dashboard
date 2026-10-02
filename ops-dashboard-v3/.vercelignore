@@ -4,4 +4,6 @@ service-account*.json
 test-sync.cjs
 dev-server.cjs
 validate-live.cjs
+verify-partial.cjs
 SYNC_SETUP.md
+PARTIAL_SYNC.md

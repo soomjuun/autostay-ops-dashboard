@@ -249,7 +249,7 @@ test('stale audit and stale quality execution IDs fail closed',async()=>{
       }
       return {ok:true,json:async()=>payload};
     };
-    await assert.rejects(fetchSnapshot(mock),{code:key==='quality'?'SOURCE_QUALITY_PENDING':'SOURCE_AUDIT_PENDING'});
+    await assert.rejects(fetchSnapshot(mock),{code:key==='quality'?'SOURCE_QUALITY_PENDING':'SOURCE_PARTIAL_PENDING'});
   }
 });
 
@@ -259,11 +259,200 @@ test('slow sheet responses return a localized source timeout',async()=>{
     : Promise.reject(new DOMException('internal timeout details','TimeoutError'));
   await assert.rejects(fetchSnapshot(mock),{code:'SOURCE_TIMEOUT'});
 });
-test('running, failed, changed and unconfigured sources never appear as a valid snapshot',async()=>{
-  await assert.rejects(fetchSnapshot(mockSource(['running'])),{code:'SOURCE_BUILD_PENDING'});
+test('unverified running, failed, changed and unconfigured sources never appear as a valid snapshot',async()=>{
+  await assert.rejects(fetchSnapshot(mockSource(['running'])),{code:'SOURCE_PARTIAL_PENDING'});
   await assert.rejects(fetchSnapshot(mockSource(['failed'])),{code:'SOURCE_BUILD_FAILED'});
   await assert.rejects(fetchSnapshot(mockSource(['complete','running','complete'])),{code:'SOURCE_CHANGED'});
   await assert.rejects(fetchSnapshot({env:{},fetchImpl:()=>{throw Error('network must not run');}}),{code:'SOURCE_AUTH_REQUIRED'});
+});
+
+function partialSheets(status='running') {
+  const cfg=[['dashboard_build_status',status],['dashboard_run_id','current-run'],['dashboard_audit_run_id','old-run'],
+    ['dashboard_audit_blocking',0],['current_year',year],['current_month',month],
+    ['sales_effective_latest_date',day(1)],['usage_local_latest_date',day(1)],['subscription_local_latest_date',day(1)]];
+  const names=['일산','하남','고양','자유로','광명','성수','안성'];
+  const sheets={cfg,summary:[['old summary']],coupon:[['old coupon']],ops:[['old ops']],dataCheck:[['old audit']]};
+  const qHead=['매장','월','기대일','수신일','누락일','중복행','잘못된 값','매출 분해 불일치','품질상태',
+    '집계 기준일','전체 누락일','관측 결제매출','관측 환불','관측 이용량','','실행본','원천 기준일'];
+  for(const key of ['usageQuality','usageQualityPrev','salesQuality','salesQualityPrev']) sheets[key]=[qHead];
+  sheets.factMonthly=[]; sheets.overallMonthly=[];
+  for(let m=1;m<=month;m++) {
+    const d=m===month ? 1 : new Date(Date.UTC(year,m,0)).getUTCDate();
+    const current=`${year}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const prior=current.replace(String(year),String(year-1));
+    let template;
+    for(const name of names) {
+      const [head,row]=fact({월번호:m,월라벨:`${m}월`,매장:name,최신매출일_2026:current,최신매출일_2025:prior,
+        최신구독일_2026:current,최신구독일_2025:prior,총매출_2025:8500,환불_2025:500,순매출_2025:8000,총사용_2025:600,
+        '1회권매출_2026':1000,올패스매출_2026:2000,'1회권매출_2025':1000,단일구독매출_2025:6000,올패스매출_2025:1500,
+        MTD_Capacity_2026:3000,MRR_2026:5000,ARR_2026:60000});
+      if(!sheets.factMonthly.length) sheets.factMonthly.push(head);
+      sheets.factMonthly.push(row);
+      template=Object.fromEntries(head.map((h,i)=>[h,row[i]]));
+      for(const key of ['usageQuality','usageQualityPrev','salesQuality','salesQualityPrev']) {
+        const prev=key.endsWith('Prev'),sales=key.startsWith('sales');
+        sheets[key].push([name,m,d,d,0,0,0,0,'OK',prev?prior:current,'',sales?(prev?8500:9000):0,sales?500:0,
+          sales?0:prev?600:700,'','current-run',prev?day(1).replace(String(year),String(year-1)):day(1)]);
+      }
+    }
+    for(const key of ['총매출_2026','환불_2026','순매출_2026','총사용_2026','총매출_2025','환불_2025','순매출_2025','총사용_2025',
+      '유지_2026','신규_2026','해지_2026']) if(key in template) template[key]*=7;
+    template.MRR_2026=37000; template.ARR_2026=444000;template.올패스유지_2026=30;
+    const head=Object.keys(template);
+    if(!sheets.overallMonthly.length) sheets.overallMonthly.push(head);
+    sheets.overallMonthly.push(Object.values(template));
+  }
+  return sheets;
+}
+
+function partialSource(sheets,change) {
+  const source=mockSource(['running']);let reads=0;
+  const auth=source.fetchImpl;
+  source.fetchImpl=async(url,options)=> {
+    if(String(url).includes('oauth2.googleapis.com')) return auth(url,options);
+    reads++;
+    const data=structuredClone(sheets);
+    if(change) change(data,reads);
+    const ranges=new URL(url).searchParams.getAll('ranges');
+    return {ok:true,json:async()=>({valueRanges:ranges.map(range=>({values:data[Object.keys(SOURCES).find(key=>SOURCES[key].range===range)] || []}))})};
+  };
+  return source;
+}
+
+test('running source publishes stable reconciled groups without stale display tabs',async()=>{
+  const snapshot=await fetchSnapshot(partialSource(partialSheets()));
+  assert.equal(snapshot.readiness.mode,'partial');
+  assert.equal(snapshot.readiness.cells[`일산:${month}`].sales,true);
+  assert.equal(snapshot.readiness.cells[`일산:${month}`].usage,true);
+  assert.equal(snapshot.readiness.cells[`일산:${month}`].subscription,true);
+  for(const key of ['summary','coupon','ops','dataCheck']) assert.deepEqual(snapshot.sheets[key],[]);
+  assert.equal(snapshot.sheets.factMonthly[1][snapshot.sheets.factMonthly[0].indexOf('운영기여매출_2026')],'');
+});
+
+test('completed build awaiting audit can publish locally reconciled groups',async()=>{
+  assert.equal((await fetchSnapshot(partialSource(partialSheets('complete')))).readiness.mode,'partial');
+});
+
+test('stale prior usage table does not block current sales and usage, but disables YoY',async()=>{
+  const sheets=partialSheets();sheets.usageQualityPrev[1][15]='old-run';
+  const snapshot=await fetchSnapshot(partialSource(sheets));
+  const cell=snapshot.readiness.cells[`일산:${month}`];
+  assert.equal(cell.sales,true);assert.equal(cell.usage,true);assert.equal(cell.usagePrev,false);
+  const api=createDashboardApi();api.setSourceSnapshot(snapshot);
+  const row=api.parseFactMonthly(snapshot.sheets.factMonthly).get('일산').at(-1);
+  assert.equal(row.hasUsageData,true);assert.equal(row.usageComparable,false);
+});
+
+test('numeric changes within one run are rejected instead of mixing snapshots',async()=>{
+  await assert.rejects(fetchSnapshot(partialSource(partialSheets(),(sheets,read)=>{
+    if(read===3) sheets.factMonthly[1][sheets.factMonthly[0].indexOf('총매출_2026')]+=100;
+  })),{code:'SOURCE_CHANGED'});
+});
+
+test('usage mismatch holds that monthly group without blocking sales',async()=>{
+  const sheets=partialSheets();
+  const row=sheets.factMonthly.find(r=>r[sheets.factMonthly[0].indexOf('매장')]==='일산' && r[1]===month);
+  row[sheets.factMonthly[0].indexOf('총사용_2026')]+=1;
+  const snapshot=await fetchSnapshot(partialSource(sheets));
+  assert.equal(snapshot.readiness.cells[`일산:${month}`].sales,true);
+  assert.equal(snapshot.readiness.cells[`일산:${month}`].usage,false);
+  const api=createDashboardApi();api.setSourceSnapshot(snapshot);
+  const item=api.parseFactMonthly(snapshot.sheets.factMonthly).get('일산').at(-1);
+  assert.equal(item.gross,9000);assert.equal(item.usage,null);assert.equal(item.observedUsage,null);
+});
+
+test('unreconciled sales cannot appear as a zero or a partial portfolio total',async()=>{
+  const sheets=partialSheets();
+  const row=sheets.factMonthly.find(r=>r[sheets.factMonthly[0].indexOf('매장')]==='일산' && r[1]===month);
+  row[sheets.factMonthly[0].indexOf('총매출_2026')]='#REF!';
+  const snapshot=await fetchSnapshot(partialSource(sheets));
+  const api=createDashboardApi();api.setSourceSnapshot(snapshot);
+  const stores=[...api.parseFactMonthly(snapshot.sheets.factMonthly)].map(([name,months])=>({name,months}));
+  const portfolio=api.aggregatePortfolioMonths(stores).find(m=>m.monthNum===month);
+  assert.equal(portfolio.gross,null);assert.equal(portfolio.net,null);assert.equal(portfolio.achievement,null);
+  assert.equal(api.aggMonths([portfolio]).gross,null);
+});
+
+test('invalid subscription identity blanks its dates without hiding sales',async()=>{
+  const sheets=partialSheets();
+  sheets.factMonthly[1][sheets.factMonthly[0].indexOf('순증감_2026')]=999;
+  const snapshot=await fetchSnapshot(partialSource(sheets));
+  assert.equal(snapshot.readiness.cells['일산:1'].sales,true);
+  assert.equal(snapshot.readiness.cells['일산:1'].subscription,false);
+  assert.equal(snapshot.sheets.factMonthly[1][snapshot.sheets.factMonthly[0].indexOf('최신구독일_2026')],'');
+});
+
+test('pre-opening zero subscription rows do not suppress an operating portfolio',async()=>{
+  const sheets=partialSheets();
+  const row=sheets.factMonthly.find(r=>r[sheets.factMonthly[0].indexOf('매장')]==='안성' && r[1]===1);
+  const head=sheets.factMonthly[0];
+  for(const field of ['유지_2026','신규_2026','해지_2026','순증감_2026','MRR_2026','ARR_2026']) row[head.indexOf(field)]=0;
+  for(const field of ['총매출_2026','환불_2026','순매출_2026','총사용_2026']) row[head.indexOf(field)]=0;
+  row[head.indexOf('최신구독일_2026')]='';
+  for(const key of ['salesQuality','usageQuality']) sheets[key].find(r=>r[0]==='안성' && r[1]===1)[8]='PREOPEN';
+  const total=sheets.overallMonthly[1],totalHead=sheets.overallMonthly[0];
+  for(const [field,value] of [['유지_2026',600],['신규_2026',12],['해지_2026',42]]) total[totalHead.indexOf(field)]=value;
+  for(const [field,value] of [['총매출_2026',54000],['환불_2026',3000],['순매출_2026',51000],['총사용_2026',4200]]) total[totalHead.indexOf(field)]=value;
+  const snapshot=await fetchSnapshot(partialSource(sheets));
+  assert.equal(snapshot.readiness.months[0].subscription,true);
+});
+
+test('duplicate source keys and current audit blockers fail closed',async()=>{
+  const sheets=partialSheets();sheets.factMonthly.push(sheets.factMonthly[1]);
+  await assert.rejects(fetchSnapshot(partialSource(sheets)),{code:'SOURCE_PARTIAL_PENDING'});
+  const blocked=partialSheets();blocked.cfg.find(r=>r[0]==='dashboard_audit_run_id')[1]='current-run';
+  blocked.cfg.find(r=>r[0]==='dashboard_audit_blocking')[1]=2;
+  await assert.rejects(fetchSnapshot(partialSource(blocked)),{code:'SOURCE_AUDIT_FAILED'});
+});
+
+test('a blocker published during the stability read cannot be bypassed',async()=>{
+  await assert.rejects(fetchSnapshot(partialSource(partialSheets(),(sheets,read)=>{
+    if(read===3) {
+      sheets.cfg.find(r=>r[0]==='dashboard_audit_run_id')[1]='current-run';
+      sheets.cfg.find(r=>r[0]==='dashboard_audit_blocking')[1]=1;
+    }
+  })),{code:'SOURCE_AUDIT_FAILED'});
+});
+
+test('a not-yet-written latest month does not suppress verified closed months',async()=>{
+  if(month===1) return;
+  const sheets=partialSheets();sheets.factMonthly=sheets.factMonthly.filter((row,i)=>!i || row[1]!==month);
+  sheets.overallMonthly=sheets.overallMonthly.filter((row,i)=>!i || row[1]!==month);
+  const snapshot=await fetchSnapshot(partialSource(sheets));
+  assert.equal(snapshot.readiness.months.at(-1).sales,false);
+  assert.equal(snapshot.readiness.months[0].sales,true);
+});
+
+test('bounded browser cache preserves source time and never re-saves fallback or previews',()=>{
+  const api=createDashboardApi();let text;
+  const storage={getItem:()=>text,setItem:(_,value)=>{text=value;}};
+  const now=Date.now();
+  const snapshot={schemaVersion:1,sheetId:'1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo',fetchedAt:new Date(now).toISOString(),
+    readiness:{mode:'partial'},sheets:{factMonthly:[],overallMonthly:[],cfg:[['current_year',year],['current_month',month]]}};
+  api.saveCachedSnapshot(snapshot,storage);
+  assert.equal(api.readCachedSnapshot(storage,now).fetchedAt,snapshot.fetchedAt);
+  assert.equal(api.readCachedSnapshot(storage,now+25*60*60*1000),null);
+  const old=text;api.saveCachedSnapshot({...snapshot,preview:true},storage);assert.equal(text,old);
+  api.saveCachedSnapshot({...snapshot,delivery:{mode:'cached'}},storage);assert.equal(text,old);
+  text='broken';assert.equal(api.readCachedSnapshot(storage,now),null);
+});
+
+test('API retains last confirmed snapshot on transient errors, not auth failures or expired cache',async()=>{
+  const {createHandler}=require('./api/data.js');const {SourceError}=require('./lib/sheets.cjs');
+  const previous=process.env.DASHBOARD_TOKEN;process.env.DASHBOARD_TOKEN='cache-test';
+  const now=Date.now();let time=now,fail=null;
+  const snapshot={schemaVersion:1,fetchedAt:new Date(now).toISOString(),readiness:{mode:'complete'},sheets:{}};
+  const handler=createHandler(async()=>{if(fail)throw new SourceError(fail,'safe message');return snapshot;},()=>time);
+  const req={method:'GET',headers:{cookie:'ds_auth=cache-test'}};
+  const response=()=>({setHeader(){},status(code){this.code=code;return this;},json(body){this.body=body;return this;}});
+  try {
+    await handler(req,response());fail='SOURCE_TIMEOUT';const cached=response();await handler(req,cached);
+    assert.equal(cached.code,200);assert.equal(cached.body.delivery.mode,'cached');assert.equal(cached.body.fetchedAt,snapshot.fetchedAt);
+    fail='SOURCE_AUTH_INVALID';const auth=response();await handler(req,auth);assert.equal(auth.code,503);
+    fail='SOURCE_ACCESS_DENIED';const revoked=response();await handler(req,revoked);assert.equal(revoked.code,503);
+    fail='SOURCE_TIMEOUT';time=now+25*60*60*1000;const expired=response();await handler(req,expired);assert.equal(expired.code,503);
+    const denied=response();await handler({...req,headers:{cookie:''}},denied);assert.equal(denied.code,401);
+  } finally { if(previous===undefined) delete process.env.DASHBOARD_TOKEN;else process.env.DASHBOARD_TOKEN=previous; }
 });
 test('data API rejects unauthenticated requests even without middleware',async()=>{
   const handler=require('./api/data.js');

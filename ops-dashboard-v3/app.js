@@ -177,7 +177,7 @@ function getMtdDay() {
 const $ = id => document.getElementById(id);
 const fmtW   = v => `${Math.round(+v||0).toLocaleString("ko-KR")}원`;
 // fmtS: 정밀 표시 — ARPU 등 소수점 있는 만원 단위도 .1 자리까지 표시
-const fmtS   = v => { const n=+v||0,a=Math.abs(n); if(a>=1e8) return `${(n/1e8).toFixed(1)}억`; if(a>=1e4){const m=n/1e4; return `${Number.isInteger(m)?m:m.toFixed(1)}만원`;} return `${Math.round(n).toLocaleString()}원`; };
+const fmtS   = v => { if(v==null || !Number.isFinite(+v)) return '—'; const n=+v||0,a=Math.abs(n); if(a>=1e8) return `${(n/1e8).toFixed(1)}억`; if(a>=1e4){const m=n/1e4; return `${Number.isInteger(m)?m:m.toFixed(1)}만원`;} return `${Math.round(n).toLocaleString()}원`; };
 const fmtA   = v => { const n=+v||0,a=Math.abs(n); return a>=1e8?`${(n/1e8).toFixed(1)}억`:a>=1e4?`${Math.round(n/1e4)}만`:String(Math.round(n)); };
 const fmtN   = v => `${Math.round(+v||0).toLocaleString("ko-KR")}`;
 const fmtP   = v => v == null || !Number.isFinite(+v) ? '—' : `${(+v).toFixed(1)}%`;
@@ -240,12 +240,62 @@ function syncPeriodToggleActive() {
 const _failedSheets = new Set();
 let sourceSnapshot = null;
 let sourceRefreshFailed = false;
+const SNAPSHOT_CACHE_KEY = 'ops-source-confirmed-v2';
+const SNAPSHOT_CACHE_MAX_AGE = 24*60*60*1000;
+
+function readCachedSnapshot(storage, now=Date.now()) {
+  try {
+    storage=storage || window.localStorage;
+    const snapshot=JSON.parse(storage.getItem(SNAPSHOT_CACHE_KEY));
+    const age=now-Date.parse(snapshot?.fetchedAt);
+    const cfg=Object.fromEntries(snapshot?.sheets?.cfg || []);
+    if (snapshot?.schemaVersion!==1 || snapshot?.sheetId!=='1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo' ||
+        !['complete','partial'].includes(snapshot.readiness?.mode) || !Array.isArray(snapshot.sheets?.factMonthly) ||
+        !Array.isArray(snapshot.sheets?.overallMonthly) || Number(cfg.current_year)!==TODAY_YEAR || Number(cfg.current_month)!==TODAY_MONTH ||
+        !Number.isFinite(age) || age<0 || age>SNAPSHOT_CACHE_MAX_AGE) return null;
+    return snapshot;
+  } catch { return null; }
+}
+
+function saveCachedSnapshot(snapshot,storage) {
+  try {
+    storage=storage || window.localStorage;
+    if (!snapshot?.preview && snapshot?.delivery?.mode!=='cached' && snapshot?.readiness)
+      storage.setItem(SNAPSHOT_CACHE_KEY,JSON.stringify(snapshot));
+  } catch { /* Storage can be disabled or full; live loading remains available. */ }
+}
 
 async function fetchDashboardSnapshot() {
-  const response = await fetch('/api/data', { cache:'no-store', credentials:'same-origin', signal:AbortSignal.timeout(170000) });
+  let response;
+  try {
+    response=await fetch('/api/data', { cache:'no-store', credentials:'same-origin', signal:AbortSignal.timeout(170000) });
+  } catch {
+    const cached=readCachedSnapshot();
+    if (cached) {
+      try {
+        const auth=await fetch('/api/check',{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(10000)});
+        if (auth.ok && (await auth.json()).ok===true) {
+          sourceSnapshot={...cached,delivery:{mode:'cached',reason:'데이터 조회가 지연되어 마지막 확인값을 유지합니다.',code:'SOURCE_TIMEOUT'}};
+          return;
+        }
+      } catch {}
+    }
+    throw new Error('데이터 조회가 지연됐습니다. 연결이 복구되면 자동으로 다시 조회합니다.');
+  }
   const payload = await response.json().catch(() => null);
   if (!response.ok || !payload?.sheets) {
-    if (response.status === 401) throw new Error('인증이 만료됐습니다. 페이지를 새로 열어 로그인하세요.');
+    if (response.status === 401) {
+      try { window.localStorage.removeItem(SNAPSHOT_CACHE_KEY); } catch {}
+      throw new Error('인증이 만료됐습니다. 페이지를 새로 열어 로그인하세요.');
+    }
+    if (response.status===503 && /^SOURCE_/.test(payload?.code || '') &&
+        !['SOURCE_AUTH_REQUIRED','SOURCE_AUTH_INVALID','SOURCE_ACCESS_DENIED'].includes(payload.code)) {
+      const cached=readCachedSnapshot();
+      if (cached) {
+        sourceSnapshot={...cached,delivery:{mode:'cached',reason:payload.error,code:payload.code}};
+        return;
+      }
+    }
     throw new Error(payload?.error || '시트 데이터 API에 연결하지 못했습니다. 최신 배포와 연결 설정을 확인하세요.');
   }
   sourceSnapshot = payload;
@@ -629,6 +679,9 @@ function sourceMonthDate(monthNum, latest) {
 }
 
 function sourceQuality(key, storeName, monthNum) {
+  const group={salesQuality:'sales',salesQualityPrev:'salesPrev',usageQuality:'usage',usageQualityPrev:'usagePrev'}[key];
+  if (sourceSnapshot?.readiness?.mode==='partial' && sourceSnapshot.readiness.cells?.[`${storeName}:${monthNum}`]?.[group]!==true)
+    return {complete:false,usable:false,observed:null,status:'HOLD',expected:0,received:0};
   const rows = sourceSnapshot?.sheets?.[key];
   if (!rows) return { complete:true, usable:true, observed:null, status:'LEGACY' };
   const headers = rows[0] || [];
@@ -636,7 +689,7 @@ function sourceQuality(key, storeName, monthNum) {
   const row = rows.slice(1).find(row => get(row,'매장') === storeName && Number(get(row,'월')) === monthNum);
   const status = row ? get(row,'품질상태') : 'MISSING';
   const clean = row && ['중복행','잘못된 값','매출 분해 불일치'].every(key => Number(get(row,key)) === 0);
-  return { complete:status === 'OK' || status === 'PREOPEN', status,
+  return { complete:Boolean(clean && (status === 'OK' || status === 'PREOPEN')), status,
     usable:status === 'PREOPEN' || Boolean(clean && num(get(row,'수신일')) > 0),
     expected:row ? num(get(row,'기대일')) : 0, received:row ? num(get(row,'수신일')) : 0,
     observed:clean && num(get(row,'수신일')) > 0 ? num(get(row,'관측 이용량')) : null };
@@ -978,6 +1031,7 @@ function aggregatePortfolioMonths(stores) {
     const usage = sum('usage');
     const refundAmount = sum('refundAmount');
     const hasSubscriptionData = records.every(row => row.hasSubscriptionData !== false);
+    const hasSalesData = records.every(row => row.hasSalesData !== false);
     const retained = sum('retained');
     const retainedPrev = sum('retainedPrev');
     const retainedExposure = sum('retainedExposure');
@@ -1007,20 +1061,20 @@ function aggregatePortfolioMonths(stores) {
       observedContributionRevenue:records.every(row=>row.observedContributionRevenue!=null) ? sum('observedContributionRevenue') : null,
       observedAllPassAttributedRevenue:records.every(row=>row.observedAllPassAttributedRevenue!=null) ? sum('observedAllPassAttributedRevenue') : null,
       allPassAttributedRevenue:records.every(row=>row.allPassAttributedRevenue!=null) ? sum('allPassAttributedRevenue') : null,
-      gross, grossPrev,
+      gross:hasSalesData ? gross : null, grossPrev,
       comparableGross, comparableGrossPrev,
       hasGrossYoY: grossPrev > 0,
       grossYoY: grossPrev > 0 ? (gross - grossPrev) / grossPrev * 100 : 0,
-      net, netPrev,
+      net:hasSalesData ? net : null, netPrev,
       comparableNet, comparableNetPrev,
       hasNetYoY: netPrev > 0,
       netYoY: netPrev > 0 ? (net - netPrev) / netPrev * 100 : 0,
-      achievement: target > 0 ? net / target * 100 : 0,
-      grossAchievement: target > 0 ? gross / target * 100 : 0,
-      refundAmount,
-      refundRate: gross > 0 ? refundAmount / gross * 100 : 0,
+      achievement: hasSalesData && target > 0 ? net / target * 100 : null,
+      grossAchievement: hasSalesData && target > 0 ? gross / target * 100 : null,
+      refundAmount:hasSalesData ? refundAmount : null,
+      refundRate: hasSalesData && gross > 0 ? refundAmount / gross * 100 : null,
       hasUsageData:records.every(row=>row.hasUsageData!==false),
-      hasSalesData:records.every(row=>row.hasSalesData!==false),
+      hasSalesData,
       usageComparable:records.every(row=>row.usageComparable!==false),
       observedUsage:records.every(row=>row.observedUsage!=null || row.capacity===0) ? sum('observedUsage') : null,
       usageMissingDays:sum('usageMissingDays'),
@@ -1117,7 +1171,7 @@ function aggMonths(months) {
     observedContributionRevenue:months.every(m=>m.observedContributionRevenue!=null) ? months.reduce((s,m)=>s+m.observedContributionRevenue,0) : null,
     observedAllPassAttributedRevenue:months.every(m=>m.observedAllPassAttributedRevenue!=null) ? months.reduce((s,m)=>s+m.observedAllPassAttributedRevenue,0) : null,
     allPassAttributedRevenue:months.every(m=>m.allPassAttributedRevenue!=null) ? months.reduce((s,m)=>s+m.allPassAttributedRevenue,0) : null,
-    target:t.target, gross:t.gross, grossPrev:t.grossPrev, net:t.net, netPrev:t.netPrev,
+    target:t.target, gross:hasSalesData ? t.gross : null, grossPrev:t.grossPrev, net:hasSalesData ? t.net : null, netPrev:t.netPrev,
     grossYoY: t.comparableGrossPrev?(t.comparableGross-t.comparableGrossPrev)/t.comparableGrossPrev*100:0,
     netYoY:   t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
     sameStoreNetYoY:t.comparableNetPrev?(t.comparableNet-t.comparableNetPrev)/t.comparableNetPrev*100:0,
@@ -1125,8 +1179,8 @@ function aggMonths(months) {
     hasTotalNetGrowth:salesComparable && t.netPrev>0,
     hasGrossYoY:salesComparable && t.comparableGrossPrev>0,
     hasNetYoY:salesComparable && t.comparableNetPrev>0,
-    achievement: t.target?t.net/t.target*100:0,
-    grossAchievement: t.target?t.gross/t.target*100:0,
+    achievement: hasSalesData && t.target ? t.net/t.target*100 : null,
+    grossAchievement: hasSalesData && t.target ? t.gross/t.target*100 : null,
     usage:hasUsageData ? t.usage : null,
     hasSubscriptionData,
     subscriptionMonthCount:t.subscriptionMonths,
@@ -1151,8 +1205,8 @@ function aggMonths(months) {
       : null,
     churn:hasSubscriptionData && t.retainedExposure ? t.cancelSubs/t.retainedExposure*100 : null,
     utilization: hasUsageData && t.cap ? t.usage/t.cap*100 : null,
-    refundRate:  t.gross?t.refundVal/t.gross*100:0,
-    refundAmount:t.refundVal,
+    refundRate: hasSalesData && t.gross ? t.refundVal/t.gross*100 : null,
+    refundAmount:hasSalesData ? t.refundVal : null,
     discountAmount:t.discountAmount,
     listPriceRevenue:t.gross+t.discountAmount,
     discountShare: t.gross ? t.discountAmount/t.gross*100 : 0,
@@ -1606,7 +1660,7 @@ async function loadData() {
   if (summaryKpis.totalGross && summaryKpis.totalGross > 0) overallAgg._summaryGross = summaryKpis.totalGross;
   if (summaryKpis.totalMrr   && summaryKpis.totalMrr   > 0) overallAgg._summaryMrr   = summaryKpis.totalMrr;
 
-  const now = new Date();
+  const now = sourceSnapshot?.delivery?.mode==='cached' ? new Date(sourceSnapshot.fetchedAt) : new Date();
   // runAudit가 매장 합계 교차검증을 수행할 수 있도록 감사 전에 데이터 모델을 할당한다.
   dashboard = { overall, opsStores, stores: storesFull, summaryKpis, dataQuality, sourceStatus, audit: [], loadedAt: now };
   const baseAudit = runAudit(overall, opsStores);
@@ -1786,7 +1840,7 @@ function renderGauges(ent) {
   const mrrM = hasMrrYoY ? Math.max(0, Math.min(100, 50 + (c.mrrYoY||0))) : 50;
 
   // 100% 초과 시 배지 추가
-  const achLabel  = achRaw  > 100 ? `${fmtP(achRaw)} ★`  : fmtP(achRaw);
+  const achLabel  = c.hasSalesData===false ? '—' : achRaw > 100 ? `${fmtP(achRaw)} ★` : fmtP(achRaw);
   const utilLabel = utilRaw > 100 ? `${fmtP(utilRaw)} ↑`  : fmtP(utilRaw);
 
   // ★ MRR 게이지 delta: YoY율의 전월 변화(▲53.9%p)는 사용자에게 불투명 → 실제 MRR MoM 변화율로 교체
@@ -1829,7 +1883,8 @@ function renderGauges(ent) {
 
   // HTML의 element ID와 일치: gsvg-*, gval-*, gsub-*
   makeGauge('gsvg-ach',  'gval-ach',  'gsub-ach',
-    ach, achLabel, `목표 ${fmtS(c.target||0)}${achSubNet}${periodLabel}`);
+    ach, achLabel, c.hasSalesData===false ? '매출 확인 대기' : `목표 ${fmtS(c.target||0)}${achSubNet}${periodLabel}`);
+  if (c.hasSalesData===false) $('gsvg-ach').innerHTML='';
   makeGauge('gsvg-util', 'gval-util', 'gsub-util',
     util, usagePresentation(c).label, c.hasUsageData === false
       ? usagePresentation(c).note
@@ -1862,6 +1917,7 @@ function couponCoverageSuffix(c) {
 }
 
 function couponUnavailableLabel(c) {
+  if (sourceSnapshot?.readiness?.held?.includes('coupon')) return '쿠폰 갱신 대기 / 최종 점검 후 반영';
   if (dashboard?.dataQuality?.sourceCheckPending) return '쿠폰 집계 미완료 · 원천 재생성 중';
   if ((c.couponSheetMonths||0) > 0) return '쿠폰 집계값 없음 · 원천 확인 필요';
   return (c.couponSourceMonths||0) > 0
@@ -2049,7 +2105,7 @@ function renderInsights(ent) {
         .map(s => { const agg = aggMonths(filterMonths(s.months)) || {}; return { name: s.name, gross: agg.gross || 0 }; })
         .sort((a,b) => b.gross - a.gross)[0]
     : null;
-  const achStatus = (c.achievement||0)>=100?'목표 초과 달성':(c.achievement||0)>=80?'목표 근접':'목표 미달';
+  const achStatus = c.hasSalesData===false ? '매출 확인 대기' : (c.achievement||0)>=100?'목표 초과 달성':(c.achievement||0)>=80?'목표 근접':'목표 미달';
   const mrrDir    = !c.hasSubscriptionData ? '원천 미수신' : !c.hasMrrYoY ? '전년 비교 제외' : (c.mrrYoY||0)>=0?'성장 중':'감소 중';
   const latestM   = ms.length ? ms[ms.length-1] : null;
   const firstM    = ms.length ? ms[0].month : '';
@@ -2095,7 +2151,7 @@ function renderInsights(ent) {
   }
   const gapValue = Math.max(0, (c.target||0) - (c.net||0));
   const overValue = Math.max(0, (c.net||0) - (c.target||0));
-  const gapText = (c.achievement||0) >= 100
+  const gapText = c.hasSalesData===false ? '합계 검증 후 반영' : (c.achievement||0) >= 100
     ? `목표 대비 ${fmtS(overValue)} 초과`
     : `목표까지 ${fmtS(gapValue)}`;
   const statusClass = (c.achievement||0) >= 100 ? 'good' : (c.achievement||0) >= 80 ? 'warn' : 'bad';
@@ -2107,9 +2163,9 @@ function renderInsights(ent) {
     <div class="summary-lead">
       <div>
         <span class="summary-lead-label">순매출</span>
-        <strong>${fmtS(c.net||0)}</strong>
+        <strong>${fmtS(c.net)}</strong>
       </div>
-      <span>${fmtP(c.achievement||0)} 달성 · ${gapText}<br>실결제매출 ${fmtS(c.gross||0)}</span>
+      <span>${fmtP(c.achievement)} 달성 / ${gapText}<br>실결제매출 ${fmtS(c.gross)}</span>
     </div>
     <div class="summary-metric-grid">
       <div class="summary-metric"><span>가동률</span><strong>${usagePresentation(c).label}</strong></div>
@@ -2305,7 +2361,7 @@ function renderPerformanceChart(ent) {
         { type:'line', label:'MRR', data:ms.map(m=>m.mrr),
           borderColor:PALETTE.amber, borderWidth:2.5, pointRadius:4,
           borderDash:[5,3], fill:false, tension:0.4, order:0 },
-        { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.achievement||0),
+        { type:'line', label:'순매출 달성률 %', data:ms.map(m=>m.hasSalesData===false ? null : m.achievement ?? null),
           yAxisID:'y1',
           borderColor:PALETTE.rose, borderWidth:2, pointRadius:3,
           borderDash:[3,3], fill:false, tension:0.35, order:0 }
@@ -2604,11 +2660,16 @@ function renderOpsArpuChart(ent) {
   const hasCouponSheetRows = ms.some(m => m.couponSheetPresent);
   const hasCouponSourceData = ms.some(m => m.hasCouponSourceData);
   const arpuArt = $('opsArpuChart')?.closest('.ops-sub-section');
+  const couponHeld = sourceSnapshot?.readiness?.held?.includes('coupon');
   if (arpuArt) {
     const h2 = arpuArt.querySelector('h2');
     const sub = arpuArt.querySelector('.sub');
     if (h2) h2.textContent = hasDiscountData ? '③ 쿠폰할인·매장PASS ARPU 수익성' : `③ 매장PASS ARPU 수익성 · ${hasCouponSourceData ? '지정 쿠폰 비중 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음' : '매장별 쿠폰할인 미배분'}`;
     if (sub) sub.textContent = hasDiscountData ? '실결제매출 대비 지정 쿠폰 할인액 비율(%) · 구독자-월 노출 기준 ARPU(원)' : `매장PASS ARPU 월별 추이 · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계' : hasCouponSheetRows ? '쿠폰 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`;
+    if (couponHeld) {
+      if (h2) h2.textContent='③ 매장PASS ARPU 수익성 / 쿠폰 갱신 대기';
+      if (sub) sub.textContent='매장PASS ARPU 월별 추이 / 쿠폰은 최종 점검 후 반영';
+    }
   }
   mkChart('opsArpuChart', {
     data:{
@@ -2646,6 +2707,11 @@ function renderOpsArpuStats(ent) {
   const hasCouponSheetRows = ms.some(m => m.couponSheetPresent);
   const hasCouponSourceData = ms.some(m => m.hasCouponSourceData);
 
+  const couponNote = sourceSnapshot?.readiness?.held?.includes('coupon') ? '쿠폰 갱신 대기 / 최종 점검 후 반영'
+    : dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료'
+    : hasCouponSourceData ? '실결제매출 미집계로 지정 쿠폰 비중 산출 제외'
+    : hasCouponSheetRows ? '쿠폰 집계값 없음 / 원천 확인 필요' : '쿠폰 원천에 매장 ID 없음';
+
   el.innerHTML = `
     <table style="width:100%;border-collapse:collapse;font-size:11.5px">
       <thead>
@@ -2673,7 +2739,7 @@ function renderOpsArpuStats(ent) {
         }).join('')}
       </tbody>
     </table>
-    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 매장PASS ARPU ${fmtS(Math.round(arpuAvg))} 기준${hasDiscountData ? ` · 지정 쿠폰 할인비중은 실결제매출 대비${ms.some(m=>m.hasCouponSourceData&&!m.hasDiscountData) ? ' · 실결제매출 0원 월 산출 제외' : ''}` : ` · ${dashboard?.dataQuality?.sourceCheckPending ? '쿠폰 집계 미완료' : hasCouponSourceData ? '실결제매출 미집계로 지정 쿠폰 비중 산출 제외' : hasCouponSheetRows ? '쿠폰 집계값 없음 · 원천/집계 산식 확인 필요' : '쿠폰 원천에 매장 ID 없음'}`}</div>`;
+    <div style="font-size:10.5px;color:var(--muted);margin-top:6px">평균 매장PASS ARPU ${fmtS(Math.round(arpuAvg))} 기준 / ${hasDiscountData ? '지정 쿠폰 할인비중은 실결제매출 대비' : couponNote}</div>`;
 }
 
 function renderMrrTrendChart(ent) {
@@ -3189,7 +3255,7 @@ function renderHeroKpis(ent) {
   if (!el) return;
   const hasSubscriptionData = Boolean(c.hasSubscriptionData);
   const items = [
-    { label:'실결제매출', val: fmtS(c.gross), note: `실결제매출 달성 ${fmtP(c.grossAchievement||0)}`, good: (c.grossAchievement||0)>=100 },
+    { label:'실결제매출', val: fmtS(c.gross), note: c.hasSalesData===false ? '매출 확인 대기' : `실결제매출 달성 ${fmtP(c.grossAchievement)}`, good: c.hasSalesData===false ? null : (c.grossAchievement||0)>=100 },
     { label:'MRR',   val: hasSubscriptionData ? fmtS(c.mrr||0) : '—', note: hasSubscriptionData ? `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: c.hasMrrYoY ? (c.mrrYoY||0)>=0 : null },
     { label:'가동률', val:usagePresentation(c).label, note:usagePresentation(c).note, good:c.hasUsageData === false ? null : c.utilization>=70 },
     { label:'이탈률', val: hasSubscriptionData ? fmtP(c.churn||0) : '—', note: hasSubscriptionData ? `해지 ${fmtN(c.cancelSubs||0)}건 / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: hasSubscriptionData ? (c.churn||0)<8 : null, invert:true },
@@ -3216,7 +3282,9 @@ function renderHeroKpis(ent) {
   const loadedStr = loadedAt ? loadedAt.toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'}) : '—';
   const actualSalesDate = dashboard.overall?.map(month=>month.salesSourceDate).filter(Boolean).sort().at(-1);
   const sourceDate = actualSalesDate ? new Date(`${actualSalesDate}T00:00:00`) : dashboard.dataQuality?.salesLatestDate;
-  const sourcePending = dashboard.dataQuality?.sourceCheckPending;
+  const partial = sourceSnapshot?.readiness?.mode==='partial';
+  const cached = sourceSnapshot?.delivery?.mode==='cached';
+  const sourcePending = partial || dashboard.dataQuality?.sourceCheckPending;
   const sourceStr = sourceDate instanceof Date && !Number.isNaN(sourceDate.getTime())
     ? sourceDate.toLocaleDateString('ko-KR', {month:'numeric', day:'numeric'})
     : sourcePending ? '점검 보류' : '확인 불가';
@@ -3256,18 +3324,21 @@ function renderHeroKpis(ent) {
 
   const auditQualityCnt = dashboard.dataQuality?.warnings?.length || 0;
   const auditClass = sourcePending || auditQualityCnt ? 'warn' : 'ok';
-  const auditText = sourcePending ? '원천 점검 대기'
+  const auditText = partial ? '부분 검증 / 최종 점검 대기' : sourcePending ? '원천 점검 대기'
     : auditQualityCnt ? `데이터 참고사항 ${auditQualityCnt}건` : '원천 점검 완료';
 
   // 연결 상태는 실제 로드 실패 여부, 데이터 최신성은 원천 매출 최신일로 별도 표시한다.
-  const connectionIssue = sourceRefreshFailed || _failedSheets.size > 0;
-  const connClass = connectionIssue || sourceSnapshot?.preview ? 'warn' : 'ok';
+  const connectionIssue = sourceRefreshFailed || cached || _failedSheets.size > 0;
+  const connClass = connectionIssue || partial || sourceSnapshot?.preview ? 'warn' : 'ok';
+  const connectionText = connectionIssue ? '갱신 대기 / 마지막 확인값'
+    : sourceSnapshot?.preview ? '캡처 데이터 검증 화면 / 실시간 아님'
+    : partial ? '시트 갱신 중 / 확인값 우선 반영' : '시트 연결 정상';
 
   metaEl.innerHTML = `
     <span class="meta-pill" id="updatedAt">🕐 조회 ${loadedStr} · ${freshStr}</span>
     <span class="meta-pill">📊 ${storeStr} · ${qStr}</span>
     <span class="meta-pill">📅 ${rangeStr}</span>
-    <span class="meta-pill ${connClass}" id="connectionStatus">${sourceRefreshFailed ? '갱신 보류 / 마지막 정상 조회값' : sourceSnapshot?.preview ? '캡처 데이터 검증 화면 / 실시간 아님' : `시트 연결 ${connectionIssue ? '일부 실패' : '정상'}`}</span>
+    <span class="meta-pill ${connClass}" id="connectionStatus">${connectionText}</span>
     <span class="meta-pill ${sourceClass}">🗂 원천 매출 ${sourceStr}${sourceFreshness}</span>
     <span class="meta-pill ${auditClass}" id="auditBadge">${auditText}</span>
     <span class="meta-pill">↻ 자동갱신 5분</span>
@@ -3280,7 +3351,7 @@ function renderAlerts(ent) {
   const el = $('alertStrip');
   if (!el) return;
   const alerts = [];
-  if ((c.achievement||0) < 80)   alerts.push({ lvl:'danger',  msg: `⚠ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 80% 미달. 즉각 점검 필요` });
+  if (c.hasSalesData!==false && (c.achievement||0) < 80) alerts.push({ lvl:'danger', msg: `⚠ 순매출 달성률 ${fmtP(c.achievement)} — 목표 80% 미달. 즉각 점검 필요` });
   else if ((c.achievement||0) >= 100) alerts.push({ lvl:'success', msg: `✓ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 초과 달성` });
   if ((usageValue(c)) > 110)  alerts.push({ lvl:'info',    msg: `ℹ 가동률 ${fmtP(usageValue(c))} — 100% 초과, 설비 과부하 모니터링 권장` });
   else if ((usageValue(c)) < 50) alerts.push({ lvl:'danger', msg: `⚠ 가동률 ${fmtP(usageValue(c))} — 50% 미달, 운영 효율화 필요` });
@@ -5004,6 +5075,7 @@ function renderSourceCoverage(ent) {
 }
 
 function renderAll() {
+  renderSourceNotice();
   if (!dashboard) return;
   const ent = getEntity();
   if (!ent) return;
@@ -5044,6 +5116,17 @@ function renderAll() {
   renderTable(ent);
   renderReviewed(renderDetail,ent,['detailGrid'],usageComplete);
   renderReviewed(renderInlineStoreDetail,ent,['inlineStoreDetail'],ent.isAll || usageComplete);
+}
+
+function renderSourceNotice() {
+  const el=$('refreshNotice');
+  if (!el) return;
+  const cached=sourceSnapshot?.delivery?.mode==='cached';
+  const partial=sourceSnapshot?.readiness?.mode==='partial';
+  el.hidden=!cached && !partial;
+  el.textContent=cached
+    ? `마지막 확인 데이터를 표시합니다. ${sourceSnapshot.delivery.reason || '다음 자동 조회에서 갱신합니다.'}`
+    : partial ? '원천 갱신 중입니다. 수신 상태와 합계가 확인된 데이터부터 표시합니다. 쿠폰 및 운영귀속매출은 최종 점검 후 반영합니다.' : '';
 }
 
 /* ── 20. 이벤트 바인딩 ──────────────────────────────────────── */
@@ -5112,6 +5195,7 @@ async function init(showLoading=true) {
     await loadData();
     sourceRefreshFailed = false;
     renderAll();
+    saveCachedSnapshot(sourceSnapshot);
     $('loadingOverlay').style.display = 'none';
   } catch(e) {
     dashboard = previousDashboard;
