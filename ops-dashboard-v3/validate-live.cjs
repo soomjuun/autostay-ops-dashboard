@@ -27,7 +27,7 @@ const gids = {
   }
 };
 
-function createDashboardApi() {
+function createDashboardApi(elements = {}) {
   let source = fs.readFileSync(appPath, 'utf8');
   source = source.replace(/parseHash\(\);\s*bindEvents\(\);\s*init\(\);\s*$/, '');
   source += `
@@ -39,18 +39,20 @@ function createDashboardApi() {
       runAudit, buildCapacityData,
       sourceDateKey, isSourceCheckPending, dateContract, usagePresentation, utilizationDataset, sparkline,
       readCachedSnapshot, saveCachedSnapshot,
+      renderOpsArpuChart, renderSubscriptionPipeline,
+      getChartConfig: id => charts[id]?.config,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
       setState: value => { state = value; }
     };
   `;
 
-  function Chart() {}
+  function Chart(ctx, config) { this.config = config; this.destroy = () => {}; }
   Chart.defaults = { plugins: { datalabels: {} }, font: {}, animation: {} };
   Chart.register = () => {};
 
   const document = {
-    getElementById: () => null,
+    getElementById: id => elements[id] || null,
     querySelector: () => null,
     createElement: () => ({ remove() {}, style: {} }),
     body: { appendChild() {} }
@@ -412,7 +414,7 @@ async function main() {
   });
 
   const periods = {};
-  for (const period of ['all', 'H1', 'H2', 'Q1', 'Q2', 'Q3']) {
+  for (const period of ['all', 'H1', 'H2', 'Q1', 'Q2', 'Q3', 'Q4']) {
     api.setState({ quarter: period, store: 'all' });
     const months = api.filterMonths(overall);
     const portfolio = api.aggMonths(months) || {};

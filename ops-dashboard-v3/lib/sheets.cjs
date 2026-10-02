@@ -130,13 +130,21 @@ async function fetchSnapshot({env=process.env,fetchImpl=fetch}={}) {
     catch { throw new SourceError('SOURCE_PARTIAL_PENDING','원천 갱신 중입니다. 합계와 수신 상태가 확인된 항목부터 다음 조회에 반영합니다.'); }
     return {schemaVersion:1,sheetId:SHEET_ID,fetchedAt:new Date().toISOString(),build:after,...partial};
   }
-  const after=buildState((await readRanges([SOURCES.cfg.range],env,fetchImpl))[0]);
+  const finalCfgRows=(await readRanges([SOURCES.cfg.range],env,fetchImpl))[0];
+  const after=buildState(finalCfgRows);
+  const finalCfg=Object.fromEntries(finalCfgRows);
   if (after.failed || after.pending || before.runId!==after.runId || before.status!==after.status)
     throw new SourceError('SOURCE_CHANGED','조회 중 원천 시트가 변경되어 갱신을 보류했습니다. 다음 조회에 다시 반영합니다.');
+  if (finalCfg.dashboard_audit_run_id===after.runId && Number(finalCfg.dashboard_audit_blocking)>0)
+    throw new SourceError('SOURCE_AUDIT_FAILED','원천 시트의 차단 오류가 남아 있어 갱신을 보류합니다.');
+  const auditKeys=['dashboard_audit_run_id','dashboard_audit_blocking','dashboard_audit_version','dashboard_audit_source_fingerprint'];
+  if (auditKeys.some(key=>String(cfg[key] ?? '').trim()!==String(finalCfg[key] ?? '').trim()))
+    throw new SourceError('SOURCE_CHANGED','조회 중 원천 감사 결과가 변경되어 갱신을 보류했습니다. 다음 조회에 다시 반영합니다.');
   for (const key of ['usageQuality','usageQualityPrev','salesQuality','salesQualityPrev']) {
     const rows = sheets[key];
     const runColumn = rows?.[0]?.indexOf('실행본');
-    if (runColumn < 0 || rows?.[1]?.[runColumn] !== before.runId || !rows?.[0]?.includes('품질상태'))
+    const populated=rows?.slice(1).filter(row=>row.some(value=>value!=='' && value!=null)) || [];
+    if (runColumn < 0 || !populated.length || populated.some(row=>row[runColumn]!==before.runId) || !rows?.[0]?.includes('품질상태'))
       throw new SourceError('SOURCE_QUALITY_PENDING','일별 원천 품질표가 현재 실행본과 일치하지 않아 갱신을 보류합니다.');
   }
   if (!sheets.factMonthly?.[0]?.includes('월번호') || !sheets.overallMonthly?.[0]?.includes('월번호'))

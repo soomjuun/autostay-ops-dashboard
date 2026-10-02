@@ -41,6 +41,49 @@ test('completed build and informational statuses do not become pending warnings'
   assert.equal(result.salesLatestDate.getDate(),9);
   assert.equal(api.isSourceCheckPending({name:'대시보드 빌드 상태',status:'진행 중'}),true);
 });
+
+test('equivalent date serials are informational, but real synchronization mismatches remain warnings',()=>{
+  const api=createDashboardApi();
+  const check=value=>api.parseDataQuality([['점검 항목','상태','기준/값'],['최신일 동기화','주의',value]]);
+  const value='최신일 동기화: _overall 2026=46296 / raw=2026-10-01, _overall 2025=45931 / raw=2025-10-01';
+  assert.equal(check(value).warnings.length,0);
+  assert.equal(check(value).infos.length,1);
+  assert.equal(check(value.replace('46296','46295')).warnings.length,1);
+  assert.equal(check(value+' / 오류 행 발견').warnings.length,1);
+});
+
+test('Q4 filters only received fourth-quarter months and keeps MTD targets',()=>{
+  const api=createDashboardApi();api.setState({quarter:'Q4',store:'all'});
+  const months=[{monthNum:9,quarter:'Q3',gross:100},
+    {monthNum:10,quarter:'Q4',gross:90,net:85,target:100},
+    {monthNum:11,quarter:'Q4',gross:null,net:null,target:300}];
+  const filtered=api.filterMonths(months);
+  assert.deepEqual(Array.from(filtered,m=>m.monthNum),[10]);
+  assert.equal(api.aggMonths(filtered).achievement,85);
+});
+
+test('ARPU-only charts hide the absent coupon axis and keep zero coupon data visible',()=>{
+  const api=createDashboardApi({opsArpuChart:{closest:()=>null}});
+  api.renderOpsArpuChart({months:[{month:'1월',monthNum:1,hasDiscountData:false,arpu:40000}]});
+  let config=api.getChartConfig('opsArpuChart');
+  assert.equal(config.options.scales.pct.display,false);
+  assert.equal(config.options.scales.arpu.position,'left');
+  assert.equal(config.data.datasets.length,1);
+  api.renderOpsArpuChart({months:[{month:'1월',monthNum:1,hasDiscountData:true,discountShare:0,arpu:40000}]});
+  config=api.getChartConfig('opsArpuChart');
+  assert.equal(config.options.scales.pct.display,true);
+  assert.equal(config.options.scales.arpu.position,'right');
+  assert.equal(config.data.datasets[0].data[0],0);
+});
+
+test('subscription pipeline reports zero change neutrally and keeps positive and negative flows',()=>{
+  const panel={innerHTML:''};const api=createDashboardApi({subPipeline:panel});
+  const render=(newSubs,cancelSubs)=>api.renderSubscriptionPipeline({months:[{retained:100,newSubs,cancelSubs,
+    netAdds:newSubs-cancelSubs,churn:5,hasSubscriptionData:true,status:'mtd'}]});
+  render(20,20);assert.match(panel.innerHTML,/변동 없음/);assert.doesNotMatch(panel.innerHTML,/신규 우위|해지 우위/);
+  render(21,20);assert.match(panel.innerHTML,/신규 우위/);assert.match(panel.innerHTML,/\+1건/);
+  render(19,20);assert.match(panel.innerHTML,/해지 우위/);assert.match(panel.innerHTML,/-1건/);
+});
 test('subscription exposure uses its own date and mismatched ARPU stays null through aggregation',()=>{
   const api=apiWithDates(); const row=api.parseFactMonthly(fact()).get('일산')[0];
   assert.ok(Math.abs(row.retainedExposure-100*7/30)<1e-9);
@@ -233,6 +276,49 @@ test('authenticated batch read returns only a stable completed snapshot',async()
   const snapshot=await fetchSnapshot(mockSource(['complete']));
   assert.equal(snapshot.build.status,'complete'); assert.ok(snapshot.sheets.factMonthly.length);
   assert.equal(JSON.stringify(snapshot).includes('unit-test-token'),false);
+});
+
+test('final completed audit blockers and changed seals reject a mixed snapshot',async()=>{
+  for(const field of ['dashboard_audit_blocking','dashboard_audit_run_id','dashboard_audit_source_fingerprint']) {
+    const source=mockSource(['complete']);const original=source.fetchImpl;let reads=0;
+    source.fetchImpl=async(url,options)=>{
+      const response=await original(url,options);
+      if(String(url).includes('oauth2.googleapis.com'))return response;
+      const payload=await response.json();reads++;
+      if(reads===3) {
+        const rows=payload.valueRanges[0].values;
+        const row=rows.find(r=>r[0]===field);
+        if(row)row[1]=field==='dashboard_audit_blocking'?1:'changed-run';
+        else rows.push([field,'changed-fingerprint']);
+      }
+      return {ok:true,json:async()=>payload};
+    };
+    await assert.rejects(fetchSnapshot(source),{code:field==='dashboard_audit_blocking'?'SOURCE_AUDIT_FAILED':'SOURCE_CHANGED'});
+  }
+});
+
+test('completed quality tables require matching execution IDs in every populated row',async()=>{
+  const source=mockSource(['complete']);const original=source.fetchImpl;
+  source.fetchImpl=async(url,options)=>{
+    const response=await original(url,options);
+    if(String(url).includes('oauth2.googleapis.com'))return response;
+    const payload=await response.json();
+    for(const range of payload.valueRanges)if(range.values[0]?.includes('실행본'))range.values.push(['하남',month,'OK','old-run']);
+    return {ok:true,json:async()=>payload};
+  };
+  await assert.rejects(fetchSnapshot(source),{code:'SOURCE_QUALITY_PENDING'});
+});
+
+test('the same run transitions from partial to complete with coupon and display sources restored',async()=>{
+  const sheets=partialSheets();const source=partialSource(sheets);
+  const partial=await fetchSnapshot(source);
+  sheets.cfg.find(r=>r[0]==='dashboard_build_status')[1]='success';
+  sheets.cfg.find(r=>r[0]==='dashboard_audit_run_id')[1]='current-run';
+  const complete=await fetchSnapshot(source);
+  assert.equal(partial.readiness.mode,'partial');assert.equal(complete.readiness.mode,'complete');
+  assert.deepEqual(complete.sheets.coupon,sheets.coupon);
+  assert.deepEqual(complete.sheets.summary,sheets.summary);
+  assert.equal(complete.build.runId,partial.build.runId);
 });
 
 test('stale audit and stale quality execution IDs fail closed',async()=>{

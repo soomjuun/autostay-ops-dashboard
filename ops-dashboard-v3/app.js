@@ -1425,6 +1425,12 @@ function isSourceCheckPending(c) {
 
 function isInformationalDataQualityCheck(c) {
   if (c?.name === '원천별 최신일') return true;
+  if (c?.name === '최신일 동기화' && c.status === '주의') {
+    const pairs = String(c.value || '').replace(/^최신일 동기화:\s*/, '').split(/\s*,\s*/)
+      .map(part => part.match(/^_overall\s+(\d{4})=(\d{1,7}(?:\.\d+)?)\s*\/\s*raw=(\d{4}-\d{2}-\d{2})$/));
+    if (pairs.length === 2 && pairs.every(pair => pair && pair[1] === pair[3].slice(0,4) &&
+        sourceDateKey(Number(pair[2])) === pair[3])) return true;
+  }
   if (c?.name === '원천 미수신 0값 보호' && /매장 분석 O6 구독 결측 보호 누락/u.test(`${c?.value || ''} ${c?.note || ''}`)) {
     return true;
   }
@@ -2687,8 +2693,8 @@ function renderOpsArpuChart(ent) {
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{position:'top',labels:{boxWidth:10,padding:10,font:{size:11}}}, tooltip:TTdefaults },
       scales:{
-        pct:{ position:'left',  ticks:{callback:v=>`${v.toFixed(1)}%`, font:{size:10}}, grid:{color:'#f0ebe3'}, suggestedMin:0 },
-        arpu:{ position:'right', ticks:{callback:v=>`${(v/10000).toFixed(1)}만`, font:{size:10}}, grid:{display:false} },
+        pct:{ display:hasDiscountData, position:'left', ticks:{callback:v=>`${v.toFixed(1)}%`, font:{size:10}}, grid:{color:'#f0ebe3'}, min:0 },
+        arpu:{ position:hasDiscountData ? 'right' : 'left', ticks:{callback:v=>`${(v/10000).toFixed(1)}만`, font:{size:10}}, grid:{display:!hasDiscountData,color:'#f0ebe3'} },
         x:{ grid:{display:false}, ticks:{font:{size:10}} }
       }
     }
@@ -4009,7 +4015,7 @@ function renderSubscriptionPipeline(ent) {
   const flowRows = [
     { label:'월중 신규', val: newSubs, color:'#1d7a8a', note:`유지 대비 단순비율 ${fmtP(acquisitionPct)}` },
     { label:'월중 해지', val: cancelSubs, color:'#b24c58', note:`월환산 이탈률 ${fmtP(churnPct)}` },
-    { label:'순증감', val: netAdds, color:netAdds>=0?'#216552':'#b24c58', note:newSubs >= cancelSubs ? '신규 우위' : '해지 우위' }
+    { label:'순증감', val: netAdds, color:netAdds===0?'#697386':netAdds>0?'#216552':'#b24c58', note:netAdds===0 ? '변동 없음' : netAdds>0 ? '신규 우위' : '해지 우위' }
   ];
 
   el.innerHTML = `
