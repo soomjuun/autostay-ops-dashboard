@@ -581,6 +581,7 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 /* 우선 점검 매장 카드 */
 .ac-danger-store{
   display:flex;align-items:center;gap:10px;
+  width:100%;min-width:0;text-align:left;font:inherit;color:inherit;
   padding:8px 10px;border-radius:var(--r-sm);
   background:var(--surface-soft);border:1px solid var(--border);cursor:pointer
 }
@@ -594,6 +595,7 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 .ac-danger-issues{font-size:11px;color:var(--muted);flex:2}
 .ac-danger-score{
   font-size:13px;font-weight:900;
+  white-space:nowrap;flex-shrink:0;
   padding:2px 9px;border-radius:99px;
   background:var(--rose-soft);color:var(--rose)
 }
@@ -604,7 +606,14 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 }
 .ac-loss-sub{font-size:11.5px;color:var(--muted);margin-bottom:10px}
 .ac-loss-breakdown{display:flex;flex-direction:column;gap:5px}
-.ac-loss-row{display:flex;justify-content:space-between;font-size:12px}
+.ac-loss-row{display:flex;justify-content:space-between;gap:12px;font-size:12px;margin:6px 0}
+.ac-loss-row strong{white-space:nowrap;font-variant-numeric:tabular-nums}
+.ac-basis{font-size:11px;color:var(--muted);line-height:1.6;margin:8px 0;overflow-wrap:anywhere}
+.ac-store-summary{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}
+.ac-recommendation{display:block;font-size:11px;font-weight:400;line-height:1.6;color:var(--muted)}
+.ac-criteria,.ac-opportunity-detail{font-size:11px;line-height:1.6;border-top:1px solid var(--border);padding-top:8px;margin-top:10px}
+.ac-criteria summary,.ac-opportunity-detail summary{cursor:pointer;color:var(--muted);font-weight:700}
+.ac-criteria a{color:var(--navy)}
 .ac-loss-bar-wrap{height:5px;background:var(--bg2);border-radius:99px;overflow:hidden;margin:3px 0 6px}
 .ac-loss-bar{height:100%;border-radius:99px;background:rgba(178,76,88,.5)}
 

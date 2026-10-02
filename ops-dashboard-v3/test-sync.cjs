@@ -129,20 +129,133 @@ test('reviewed sections keep their frames across all periods without retaining u
   assert.equal(api.getChartConfig('opsArpuChart'),undefined);
 });
 
-test('unavailable action summaries keep all three cards and replace stale values instead of showing zero',()=>{
+function actionApi(stores=[]) {
   const dom=reviewDom();
   for(const id of ['actionCenter','acActionList','acDangerList','acLossBody','acActionCount','acDangerCount']) {
     const node=dom.add(id);node.innerHTML='stale period data';node.textContent='3';
+    node.querySelectorAll=()=>[];
   }
   const api=createDashboardApi(dom.elements,{createElement:dom.createElement});
-  api.renderReviewed(()=>assert.fail('unverified actions must not run'),{isAll:true},['actionCenter'],false);
-  assert.equal(dom.elements.actionCenter.hidden,false);
-  for(const id of ['acActionList','acDangerList','acLossBody']) {
-    assert.equal(dom.elements[id].innerHTML,'');
-    assert.ok(dom.elements[`${id}Review`]);
-  }
-  assert.equal(dom.elements.acActionCount.textContent,'—');
+  api.setDashboard({stores,opsStores:[]});api.setState({quarter:'all',store:'all'});
+  return {api,dom};
+}
+function opportunityFixture(overrides={}) {
+  return {month:'1월',monthNum:1,quarter:'Q1',status:'confirmed',capacity:100,mtdCapacity:100,
+    usage:60,net:600,gross:600,refundAmount:0,target:1000,retained:100,retainedExposure:100,
+    newSubs:2,cancelSubs:6,netAdds:-4,hasUsageData:true,hasSalesData:true,hasSubscriptionData:true,
+    hasArpwData:true,lossUnitPrice:10,...overrides};
+}
+
+test('partial usage does not suppress confirmed sales and subscription actions or fabricate opportunity zero',()=>{
+  const row=opportunityFixture({hasUsageData:false,usage:null});
+  const {api,dom}=actionApi([{name:'일산',months:[row]}]);
+  api.renderActionCenter({isAll:true,months:[row],current:api.aggMonths([row])});
+  assert.equal(dom.elements.acActionCount.textContent,'3');
+  assert.match(dom.elements.acActionList.innerHTML,/순매출 달성률 60.0%|이탈률 6.0%|구독 순증감 -4건/);
+  assert.match(dom.elements.acActionList.innerHTML,/가동률은 자료 확인 전/);
+  assert.doesNotMatch(dom.elements.acActionList.innerHTML,/선택 기간 자료 확인 후 표시|stale period data|1차 원인|DRI/);
+  assert.match(dom.elements.acDangerList.innerHTML,/일산/);
+  assert.match(dom.elements.acLossBody.innerHTML,/ac-loss-total">—/);
+  assert.match(dom.elements.acLossBody.innerHTML,/확인 0\/1개 매장-월/);
+});
+
+test('priority uses common confirmed metrics without scoring missing utilization as zero',()=>{
+  const full=opportunityFixture({net:950,gross:950,usage:10,cancelSubs:0,netAdds:2});
+  const missing=opportunityFixture({hasUsageData:false,usage:null,net:800,gross:800,cancelSubs:0,netAdds:2});
+  const {api}=actionApi([{name:'일산',months:[full]},{name:'하남',months:[missing]}]);
+  const review=api.buildPriorityReview({isAll:true});
+  assert.deepEqual(Array.from(review.common,rule=>rule.key),['refundRate','churn','achievement']);
+  assert.equal(review.rows[0].name,'하남');assert.equal(review.rows[1].signals.length,0);
+  const single=api.buildPriorityReview({isAll:false,name:'일산',months:[full]});
+  assert.equal(single.common.length,4);assert.equal(single.rows[0].signals[0].key,'utilization');
+});
+
+test('empty comparison basis does not manufacture priority ranks or normal status',()=>{
+  const row=opportunityFixture({hasSalesData:false,hasUsageData:false,hasSubscriptionData:false,usage:null});
+  const {api,dom}=actionApi([{name:'일산',months:[row]}]);
+  api.renderActionCenter({isAll:true,months:[row],current:api.aggMonths([row])});
   assert.equal(dom.elements.acDangerCount.textContent,'—');
+  assert.match(dom.elements.acDangerList.innerHTML,/순위를 산정하지 않습니다/);
+  assert.doesNotMatch(dom.elements.acDangerList.innerHTML,/ac-danger-rank|class="ac-danger-store"/);
+});
+
+test('monthly prices and idle are summed independently, including confirmed real zero usage',()=>{
+  const rows=[opportunityFixture({usage:120,net:1200,lossUnitPrice:10}),
+    opportunityFixture({month:'2월',monthNum:2,usage:50,net:1000,lossUnitPrice:20}),
+    opportunityFixture({month:'3월',monthNum:3,usage:0,net:100,gross:100,lossUnitPrice:3})];
+  const {api}=actionApi([{name:'성수',months:rows}]);
+  const ent={isAll:false,name:'성수',months:rows};
+  const review=api.buildOpportunityReview(ent),capacity=api.buildCapacityData(ent)[0];
+  assert.equal(review.loss,1300);assert.equal(review.idle,150);assert.equal(review.readyCount,3);
+  assert.equal(capacity.confirmedLoss,1300);assert.equal(capacity.confirmedIdle,150);
+  assert.equal(capacity.confirmedMonths,3);assert.equal(capacity.confirmedDesignCap,300);
+});
+
+test('zero MTD usage, zero unit price and zero projected usage are valid values, absent price is not',()=>{
+  const {api}=actionApi();
+  const row=opportunityFixture({status:'mtd',usage:0,net:100,projectedUsage:0,lossUnitPrice:3,elapsedDays:1,daysInSourceMonth:31});
+  const result=api.opportunityMonth(row);assert.equal(result.loss,300);assert.equal(result.projectedLoss,300);
+  const cap=api.buildCapacityData({isAll:false,name:'일산',months:[row]})[0];
+  assert.equal(cap.hasMTD,true);assert.equal(cap.mtdLoss,300);assert.equal(cap.projUsage,0);assert.equal(cap.projLoss,300);
+  assert.equal(api.opportunityMonth({...row,lossUnitPrice:0}).loss,0);
+  assert.equal(api.opportunityMonth({...row,lossUnitPrice:null}).ready,false);
+  assert.equal(api.buildCapacityData({isAll:false,name:'일산',months:[{...row,lossUnitPrice:null}]} )[0].lossEstimate,null);
+});
+
+test('blank opportunity source fields preserve null while real zero remains zero',()=>{
+  const api=apiWithDates();
+  let row=api.parseFactMonthly(fact({최신매출일_2026:day(7)})).get('일산')[0];
+  for(const key of ['lossUnitPrice','idleMtd','projectedUsage','projectedIdle','lossMtd','lossProjected'])assert.equal(row[key],null,key);
+  row=api.parseFactMonthly(fact({최신매출일_2026:day(7),손실단가_2026:0,월말예상총사용_2026:0})).get('일산')[0];
+  assert.equal(row.lossUnitPrice,0);assert.equal(row.projectedUsage,0);
+});
+
+test('source formula mismatch excludes only its store-month and never guesses the missing amount',()=>{
+  const rows=[opportunityFixture(),opportunityFixture({month:'2월',monthNum:2,lossMtd:999}),
+    opportunityFixture({month:'3월',monthNum:3,hasUsageData:false,usage:null})];
+  const {api,dom}=actionApi([{name:'일산',months:rows}]);
+  const review=api.buildOpportunityReview({isAll:true});
+  assert.equal(review.loss,400);assert.equal(review.readyCount,1);assert.equal(review.totalCount,3);assert.equal(review.complete,false);
+  api.renderActionCenter({isAll:true,months:rows,current:api.aggMonths(rows)});
+  assert.match(dom.elements.acLossBody.innerHTML,/산출 가능한 구간 합계|확인 1\/3개 매장-월|2개 매장-월은 제외/);
+  assert.match(dom.elements.acLossBody.innerHTML,/2월 원천 기회금액 산식 불일치/);
+});
+
+test('all seven periods recompute eligible amounts and priorities within the selected source months',()=>{
+  const rows=Array.from({length:month},(_,i)=>opportunityFixture({month:`${i+1}월`,monthNum:i+1,
+    quarter:`Q${Math.ceil((i+1)/3)}`,lossUnitPrice:i+1,status:i+1===month?'mtd':'confirmed'}));
+  const {api,dom}=actionApi([{name:'일산',months:rows}]);
+  const bounds={all:[1,12],H1:[1,6],H2:[7,12],Q1:[1,3],Q2:[4,6],Q3:[7,9],Q4:[10,12]};
+  for(const [period,[start,end]] of Object.entries(bounds)) {
+    api.setState({quarter:period,store:'all'});
+    const selected=api.filterMonths(rows),expected=rows.filter(row=>row.monthNum>=start && row.monthNum<=end);
+    const review=api.buildOpportunityReview({isAll:true});
+    assert.equal(review.loss,expected.reduce((sum,row)=>sum+40*row.lossUnitPrice,0),period);
+    assert.equal(review.totalCount,expected.length,period);
+    api.renderActionCenter({isAll:true,months:selected,current:api.aggMonths(selected)||{}});
+    for(const id of ['acActionList','acDangerList','acLossBody'])assert.doesNotMatch(dom.elements[id].innerHTML,/선택 기간 자료 확인 후 표시|stale period data/);
+  }
+});
+
+test('missing subscription months cannot produce confirmed flow recommendations',()=>{
+  const rows=[opportunityFixture(),opportunityFixture({month:'2월',monthNum:2,hasSubscriptionData:false})];
+  const {api,dom}=actionApi([{name:'일산',months:rows}]);
+  api.renderActionCenter({isAll:true,months:rows,current:api.aggMonths(rows)});
+  assert.doesNotMatch(dom.elements.acActionList.innerHTML,/<strong>이탈률|<strong>구독 순증감/);
+  assert.match(dom.elements.acActionList.innerHTML,/이탈률.*자료 확인 전/);
+});
+
+test('store snapshots use source thresholds and preserve missing sales and subscription values',()=>{
+  const panel={innerHTML:'',querySelectorAll:()=>[]};const api=createDashboardApi({storeTableBody:panel});
+  const rows=[opportunityFixture({hasSalesData:false,hasSubscriptionData:false,net:null,gross:null,
+    hasUsageData:false,usage:null})];
+  api.setDashboard({stores:[{name:'일산',months:rows}],opsStores:[]});api.setState({quarter:'all',store:'all'});
+  api.renderTable({isAll:true});
+  assert.match(panel.innerHTML,/<td data-label="순매출 달성률">—/);
+  assert.match(panel.innerHTML,/<td data-label="이탈률">—/);
+  assert.match(panel.innerHTML,/일부 자료 확인 중/);assert.doesNotMatch(panel.innerHTML,/목표 미달/);
+  rows[0]=opportunityFixture({net:850,gross:850,usage:75,cancelSubs:4,netAdds:0});
+  api.renderTable({isAll:true});assert.match(panel.innerHTML,/목표 미달/);
 });
 
 test('partial utilization keeps four signals and does not classify observed usage as a confirmed risk',()=>{

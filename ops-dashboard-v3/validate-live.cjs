@@ -36,11 +36,11 @@ function createDashboardApi(elements = {}, documentOverrides = {}) {
       mergeStoreWithFact, aggregatePortfolioMonths,
       parseStore, parseOps, parseOverall, applyPortfolioCouponDiscounts,
       parseSummary, aggMonths, filterMonths, parseDataQuality, runDataQualityAudit,
-      runAudit, buildCapacityData,
+      runAudit, buildCapacityData, opportunityMonth, buildOpportunityReview, buildPriorityReview, renderActionCenter,
       sourceDateKey, isSourceCheckPending, dateContract, usagePresentation, utilizationDataset, sparkline,
       readCachedSnapshot, saveCachedSnapshot,
       renderOpsArpuChart, renderSubscriptionPipeline, renderReviewed, renderSignals, renderDetail,
-      renderPaymentPanel, renderHeatmap,
+      renderPaymentPanel, renderHeatmap, renderTable,
       getChartConfig: id => charts[id]?.config,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
@@ -416,6 +416,15 @@ async function main() {
   });
 
   const periods = {};
+  const opportunityDiscrepancies = [];
+  const opportunityPeriods = {};
+  const qualityRow = (key, row) => {
+    const table=sheets[key] || [], headers=table[0] || [];
+    const quality=table.slice(1).find(item=>String(item[headers.indexOf('매장')])===rawText(row,'매장')
+      && Number(item[headers.indexOf('월')])===rawNumber(row,'월번호'));
+    return quality;
+  };
+  const qualityComplete = (key,row) => qualityRow(key,row)?.[(sheets[key][0] || []).indexOf('품질상태')]==='OK';
   for (const period of ['all', 'H1', 'H2', 'Q1', 'Q2', 'Q3', 'Q4']) {
     api.setState({ quarter: period, store: 'all' });
     const months = api.filterMonths(overall);
@@ -430,6 +439,22 @@ async function main() {
     Object.entries(reconciliation).forEach(([key, difference]) => {
       if (!closeEnough(difference, 0)) discrepancies.push({ period, key, difference });
     });
+    const selectedMonths=new Set(months.map(row=>row.monthNum));
+    const eligibleRaw=rawRows.filter(row=>selectedMonths.has(rawNumber(row,'월번호'))
+      && !(rawText(row,'매장')==='안성' && rawNumber(row,'월번호')<5));
+    const usableRaw=eligibleRaw.filter(row=>qualityComplete('usageQuality',row) && qualityComplete('salesQuality',row)
+      && api.sourceDateKey(row[index['최신매출일_2026']])===api.sourceDateKey(row[index['최신사용일_2026']]
+        ?? qualityRow('usageQuality',row)?.[(sheets.usageQuality[0] || []).indexOf('집계 기준일')])
+      && Number.isFinite(Number(row[index['손실단가_2026']])) && rawText(row,'손실단가_2026')!=='');
+    const expectedLoss=usableRaw.reduce((sum,row)=>sum+Math.max(0,rawNumber(row,'MTD_Capacity_2026')-rawNumber(row,'총사용_2026'))
+      *rawNumber(row,'손실단가_2026'),0);
+    const review=api.buildOpportunityReview({isAll:true});
+    opportunityPeriods[period]={totalCount:review.totalCount,readyCount:review.readyCount,
+      complete:review.complete,loss:review.readyCount ? review.loss : null,sourceFormulaSum:expectedLoss,
+      confirmedLoss:review.confirmedLoss,mtdLoss:review.mtdLoss,projectedLoss:review.projectedLoss};
+    if (!metricClose(review.loss,expectedLoss) || review.totalCount!==eligibleRaw.length || review.readyCount!==usableRaw.length)
+      opportunityDiscrepancies.push({period,expectedLoss,actualLoss:review.loss,expectedCount:usableRaw.length,
+        actualCount:review.readyCount,expectedTotal:eligibleRaw.length,actualTotal:review.totalCount});
     periods[period] = {
       months: months.map(month => month.month),
       target: portfolio.target || 0,
@@ -583,6 +608,8 @@ async function main() {
     })),
     discrepancies,
     periods,
+    opportunityDiscrepancies,
+    opportunityPeriods,
     currentCapacity: {
       capacity: capacityComplete ? mtdCapacity : null,
       usage: capacityComplete ? mtdUsage : null,
@@ -613,7 +640,8 @@ async function main() {
     ...storeTabDiscrepancies,
     ...opsDiscrepancies,
     ...summaryDiscrepancies,
-    ...sourceBlockingIssues
+    ...sourceBlockingIssues,
+    ...opportunityDiscrepancies
   ];
   if (factByStore.size !== storeNames.length || legacyAggregateMismatchMonths || blockingIssues.length) {
     process.exitCode = 1;
