@@ -27,7 +27,7 @@ const gids = {
   }
 };
 
-function createDashboardApi(elements = {}) {
+function createDashboardApi(elements = {}, documentOverrides = {}) {
   let source = fs.readFileSync(appPath, 'utf8');
   source = source.replace(/parseHash\(\);\s*bindEvents\(\);\s*init\(\);\s*$/, '');
   source += `
@@ -39,7 +39,8 @@ function createDashboardApi(elements = {}) {
       runAudit, buildCapacityData,
       sourceDateKey, isSourceCheckPending, dateContract, usagePresentation, utilizationDataset, sparkline,
       readCachedSnapshot, saveCachedSnapshot,
-      renderOpsArpuChart, renderSubscriptionPipeline,
+      renderOpsArpuChart, renderSubscriptionPipeline, renderReviewed, renderSignals, renderDetail,
+      renderPaymentPanel, renderHeatmap,
       getChartConfig: id => charts[id]?.config,
       setSourceSnapshot: value => { sourceSnapshot = value; },
       setDashboard: value => { dashboard = value; },
@@ -55,7 +56,8 @@ function createDashboardApi(elements = {}) {
     getElementById: id => elements[id] || null,
     querySelector: () => null,
     createElement: () => ({ remove() {}, style: {} }),
-    body: { appendChild() {} }
+    body: { appendChild() {} },
+    ...documentOverrides
   };
   const sandbox = {
     Chart,

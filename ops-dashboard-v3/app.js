@@ -2061,20 +2061,24 @@ function renderSignals(ent) {
 
   // 순매출 달성률
   const ach = c.achievement||0;
-  if (ach >= 110) signals.push({type:'ok',  title:'목표 초과 달성', text:`순매출 달성률 ${fmtP(ach)} ★`});
+  if (c.hasSalesData === false || c.achievement == null) signals.push({type:'neutral', title:'매출 확인 대기', text:'수신된 매출과 목표를 확인한 후 판정합니다.'});
+  else if (ach >= 110) signals.push({type:'ok',  title:'목표 초과 달성', text:`순매출 달성률 ${fmtP(ach)} ★`});
   else if (ach >= 100) signals.push({type:'ok', title:'목표 달성',  text:`순매출 달성률 ${fmtP(ach)}`});
   else if (ach >= 80)  signals.push({type:'warn',title:'목표 근접', text:`순매출 달성률 ${fmtP(ach)} — ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 미달`});
   else                 signals.push({type:'bad', title:'목표 미달', text:`순매출 달성률 ${fmtP(ach)} — 즉시 점검 필요`});
 
   // 이탈률
   const churn = c.churn||0;
-  if (churn < 4)       signals.push({type:'ok',  title:'이탈 안정', text:`이탈률 ${fmtP(churn)} — 구독 건강`});
+  if (c.hasSubscriptionData === false || c.churn == null) signals.push({type:'neutral', title:'구독 확인 대기', text:'수신된 구독 지표를 확인한 후 판정합니다.'});
+  else if (churn < 4)       signals.push({type:'ok',  title:'이탈 안정', text:`이탈률 ${fmtP(churn)} — 구독 건강`});
   else if (churn < 8)  signals.push({type:'warn', title:'이탈 주의', text:`이탈률 ${fmtP(churn)} — 리텐션 점검`});
   else                 signals.push({type:'bad',  title:'이탈 위험', text:`이탈률 ${fmtP(churn)} — 즉각 대응`});
 
   // FIX 4 — 가동률 시그널 (100% 초과 과부하 케이스 추가)
   const util = usageValue(c);
-  if (util > 100) {
+  if (c.hasUsageData === false || c.utilization == null) {
+    signals.push({type:'neutral', title:'가동률 판정 대기', text:`${usagePresentation(c).label} / 이용량 확인 후 판정`});
+  } else if (util > 100) {
     signals.push({type:'warn', title:'과부하 주의', text:`운영 가동률 ${fmtP(util)} — Capacity 초과, 설비 점검 및 Capacity 재검토 필요`});
   } else if (util >= 85) {
     signals.push({type:'ok', title:'가동 최적', text:`운영 가동률 ${fmtP(util)} — 고효율 운영`});
@@ -2088,7 +2092,8 @@ function renderSignals(ent) {
 
   // MRR
   const mrrYoY = c.mrrYoY||0;
-  if (!c.hasMrrYoY)    signals.push({type:'warn', title:'MRR 비교 제외', text:`전년 동기 운영 이력 없음 · ${fmtS(c.mrr||0)}`});
+  if (c.hasSubscriptionData === false || c.mrr == null) signals.push({type:'neutral', title:'MRR 확인 대기', text:'수신된 MRR을 확인한 후 비교합니다.'});
+  else if (!c.hasMrrYoY)    signals.push({type:'warn', title:'MRR 비교 제외', text:`전년 동기 운영 이력 없음 · ${fmtS(c.mrr||0)}`});
   else if (mrrYoY >= 10) signals.push({type:'ok', title:'MRR 고성장', text:`YoY +${fmtP(mrrYoY)} · ${fmtS(c.mrr||0)}`});
   else if (mrrYoY >= 0) signals.push({type:'ok', title:'MRR 성장', text:`YoY +${fmtP(mrrYoY)}`});
   else                  signals.push({type:'warn', title:'MRR 감소', text:`YoY ${fmtP(mrrYoY)} — 구독 확대 필요`});
@@ -4138,7 +4143,7 @@ function renderPaymentPanel(ent) {
       note:c.hasArpwData === false ? '사용 원천 누락 또는 기준일 불일치로 산출 보류' : '실결제매출에서 환불 차감 후', color:'green' },
     { label:'매장PASS ARPU', val:arpu>0?fmtS(arpu):'—',
       note:c.hasSubscriptionData ? `${arpuBasisLabel(c)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), color:'accent' },
-  ].filter(it => it.val !== '—');
+  ];
 
   el.innerHTML = items.map(it => `
     <div class="pay-item ${it.color}">
@@ -4174,12 +4179,12 @@ function renderHeatmap(ent) {
     return {
       name:        s.name,
       status:      ops.status || '',
-      achievement: agg.achievement  || 0,
+      achievement: agg.hasSalesData === false ? null : agg.achievement ?? null,
       utilization: agg.utilization,
-      churn:       agg.churn        || 0,
-      refundRate:  agg.refundRate   || 0,
-      netAdds:     agg.netAdds      || 0,
-      arpu:        agg.arpu         || 0,
+      churn:       agg.hasSubscriptionData === false ? null : agg.churn ?? null,
+      refundRate:  agg.hasSalesData === false ? null : agg.refundRate ?? null,
+      netAdds:     agg.netAdds ?? null,
+      arpu:        agg.arpu ?? null,
       gross:       agg.gross        || 0,
       lossEstimate:cap.lossEstimate ?? null
     };
@@ -4203,13 +4208,12 @@ function renderHeatmap(ent) {
     { key:'arpu',     label:'매장PASS ARPU', fmt:fmtS, inv:false },
     { key:'gross',    label:'실결제매출', fmt:fmtS,  inv:false }
   ];
-  const metrics = (_hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore)
-    .filter(metric => activeStores.some(store => Number.isFinite(store[metric.key])));
+  const metrics = _hmShowExtra ? [...metricsCore, ...metricsExtra] : metricsCore;
 
   // 열별 min/max — 운영 매장 기준 정규화
   const cols = metrics.map(m=>{
     const vals = activeStores.map(s=>s[m.key]).filter(Number.isFinite);
-    return { min:Math.min(...vals), max:Math.max(...vals) };
+    return vals.length ? { min:Math.min(...vals), max:Math.max(...vals) } : { min:0, max:0 };
   });
 
   function cellColor(norm, inv) {
@@ -4243,7 +4247,7 @@ function renderHeatmap(ent) {
       <div class="hm-label-cell">${s.name}</div>
       ${metrics.map((m,i)=>{
         const v = s[m.key];
-        if (v == null) return '<div class="hm-cell" title="원천 누락으로 산출 보류">—</div>';
+        if (!Number.isFinite(v)) return '<div class="hm-cell" title="원천 자료 확인 후 표시">—</div>';
         const {min,max} = cols[i];
         const norm = max>min?(v-min)/(max-min):0.5;
         const {bg,text} = cellColor(norm, m.inv);
@@ -4455,14 +4459,18 @@ function renderDetail(ent) {
   const c  = ent.current;
   const ms = ent.months;
   const hasSubscriptionData = Boolean(c.hasSubscriptionData);
+  const hasSalesData = c.hasSalesData !== false;
+  const hasUsageData = c.hasUsageData !== false;
+  const existing = $('detailDrilldown');
+  if (existing) existing.remove();
 
   // 기본 지표 그리드
   const items = [
-    { label:'실결제매출',    val:fmtS(c.gross),         sub:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}` },
-    { label:'순매출',    val:fmtS(c.net),            sub:c.hasDiscountData ? `실결제매출−환불 · 쿠폰할인 실결제매출 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `실결제매출−환불 · ${couponUnavailableLabel(c)}` },
+    { label:'실결제매출', val:hasSalesData ? fmtS(c.gross) : '—', sub:hasSalesData ? `실결제매출 달성 ${fmtP(c.grossAchievement||0)}` : '매출 자료 확인 중' },
+    { label:'순매출', val:hasSalesData ? fmtS(c.net) : '—', sub:!hasSalesData ? '매출 자료 확인 중' : c.hasDiscountData ? `실결제매출−환불 · 쿠폰할인 실결제매출 대비 ${fmtP(c.discountShare||0)}${couponCoverageSuffix(c)}` : `실결제매출−환불 · ${couponUnavailableLabel(c)}` },
     { label:'MRR',      val:hasSubscriptionData ? fmtS(c.mrr||0) : '—', sub:hasSubscriptionData ? `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c) },
-    { label:'순매출 달성률',   val:fmtP(c.achievement||0),  sub:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}` },
-    { label:'운영 가동률', val:fmtP(usageValue(c)),  sub:(()=>{
+    { label:'순매출 달성률', val:hasSalesData ? fmtP(c.achievement) : '—', sub:hasSalesData ? `순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}` : '매출 자료 확인 중' },
+    { label:'운영 가동률', val:usagePresentation(c).label, sub:!hasUsageData ? usagePresentation(c).note : (()=>{
         const capAll = buildCapacityData(ent);
         const cr = ent.isAll
           ? { idleCount: capAll.reduce((s,d)=>s+(d.idleCount||0),0) }
@@ -4472,7 +4480,7 @@ function renderDetail(ent) {
     { label:'이탈률',   val:hasSubscriptionData ? fmtP(c.churn||0) : '—', sub:hasSubscriptionData ? `해지 ${fmtN(c.cancelSubs||0)}건 / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c) },
     (()=>{
       const dRefund   = c.refundRate||0;
-      return { label:'환불율', val:fmtP(dRefund), sub:'실결제매출 기준' };
+      return { label:'환불율', val:hasSalesData ? fmtP(dRefund) : '—', sub:hasSalesData ? '실결제매출 기준' : '매출 자료 확인 중' };
     })(),
     { label:'순증감',   val:hasSubscriptionData ? `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}` : '—', sub:hasSubscriptionData ? `신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c) },
     (()=>{
@@ -4503,7 +4511,7 @@ function renderDetail(ent) {
   $('detailSub').textContent = `${ms.length}개월 집계 기준`;
 
   // ── 드릴다운: 점검 포인트·추세·권장 액션 (단일 매장 선택 시) ──
-  if (ent.isAll) return; // 전체 뷰는 기본 그리드만 표시
+  if (ent.isAll || !hasUsageData || !hasSalesData) return;
 
   // 트렌드 헬퍼 (최근 2개월 변화)
   const lastM = ms.length ? ms[ms.length-1] : null;
@@ -4604,8 +4612,6 @@ function renderDetail(ent) {
   </div>`;
 
   // 기존 드릴다운 패널 제거 후 새로 삽입 (중복 방지)
-  const existing = document.getElementById('detailDrilldown');
-  if (existing) existing.remove();
   const wrapper = document.createElement('div');
   wrapper.id = 'detailDrilldown';
   wrapper.innerHTML = drilldownHtml;
@@ -5043,15 +5049,59 @@ function renderInlineStoreDetail(ent) {
 }
 
 /* ── 19. 전체 렌더 ──────────────────────────────────────────── */
+function setReviewPlaceholder(element, complete, note) {
+  const placeholderId = `${element.id}Review`;
+  $(placeholderId)?.remove();
+  const isChart = element.tagName === 'CANVAS';
+  element.hidden = isChart && !complete;
+  if (complete) return;
+  if (isChart) {
+    charts[element.id]?.destroy();
+    delete charts[element.id];
+  } else {
+    element.innerHTML = '';
+  }
+  const placeholder = document.createElement('div');
+  placeholder.id = placeholderId;
+  placeholder.className = 'review-empty';
+  placeholder.innerHTML = `<strong>선택 기간 자료 확인 후 표시</strong><span>${esc(note)}</span>`;
+  (isChart ? element.parentElement : element).appendChild(placeholder);
+}
+
 function renderReviewed(renderer, ent, ids, complete) {
   const standalone = new Set(['scoreChart','healthChart','seasonChart','capacityPanel','detailGrid']);
+  const notes = {
+    scoreChart:'이용량이 일부 누락되어 종합 점수를 산출하지 않습니다.',
+    healthChart:'비교 대상의 이용량이 모두 확인되면 건강도를 표시합니다.',
+    seasonChart:'당해 및 전년 이용량이 확인된 기간에 계절 지수를 표시합니다.',
+    capacityPanel:'이용량이 모두 확인되면 유휴 Capacity와 기회금액을 표시합니다.'
+  };
   for (const id of ids) {
     const element = $(id);
     if (!element) continue;
+    if (id === 'inlineStoreDetail') {
+      element.hidden = !complete;
+      continue;
+    }
     const host = id === 'capacityPanel' ? element.closest('section') || element
       : standalone.has(id) ? element.closest('article') || element : element;
-    host.hidden = !complete;
-    if (id === 'detailGrid' && $('detailTitle')) $('detailTitle').hidden = !complete;
+    host.hidden = false;
+    if (id === 'detailGrid' && $('detailTitle')) $('detailTitle').hidden = false;
+    if (id === 'actionCenter' && !complete) {
+      for (const [bodyId,note] of Object.entries({
+        acActionList:'확인 가능한 매출과 구독 지표는 아래 KPI에서 확인할 수 있습니다.',
+        acDangerList:'일부 매장의 이용량이 누락되어 종합 점수 기반 우선순위는 표시하지 않습니다.',
+        acLossBody:'이용량이 모두 확인되면 기회금액을 표시합니다. 누락분은 추정하지 않습니다.'
+      })) if ($(bodyId)) setReviewPlaceholder($(bodyId),false,note);
+      for (const countId of ['acActionCount','acDangerCount']) if ($(countId)) $(countId).textContent = '—';
+      const dangerTitle = document.querySelector('.ac-danger .ac-title');
+      const lossTitle = document.querySelector('.ac-loss .ac-title');
+      if (dangerTitle) dangerTitle.textContent = ent.isAll ? '우선 점검 매장 3곳' : `${ent.name} 운영 현황`;
+      if (lossTitle) lossTitle.textContent = ent.isAll ? '누적 기회금액 상한' : `${ent.name} 누적 기회금액 상한`;
+    } else if (id !== 'actionCenter') {
+      setReviewPlaceholder(element,complete,notes[id] || '확인된 원천 자료가 부족하여 이 분석은 표시하지 않습니다.');
+    }
+    if (id === 'scoreChart' && $('scoreTitle')) $('scoreTitle').textContent = ent.isAll ? '매장별 운영 스코어' : `${ent.name} 운영 레버 스코어`;
   }
   if (complete) renderer(ent);
 }
@@ -5074,7 +5124,7 @@ function renderSourceCoverage(ent) {
   panel.innerHTML = rows.length ? `<p>관측 사용량은 수신분 합계입니다. 참고 가동률은 관측 사용량을 선택 기간 전체 Capacity로 나눈 값으로, 완전 실적이나 순위에 사용하지 않습니다. 누락분은 추정하지 않습니다.</p>
     <div class="coverage-grid"><strong>매장 / 월</strong><strong>수신일 / 기대일</strong><strong>관측 사용(회)</strong>
     ${rows.map(r=>`<span>${esc(r.name)} / ${esc(r.month)}</span><span>${r.quality?.received ?? '—'} / ${r.quality?.expected ?? '—'}</span><span>${r.observed == null ? '—' : fmtN(r.observed)}</span>`).join('')}</div>
-    <p class="sub">자료가 부족한 종합 점수, 순위, 기회금액 및 비교 분석은 표시하지 않습니다. 확인 가능한 매출과 구독 지표는 유지합니다.</p>` : '';
+    <p class="sub">모든 기간에서 같은 분석 항목을 유지합니다. 자료가 부족한 종합 점수, 순위, 기회금액 및 비교 분석은 안내로 대체하며, 확인 가능한 매출과 구독 지표는 계속 표시합니다.</p>` : '';
   $('auditList').innerHTML = warnings.map(c=>`<div class="quality-item"><strong>${esc(c.name)}</strong><span>${esc(c.value || c.status)}</span></div>`).join('') +
     (pending ? '<p>원천 최종 점검이 완료되지 않았습니다.</p>' : '') +
     '<a class="source-link" href="https://docs.google.com/spreadsheets/d/1QasrQPOZqq3ljxCXQWnGYEy40D8jhojJRFOWkVa6uxo/edit#gid=830227479" target="_blank" rel="noopener noreferrer">원천 데이터 점검 열기</a>';
@@ -5094,7 +5144,7 @@ function renderAll() {
   renderReviewed(renderActionCenter,ent,['actionCenter'],usageComplete && portfolioComplete);
   renderGauges(ent);
   renderKpis(ent);
-  renderReviewed(renderSignals,ent,['signalGrid'],usageComplete);
+  renderReviewed(renderSignals,ent,['signalGrid'],true);
   renderInsights(ent);
   if ((!usageComplete || !portfolioComplete) && $('focusScore')) $('focusScore').style.display = 'none';
   renderPerformanceChart(ent);
@@ -5120,7 +5170,7 @@ function renderAll() {
   renderPaymentPanel(ent);
   renderHeatmap(ent);
   renderTable(ent);
-  renderReviewed(renderDetail,ent,['detailGrid'],usageComplete);
+  renderReviewed(renderDetail,ent,['detailGrid'],true);
   renderReviewed(renderInlineStoreDetail,ent,['inlineStoreDetail'],ent.isAll || usageComplete);
 }
 

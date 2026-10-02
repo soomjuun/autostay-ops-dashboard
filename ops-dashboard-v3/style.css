@@ -222,6 +222,7 @@ body{
 .signal-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:3px}
 .signal.ok .signal-dot{background:var(--green)}
 .signal.warn .signal-dot{background:var(--amber)}
+.signal.neutral .signal-dot{background:var(--muted)}
 .signal.bad .signal-dot{background:var(--rose);animation:blink 1.4s ease infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
 .signal-text strong{display:block;font-size:12.5px;font-weight:800;color:var(--text);margin-bottom:2px}
@@ -410,6 +411,10 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 .dashboard-row>article>.chart-section-head,.dashboard-row>article>.section-header{min-height:60px;margin-bottom:12px;gap:12px}
 .dashboard-row .chart-section-head>div,.dashboard-row .section-header>div{min-width:0}
 .dashboard-row .collapse-toggle{flex-shrink:0}
+.review-empty{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;min-height:120px;padding:22px;text-align:center;background:var(--surface-soft);border:1px dashed var(--border);border-radius:var(--r-md);grid-column:1/-1}
+.review-empty strong{font-size:12px;color:var(--text-2)}
+.review-empty span{font-size:11.5px;line-height:1.6;color:var(--muted);max-width:360px}
+.chart>.review-empty{height:100%;min-height:0}
 .dashboard-row .chart.lg{height:240px}
 .dashboard-row .chart.xl{height:270px}
 .dashboard-row .chart.lg canvas,.dashboard-row .chart.xl canvas{height:100%!important}

@@ -84,6 +84,125 @@ test('subscription pipeline reports zero change neutrally and keeps positive and
   render(21,20);assert.match(panel.innerHTML,/신규 우위/);assert.match(panel.innerHTML,/\+1건/);
   render(19,20);assert.match(panel.innerHTML,/해지 우위/);assert.match(panel.innerHTML,/-1건/);
 });
+
+function reviewDom() {
+  const elements={};
+  const createElement=tag=>({tagName:tag.toUpperCase(),style:{},hidden:false,innerHTML:'',
+    remove(){delete elements[this.id];},
+    appendChild(child){child.parentElement=this;elements[child.id]=child;},
+    closest(){return this.host || null;}});
+  const add=(id,tag='div')=>{const node=createElement(tag);node.id=id;elements[id]=node;return node;};
+  return {elements,add,createElement};
+}
+
+test('reviewed sections keep their frames across all periods without retaining unavailable charts',()=>{
+  const dom=reviewDom();
+  const ids=['scoreChart','healthChart','seasonChart','capacityPanel'];
+  for(const id of ids) {
+    const node=dom.add(id,id.endsWith('Chart')?'canvas':'div');
+    node.host=dom.createElement('article');node.parentElement=dom.createElement('div');
+  }
+  const api=createDashboardApi(dom.elements,{createElement:dom.createElement});
+  let renders=0;const ent={isAll:true};
+  for(const period of ['all','H1','H2','Q1','Q2','Q3','Q4']) {
+    api.setState({quarter:period,store:'all'});
+    api.renderReviewed(()=>renders++,ent,ids,false);
+    for(const id of ids) {
+      const node=dom.elements[id];
+      assert.equal(node.host.hidden,false,`${period} / ${id} frame`);
+      assert.equal(node.hidden,id.endsWith('Chart'),`${period} / ${id} content`);
+      assert.match(dom.elements[`${id}Review`].innerHTML,/선택 기간 자료 확인 후 표시/);
+    }
+  }
+  assert.equal(renders,0);
+  assert.equal(Object.keys(dom.elements).filter(id=>id.endsWith('Review')).length,4);
+  api.renderReviewed(()=>renders++,ent,ids,true);
+  assert.equal(renders,1);
+  for(const id of ids) {
+    assert.equal(dom.elements[id].hidden,false);
+    assert.equal(dom.elements[`${id}Review`],undefined);
+  }
+  const chart=dom.add('opsArpuChart','canvas');chart.parentElement=dom.createElement('div');
+  api.renderOpsArpuChart({months:[{month:'1월',monthNum:1,hasDiscountData:false,arpu:40000}]});
+  assert.ok(api.getChartConfig('opsArpuChart'));
+  api.renderReviewed(()=>{},ent,['opsArpuChart'],false);
+  assert.equal(api.getChartConfig('opsArpuChart'),undefined);
+});
+
+test('unavailable action summaries keep all three cards and replace stale values instead of showing zero',()=>{
+  const dom=reviewDom();
+  for(const id of ['actionCenter','acActionList','acDangerList','acLossBody','acActionCount','acDangerCount']) {
+    const node=dom.add(id);node.innerHTML='stale period data';node.textContent='3';
+  }
+  const api=createDashboardApi(dom.elements,{createElement:dom.createElement});
+  api.renderReviewed(()=>assert.fail('unverified actions must not run'),{isAll:true},['actionCenter'],false);
+  assert.equal(dom.elements.actionCenter.hidden,false);
+  for(const id of ['acActionList','acDangerList','acLossBody']) {
+    assert.equal(dom.elements[id].innerHTML,'');
+    assert.ok(dom.elements[`${id}Review`]);
+  }
+  assert.equal(dom.elements.acActionCount.textContent,'—');
+  assert.equal(dom.elements.acDangerCount.textContent,'—');
+});
+
+test('partial utilization keeps four signals and does not classify observed usage as a confirmed risk',()=>{
+  const panel={innerHTML:''};const api=createDashboardApi({signalGrid:panel});
+  const current={hasSalesData:true,achievement:95,target:100,net:95,hasSubscriptionData:true,
+    churn:13,mrr:5000,hasMrrYoY:true,mrrYoY:20,hasUsageData:false,
+    observedUsage:300,mtdCapacity:1000,usageMissingDays:2,utilization:null};
+  api.renderSignals({current});
+  assert.equal((panel.innerHTML.match(/class="signal /g)||[]).length,4);
+  assert.match(panel.innerHTML,/목표 근접/);assert.match(panel.innerHTML,/이탈 위험/);
+  assert.match(panel.innerHTML,/MRR 고성장/);assert.match(panel.innerHTML,/가동률 판정 대기/);
+  assert.match(panel.innerHTML,/잠정 30\.0%/);assert.doesNotMatch(panel.innerHTML,/가동 저조/);
+  api.renderSignals({current:{...current,hasUsageData:true,usage:0,utilization:0}});
+  assert.match(panel.innerHTML,/가동 저조/);assert.doesNotMatch(panel.innerHTML,/가동률 판정 대기/);
+  api.renderSignals({current:{hasSalesData:false,hasSubscriptionData:false,hasUsageData:false}});
+  assert.equal((panel.innerHTML.match(/class="signal neutral"/g)||[]).length,4);
+  assert.doesNotMatch(panel.innerHTML,/이탈 안정|MRR 성장|목표 미달/);
+});
+
+test('partial detail keeps received financial metrics without fabricated idle capacity or stale drilldowns',()=>{
+  const dom=reviewDom();for(const id of ['detailGrid','detailTitle','detailSub','detailDrilldown'])dom.add(id);
+  const api=createDashboardApi(dom.elements,{createElement:dom.createElement});
+  api.setDashboard({stores:{},overall:[],dataQuality:{}});
+  api.renderDetail({isAll:true,months:[{}],current:{hasSalesData:true,gross:10000,net:9000,target:10000,
+    achievement:90,hasSubscriptionData:true,mrr:5000,churn:5,hasUsageData:false,
+    observedUsage:300,mtdCapacity:1000,usageMissingDays:2,utilization:null}});
+  const html=dom.elements.detailGrid.innerHTML;
+  assert.equal((html.match(/class="d-item"/g)||[]).length,12);
+  assert.match(html,/실결제매출/);assert.match(html,/순매출 달성률/);assert.match(html,/90\.0%/);
+  assert.match(html,/잠정 30\.0%/);assert.match(html,/관측 300회/);
+  assert.doesNotMatch(html,/유휴 Capacity|NaN/);
+  assert.equal(dom.elements.detailDrilldown,undefined);
+});
+
+test('payment summary keeps all five metric cards when per-wash inputs are unavailable',()=>{
+  const panel={innerHTML:''};const api=createDashboardApi({paymentPanel:panel});
+  const current={gross:10000,net:9000,usage:null,hasArpwData:false,hasSubscriptionData:true,
+    arpu:40000,arr:60000,ltv:50000};
+  api.renderPaymentPanel({current});
+  assert.equal((panel.innerHTML.match(/class="pay-item /g)||[]).length,5);
+  assert.match(panel.innerHTML,/건당 매출/);assert.match(panel.innerHTML,/건당 순매출/);
+  assert.equal((panel.innerHTML.match(/class="pay-val">—/g)||[]).length,2);
+  api.renderPaymentPanel({current:{...current,usage:1000,hasArpwData:true}});
+  assert.equal((panel.innerHTML.match(/class="pay-item /g)||[]).length,5);
+  assert.doesNotMatch(panel.innerHTML,/class="pay-val">—/);
+});
+
+test('heatmap keeps five core columns and neutral cells for unavailable usage and subscription data',()=>{
+  const panel={innerHTML:'',querySelectorAll:()=>[]};const api=createDashboardApi({heatmapGrid:panel});
+  const m={month:'1월',monthNum:1,quarter:'Q1',status:'confirmed',gross:10000,net:9000,target:10000,
+    refundAmount:1000,hasSalesData:true,hasSubscriptionData:false,hasUsageData:false,hasArpwData:false};
+  api.setState({quarter:'all',store:'all'});
+  api.setDashboard({stores:[{name:'일산',months:[m]}],overall:[m],opsStores:[]});
+  api.renderHeatmap({isAll:true});
+  assert.match(panel.innerHTML,/5개 지표/);
+  assert.match(panel.innerHTML,/가동률/);assert.match(panel.innerHTML,/기회금액 상한/);
+  assert.equal((panel.innerHTML.match(/class="hm-head-cell"/g)||[]).length,6);
+  assert.equal((panel.innerHTML.match(/title="원천 자료 확인 후 표시">—/g)||[]).length,3);
+  assert.doesNotMatch(panel.innerHTML,/NaN|Infinity/);
+});
 test('subscription exposure uses its own date and mismatched ARPU stays null through aggregation',()=>{
   const api=apiWithDates(); const row=api.parseFactMonthly(fact()).get('일산')[0];
   assert.ok(Math.abs(row.retainedExposure-100*7/30)<1e-9);
