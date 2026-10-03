@@ -404,8 +404,9 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 }
 .chart-master-grid > *,.grid > *,.insights > *,.gauge-grid > *,.kpis > *{min-width:0}
 .chart,canvas{min-width:0;max-width:100%}
-.dashboard-row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px;margin-bottom:14px}
-.dashboard-row>article{flex:1 1 340px;min-width:0}
+.dashboard-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:14px;margin-bottom:14px}
+.dashboard-row:has(>article:nth-child(3)){grid-template-columns:repeat(3,minmax(0,1fr))}
+.dashboard-row>article{display:flex;flex-direction:column;min-width:0}
 .dashboard-row>article>h2{min-height:20px;margin-bottom:4px}
 .dashboard-row>article>p.sub{min-height:36px;margin:0 0 12px}
 .dashboard-row>article>.chart-section-head,.dashboard-row>article>.section-header{min-height:60px;margin-bottom:12px;gap:12px}
@@ -415,21 +416,27 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 .review-empty strong{font-size:12px;color:var(--text-2)}
 .review-empty span{font-size:11.5px;line-height:1.6;color:var(--muted);max-width:360px}
 .chart>.review-empty{height:100%;min-height:0}
-.dashboard-row .chart.lg{height:240px}
-.dashboard-row .chart.xl{height:270px}
-.dashboard-row .chart.lg canvas,.dashboard-row .chart.xl canvas{height:100%!important}
-.revenue-row{align-items:stretch}
-.revenue-row:has(#bridgeWrap.collapsed){align-items:flex-start}
-.bridge-panel{display:flex;flex-direction:column}
-.bridge-panel #bridgeWrap:not(.collapsed){display:flex;flex:1}
-.bridge-panel #bridgeWrap:not(.collapsed) .chart{flex:1;height:auto;min-height:240px;position:relative}
-.bridge-panel #bridgeWrap .chart canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+.dashboard-row .chart{position:relative;flex:1 0 240px;min-height:240px;height:auto}
+.dashboard-row .chart canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+.dashboard-row>article>.collapsible-content:not(.collapsed){display:flex;flex-direction:column;flex:1}
+/* An explicitly collapsed chart should not leave an empty full-height card. */
+.dashboard-row:has(>article>.collapsible-content.collapsed){align-items:start}
+.dashboard-row>article>.collapsible-content.collapsed{flex:0 0 0}
+.dashboard-row .analysis-note{flex-shrink:0}
+.dashboard-row .rank-strip{flex:1;justify-content:space-evenly}
 .reference-row td{padding:4px 6px;text-align:right;color:var(--amber);font-variant-numeric:tabular-nums}
 .reference-row td:first-child{text-align:left;padding-left:0;color:var(--text-2);font-weight:700}
 .reference-row td:last-child{padding-right:0}
 .ops-trend-row .chart-section-head{min-height:70px;align-items:flex-start;gap:10px}
-.ops-trend-row .chart{height:200px!important}
-.ops-trend-row .chart canvas{height:100%!important}
+.ops-trend-row .ops-sub-section{display:flex;flex-direction:column;flex:1;min-width:0}
+.ops-trend-row .chart{flex:0 0 200px;min-height:200px;height:auto!important}
+.ops-trend-row .collapsible-content{flex-shrink:0}
+.ops-trend-row .collapsible-content.collapsed{margin-top:0!important}
+.ops-trend-row:has(.collapsible-content:not(.collapsed)):has(.collapsible-content.collapsed){align-items:start}
+@media(min-width:768px) and (max-width:1100px){
+  .dashboard-row:has(>article:nth-child(3)){grid-template-columns:repeat(2,minmax(0,1fr))}
+  .dashboard-row:has(>article:nth-child(3))>article:last-child{grid-column:1/-1}
+}
 .snapshot-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 .snapshot-stack>article{min-width:0}
 /* 열 스팬 클래스 */
@@ -463,7 +470,7 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 }
 
 /* ══ SUBSCRIPTION STATUS ═══════════════════════════════════════ */
-.sub-pipeline{display:flex;flex-direction:column;gap:10px;padding-top:4px}
+.sub-pipeline{display:flex;flex-direction:column;flex:1;justify-content:space-between;gap:10px;padding-top:4px;min-width:0}
 .pipe-row{display:flex;flex-direction:column;gap:3px}
 .pipe-label{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.03em}
 .pipe-label-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -518,8 +525,9 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 .cap-idle{font-size:11px;color:var(--rose);font-weight:600}
 
 /* ══ PAYMENT / ARPU PANEL ══════════════════════════════════════ */
-.payment-panel{display:flex;flex-wrap:wrap;gap:10px;padding-top:4px}
-.payment-panel>.pay-item{flex:1 1 200px;min-width:0}
+.payment-panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(min-content,1fr);flex:1;gap:10px;padding-top:4px}
+.payment-panel>.pay-item{display:flex;flex-direction:column;justify-content:center;min-width:0}
+.payment-panel>.pay-item:nth-child(3){grid-column:1/-1;grid-row:2}
 .pay-item{
   background:var(--surface-soft);border:1px solid var(--border);
   border-radius:var(--r-md);padding:12px 14px;
@@ -530,8 +538,8 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 .pay-item.green{border-left-color:var(--green)}
 .pay-item.amber{border-left-color:var(--amber)}
 .pay-label{font-size:10.5px;font-weight:700;color:var(--muted);margin-bottom:4px}
-.pay-val{font-size:16px;font-weight:900;color:var(--text);margin-bottom:2px}
-.pay-note{font-size:10px;color:var(--subtle)}
+.pay-val{font-size:18px;font-weight:900;color:var(--text);margin-bottom:2px;font-variant-numeric:tabular-nums}
+.pay-note{font-size:10px;color:var(--subtle);line-height:1.5;overflow-wrap:anywhere}
 
 /* ══ ACTION COMMAND CENTER ══════════════════════════════════════ */
 .action-center{
@@ -540,6 +548,7 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
 }
 @media(max-width:900px){.action-center{grid-template-columns:1fr}}
 .ac-card{
+  display:flex;flex-direction:column;
   background:var(--surface);border:1px solid var(--border);
   border-radius:var(--r-lg);padding:16px 18px;box-shadow:var(--shadow-sm);
 }
@@ -557,7 +566,8 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
   background:var(--accent-soft);color:var(--accent)
 }
 .ac-badge.danger{background:var(--rose-soft);color:var(--rose)}
-.ac-body{display:flex;flex-direction:column;gap:6px}
+.ac-body{display:flex;flex-direction:column;flex:1;gap:6px;min-width:0}
+.ac-actions .ac-criteria{margin-top:auto}
 .ac-item{
   display:flex;align-items:flex-start;gap:8px;
   font-size:12px;line-height:1.5;color:var(--text-2);
@@ -927,9 +937,15 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
   .store-snapshot-table tbody td:last-child{grid-column:1/-1;justify-content:flex-start}
   .store-snapshot-table tbody td:last-child .verdict-chip{margin-left:auto}
   .store-snapshot-table .ach-wrap{width:64px;flex-shrink:0;padding:4px 6px}
-  .dashboard-row>article{flex-basis:100%}
-  .dashboard-row .chart.lg,.dashboard-row .chart.xl{height:210px}
+  .dashboard-row,.dashboard-row:has(>article:nth-child(3)){grid-template-columns:minmax(0,1fr)}
+  .dashboard-row>article>p.sub{min-height:0}
+  .dashboard-row>article>.chart-section-head,.dashboard-row>article>.section-header{min-height:0}
+  .dashboard-row .chart{flex-basis:210px;min-height:210px}
+  .dashboard-row .chart canvas{height:100%!important}
   .ops-trend-row .chart-section-head{min-height:0}
+  .ops-trend-row .chart{flex-basis:200px;min-height:200px}
+  .payment-panel{grid-auto-rows:auto}
+  .payment-panel>.pay-item:nth-child(3){grid-column:auto;grid-row:auto}
 
   /* Capacity 분석 */
   .cap-store-grid{grid-template-columns:1fr!important}
@@ -991,6 +1007,7 @@ table,.hero-kpi-val,.gauge-value,.kpi-value,.d-val,.rank-val,.rank-ach,.pay-val,
   .wrap{padding:16px 16px 48px}
   .gauge-grid{grid-template-columns:repeat(4,1fr)}
   .action-center{grid-template-columns:repeat(2,1fr)}
+  .action-center>.ac-card:last-child{grid-column:1/-1}
   .chart-master-grid{grid-template-columns:repeat(2,1fr)}
   .chart-master-grid [class*="col-"]{grid-column:span 1}
   .chart-master-grid .col-6,.chart-master-grid .col-8,.chart-master-grid .col-12{grid-column:span 2}
