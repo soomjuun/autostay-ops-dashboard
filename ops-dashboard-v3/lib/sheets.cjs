@@ -13,6 +13,7 @@ const SOURCES = {
   usageQualityPrev: { range:"'_ops_quality_usage_2025'!A1:R85" },
   salesQuality: { range:"'_ops_quality_sales_2026'!A1:R85" },
   salesQualityPrev: { range:"'_ops_quality_sales_2025'!A1:R85" },
+  subscriptionMonthly: { range:"'_ops_subscription_monthly_2026'!A1:S120" },
   cfg: { gid:1506888111, range:"'_cfg'!A1:B90" }
 };
 
@@ -96,13 +97,17 @@ async function readRanges(ranges, env, fetchImpl) {
 }
 
 async function fetchSnapshot({env=process.env,fetchImpl=fetch}={}) {
-  const before=buildState((await readRanges([SOURCES.cfg.range],env,fetchImpl))[0]);
+  const beforeRows=(await readRanges([SOURCES.cfg.range],env,fetchImpl))[0];
+  const before=buildState(beforeRows);
+  const dailySubscription=/metric-contract-v/.test(String(Object.fromEntries(beforeRows).ops_v83_calculation_version || ''));
   if (!before.status || !before.runId) throw new SourceError('SOURCE_STATE_MISSING','시트 생성 상태를 확인할 수 없어 갱신을 보류합니다.');
   if (before.failed) throw new SourceError('SOURCE_BUILD_FAILED','원천 시트 생성이 실패했습니다. 마지막 정상 화면을 유지합니다.');
   if (!before.pending && !['complete','completed','success','done'].includes(before.status))
     throw new SourceError('SOURCE_STATE_MISSING','시트 생성 완료 상태를 확인할 수 없어 갱신을 보류합니다.');
   const coreKeys=['factMonthly','overallMonthly','usageQuality','usageQualityPrev','salesQuality','salesQualityPrev','cfg'];
-  const keys=before.pending ? coreKeys : Object.keys(SOURCES);
+  const subscriptionKeys=['subscriptionMonthly'];
+  if (dailySubscription) coreKeys.push(...subscriptionKeys);
+  const keys=before.pending ? coreKeys : Object.keys(SOURCES).filter(key=>dailySubscription || !subscriptionKeys.includes(key));
   const values=await readRanges(keys.map(key=>SOURCES[key].range),env,fetchImpl);
   const sheets=Object.fromEntries(keys.map((key,index)=>[key,values[index]]));
   const captured=buildState(sheets.cfg);

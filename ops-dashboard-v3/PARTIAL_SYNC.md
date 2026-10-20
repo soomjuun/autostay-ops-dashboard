@@ -1,6 +1,6 @@
 # Partial Source Refresh
 
-Updated: 2026-10-02.
+Updated: 2026-10-20.
 
 ## Publication Contract
 
@@ -16,6 +16,16 @@ Updated: 2026-10-02.
 - Do not consume in-progress Summary or display-only analysis tabs.
 - Hold coupon and contribution metrics until the final audit is available.
 
+Metric-contract builds also read `_ops_subscription_monthly_2026!A1:S120` in the
+stable core snapshot. Churn and store PASS ARPU use observed subscriber-days divided
+by days in the month, not the final retained count. The denominator must have the
+current execution ID, matching source date and subscription totals, valid arithmetic,
+and `OK` quality. A missing denominator holds these rates only; received MRR,
+retained subscriptions, new subscriptions, cancellations and revenue remain visible.
+Period rates require all selected denominators. The payment summary may show a
+clearly labelled matched subset. Position maps use the same verified months for every
+displayed store and disclose those months.
+
 ## Recovery
 
 The API retains the latest confirmed snapshot in its current server instance. The browser also
@@ -28,11 +38,11 @@ needs a readable, reconcilable source. Browser storage can be disabled, cleared 
 
 ## Verification
 
-Run `node test-sync.cjs`. The 2026-10-02 revision passed 38 regression tests.
+Run `node --test --test-isolation=none test-sync.cjs`. The 2026-10-20 revision passed 86 regression tests.
 Run `node verify-partial.cjs .qa/current-20261002.json .qa/partial-20261002.json`
 to validate a captured source and generate a local preview fixture. Captures are not committed.
 Run `node dev-server.cjs --snapshot .qa/partial-20261002.json` for a captured-data UI check.
 Add `--cache-test --fail-after-first` to test refresh failure and reload recovery locally.
 Captured-data checks do not replace production live API verification.
 
-Rollback must restore the frontend and API together to the previous production commit `7909c37`.
+Rollback must restore the frontend and API together to the recorded previous production commit.

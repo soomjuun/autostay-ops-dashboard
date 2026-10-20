@@ -25,6 +25,130 @@ function apiWithDates() {
   return api;
 }
 
+function dailySubscriptionFixture(overrides={}) {
+  const header=['월','범위','구독 기준일','월일수','수신일','기대일','상품일 결측','관측 구독일 합',
+    '구독자-월 노출량','최신 유지','MRR','신규','해지','품질','실행본'];
+  const row={월:month,범위:'일산','구독 기준일':day(9),월일수:30,수신일:9,기대일:9,'상품일 결측':0,
+    '관측 구독일 합':600,'구독자-월 노출량':20,'최신 유지':100,MRR:5000,신규:2,해지:7,품질:'OK',실행본:'daily-run',...overrides};
+  return {header,row:header.map(key=>row[key])};
+}
+function dailyApi(overrides={}) {
+  const api=createDashboardApi();
+  const {header,row}=dailySubscriptionFixture(overrides);
+  const sheets={cfg:[['dashboard_run_id','daily-run'],['ops_v83_calculation_version','2026-10-19-metric-contract-v133'],
+    ['usage_local_latest_date',day(9)]],subscriptionMonthly:[header,row]};
+  api.setSourceSnapshot({sheets});
+  return {api,sheets};
+}
+
+test('daily subscriber-days replace end-of-month exposure without changing subscription stocks or flows',()=>{
+  const {api}=dailyApi();
+  const row=api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0];
+  assert.equal(row.retained,100); assert.equal(row.mrr,5000); assert.equal(row.cancelSubs,7);
+  assert.equal(row.retainedExposure,20); assert.equal(row.churn,35); assert.equal(row.arpu,300);
+  assert.equal(row.hasSubscriptionExposure,true);
+  assert.equal(api.aggMonths([row]).churn,35);
+});
+
+test('missing, stale, duplicate, misaligned and invalid daily denominators never fall back to monthly stocks',()=>{
+  const cases=[{품질:'PARTIAL','구독자-월 노출량':''},{실행본:'old-run'},{'구독 기준일':day(8)},
+    {'관측 구독일 합':599},{신규:99},{'최신 유지':99},{'상품일 결측':1}];
+  for(const changes of cases) {
+    const {api}=dailyApi(changes);
+    const row=api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0];
+    assert.equal(row.retainedExposure,null); assert.equal(row.churn,null); assert.equal(row.arpu,null);
+    assert.equal(row.retained,100); assert.equal(row.newSubs,2); assert.equal(row.mrr,5000);
+    const total=api.aggMonths([row]);
+    assert.equal(total.churn,null); assert.equal(total.arpu,null); assert.equal(total.retainedExposure,null);
+    assert.equal(total.hasSubscriptionData,true); assert.equal(total.hasSubscriptionExposure,false);
+  }
+  const {api,sheets}=dailyApi();
+  sheets.subscriptionMonthly.push([...sheets.subscriptionMonthly[1]]);
+  assert.equal(api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0].churn,null);
+  delete sheets.subscriptionMonthly;
+  assert.equal(api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0].churn,null);
+});
+
+test('daily period rates use summed denominators and retain a gap when any selected denominator is unknown',()=>{
+  const {api}=dailyApi();
+  const first=api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0];
+  const last={...first,retained:150,retainedExposure:80,cancelSubs:8,storePassRevenue:4000,mrr:9000};
+  let total=api.aggMonths([first,last]);
+  assert.equal(total.churn,15); assert.equal(total.arpu,100); assert.equal(total.retained,150); assert.equal(total.mrr,9000);
+  total=api.aggMonths([first,{...last,hasSubscriptionExposure:false,retainedExposure:null,hasArpuData:false}]);
+  assert.equal(total.churn,null); assert.equal(total.arpu,null); assert.equal(total.retained,150);
+});
+
+test('daily DIRECT denominator drives portfolio rates while ALL PASS remains separate in MRR stocks',()=>{
+  const {api,sheets}=dailyApi({범위:'DIRECT'});
+  const rows=fact({최신구독일_2026:day(9),올패스유지_2026:30,MRR_2026:7000});
+  const months=[{monthNum:month,retained:100,retainedExposure:999,hasArpuData:true,hasSubscriptionData:true}];
+  api.applyPortfolioFinancials(months,rows);
+  assert.equal(months[0].retainedExposure,20); assert.equal(months[0].churn,35); assert.equal(months[0].arpu,300);
+  assert.equal(months[0].mrrSubscribers,130); assert.equal(months[0].mrr,7000);
+  sheets.subscriptionMonthly[1][13]='PARTIAL';
+  api.applyPortfolioFinancials(months,rows);
+  assert.equal(months[0].churn,null); assert.equal(months[0].arpu,null); assert.equal(months[0].mrr,7000);
+});
+
+test('received zero daily rates stay zero, but zero exposure is not a measurable rate',()=>{
+  const {api}=dailyApi({해지:0});
+  const data=fact({최신구독일_2026:day(9),해지_2026:0,단일구독매출_2026:0,매장PASS_ARPU_2026:0});
+  const row=api.parseFactMonthly(data).get('일산')[0];
+  assert.equal(row.churn,0); assert.equal(row.arpu,0);
+  const empty=dailyApi({'관측 구독일 합':0,'구독자-월 노출량':0,해지:0}).api.parseFactMonthly(data).get('일산')[0];
+  assert.equal(empty.churn,null); assert.equal(empty.arpu,null);
+});
+
+test('latest Summary cumulative unit wording scales only numeric amounts, never ratios or snapshots',()=>{
+  const api=createDashboardApi();
+  const value=api.parseSummary([['단위/결측 안내','누적: 억원 / 월별: 백만원(100만원) / 상세: 원, 회, 건, %.'],
+    ['누적 운영기여매출(환불 전)',52.89015991],['누적 올패스 운영귀속매출(환불 전)',8.65585831],
+    ['누적 순매출','46.35억원'],['누적 순매출 달성률(대표)',0.933],['MRR',500000000]]);
+  assert.equal(Math.round(value.contributionRevenue),5289015991);
+  assert.equal(Math.round(value.allPassAttributedRevenue),865585831);
+  assert.equal(value.totalNet,4635000000); assert.ok(Math.abs(value.achievement-93.3)<1e-9);
+  assert.equal(value.totalMrr,500000000);
+});
+
+test('position maps compare the same verified months rather than different store-specific subsets',()=>{
+  const api=createDashboardApi();api.setState({quarter:'Q1',store:'all'});
+  const row=(n,gross)=>({monthNum:n,month:`${n}월`,quarter:'Q1',status:'confirmed',gross,net:gross,target:100,
+    retained:100,retainedExposure:100,cancelSubs:10,churn:10,hasSubscriptionData:true,hasSubscriptionExposure:true,hasArpuData:true});
+  api.setDashboard({stores:[{name:'일산',months:[row(1,1000),row(2,100)]},
+    {name:'하남',months:[row(2,200),row(3,5000)]}],opsStores:[]});
+  let review=api.buildPositionReview();
+  assert.deepEqual(Array.from(review.months),[2]);
+  assert.deepEqual(Array.from(review.rows,r=>r.gross),[100,200]);
+  assert.ok(review.rows.every(r=>r.monthCount===1 && r.monthNums[0]===2));
+  api.setDashboard({stores:[{name:'일산',months:[row(1,100)]},{name:'하남',months:[row(2,200)]}],opsStores:[]});
+  review=api.buildPositionReview();assert.equal(review.rows.length,0);assert.equal(review.months.length,0);
+  api.setState({quarter:'all',store:'all'});
+  const current={...row(month,100),quarter:`Q${Math.ceil(month/3)}`,status:'mtd'};
+  api.setDashboard({stores:[{name:'일산',months:[row(1,1000),current]},
+    {name:'하남',months:[{...current,gross:200}]}],opsStores:[]});
+  review=api.buildPositionReview();assert.deepEqual(Array.from(review.months),[month]);
+  assert.deepEqual(Array.from(review.rows,r=>r.gross),[100,200]);
+});
+
+test('churn above the source five-percent threshold is not shown as healthy',()=>{
+  const grid={innerHTML:''},api=createDashboardApi({signalGrid:grid});
+  const current={achievement:100,hasSubscriptionData:true,churn:5.5,hasUsageData:true,utilization:80,mrr:100};
+  api.renderSignals({current});assert.match(grid.innerHTML,/이탈 점검/);assert.doesNotMatch(grid.innerHTML,/이탈 기준 이내/);
+  current.churn=5;api.renderSignals({current});assert.match(grid.innerHTML,/이탈 기준 이내/);
+  current.churn=null;api.renderSignals({current});assert.match(grid.innerHTML,/구독 확인 대기/);
+});
+
+test('ARPU detail uses weighted exposure, keeps real zero, and names missing daily denominators accurately',()=>{
+  const panel={innerHTML:''},api=createDashboardApi({opsArpuStats:panel});
+  const months=[{month:'1월',arpu:300,storePassRevenue:6000,retainedExposure:20},
+    {month:'2월',arpu:0,storePassRevenue:0,retainedExposure:80},
+    {month:'3월',arpu:null,hasArpuData:false,hasSubscriptionExposure:false}];
+  api.renderOpsArpuStats({months});
+  assert.match(panel.innerHTML,/확인 2\/3개월 가중 매장PASS ARPU 60원/);
+  assert.match(panel.innerHTML,/분모 미확인/);assert.doesNotMatch(panel.innerHTML,/기준일 불일치/);
+});
+
 test('moved Summary rows, real zero flows and additional contribution metrics',()=>{
   const api=createDashboardApi();
   const rows=Array.from({length:16},()=>['']);
@@ -74,6 +198,7 @@ test('ARPU-only charts hide the absent coupon axis and keep zero coupon data vis
   assert.equal(config.options.scales.pct.display,true);
   assert.equal(config.options.scales.arpu.position,'right');
   assert.equal(config.data.datasets[0].data[0],0);
+  assert.notEqual(config.options.scales.pct.ticks.callback(0.02),config.options.scales.pct.ticks.callback(0.04));
 });
 
 test('subscription pipeline reports zero change neutrally and keeps positive and negative flows',()=>{
@@ -848,6 +973,25 @@ function partialSource(sheets,change) {
   };
   return source;
 }
+
+test('daily contract reads its denominator table while legacy builds retain their bounded source set',async()=>{
+  for(const daily of [true,false]) {
+    const sheets=partialSheets('success');
+    sheets.cfg.find(r=>r[0]==='dashboard_audit_run_id')[1]='current-run';
+    if(daily) sheets.cfg.push(['ops_v83_calculation_version','2026-10-19-metric-contract-v133']);
+    sheets.subscriptionMonthly=[['monthly daily source']];
+    const snapshot=await fetchSnapshot(partialSource(sheets));
+    assert.equal(Object.hasOwn(snapshot.sheets,'subscriptionMonthly'),daily);
+  }
+});
+
+test('changing daily denominators during a partial read cannot publish a mixed snapshot',async()=>{
+  const sheets=partialSheets();sheets.cfg.push(['ops_v83_calculation_version','2026-10-19-metric-contract-v133']);
+  sheets.subscriptionMonthly=[['exposure'],[100]];
+  await assert.rejects(fetchSnapshot(partialSource(sheets,(data,read)=>{
+    if(read===3) data.subscriptionMonthly[1][0]=101;
+  })),{code:'SOURCE_CHANGED'});
+});
 
 test('running source publishes stable reconciled groups without stale display tabs',async()=>{
   const snapshot=await fetchSnapshot(partialSource(partialSheets()));

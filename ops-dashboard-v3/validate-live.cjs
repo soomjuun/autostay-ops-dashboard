@@ -39,9 +39,10 @@ function createDashboardApi(elements = {}, documentOverrides = {}) {
       runAudit, buildCapacityData, opportunityMonth, buildOpportunityReview, buildPriorityReview, renderActionCenter,
       sourceDateKey, isSourceCheckPending, dateContract, usagePresentation, utilizationDataset, sparkline,
       readCachedSnapshot, saveCachedSnapshot,
-      renderOpsArpuChart, renderSubscriptionPipeline, renderReviewed, renderSignals, renderDetail,
+      renderOpsArpuChart, renderOpsArpuStats, renderSubscriptionPipeline, renderReviewed, renderSignals, renderDetail,
       renderPaymentPanel, renderHeatmap, renderTable,
       computeScore, scoreComponents, buildScoreReview, buildHealthReview,
+      buildPositionReview,
       selectedStoreMonths, capacityScope, buildCapacityReview, seasonPoint, buildPaymentReview,
       renderScoreChart, renderHealthChart, renderCapacityPanel, renderSeasonChart, renderQuarterChart,
       renderInlineStoreDetail,
@@ -167,7 +168,21 @@ async function main() {
   const header = factRows[0];
   const index = Object.fromEntries(header.map((name, col) => [name, col]));
   const rawNumber = (row, key) => Number(row[index[key]] || 0);
+  const rawNullable = (row, key) => row[index[key]] === '' || row[index[key]] == null ? null : Number(row[index[key]]);
   const rawText = (row, key) => String(row[index[key]] ?? '').trim();
+  const cfg = Object.fromEntries(sheets.cfg || []);
+  const dailyContract = Object.hasOwn(sheets,'subscriptionMonthly') || /metric-contract-v/.test(String(cfg.ops_v83_calculation_version || ''));
+  const dailyRows=sheets.subscriptionMonthly || [];
+  const dailyIndex=Object.fromEntries((dailyRows[0] || []).map((key,i)=>[key,i]));
+  // Independent denominator calculation from observed subscriber-days, not the app's model.
+  const dailyExposure=(scope,month)=>{
+    const rows=dailyRows.slice(1).filter(row=>row[dailyIndex['범위']]===scope && Number(row[dailyIndex['월']])===month);
+    if (rows.length!==1) return null;
+    const row=rows[0], run=row[dailyIndex['실행본']];
+    if (row[dailyIndex['품질']]!=='OK' || (run && run!==cfg.dashboard_run_id)) return null;
+    const observed=row[dailyIndex['관측 구독일 합']], days=row[dailyIndex['월일수']];
+    return observed!=='' && observed!=null && Number(days)>0 ? Number(observed)/Number(days) : null;
+  };
   const rawByMonth = new Map();
   const rawRows = factRows.slice(1).filter(row => row.some(value => String(value ?? '').trim() !== ''));
   rawRows.forEach(row => {
@@ -243,7 +258,7 @@ async function main() {
     const exposureFactor = month === kstDateParts().month && sourceMonthDays > 0
       ? Math.max(0, Math.min(1, Number(subscriptionDate?.slice(8) || 0) / sourceMonthDays))
       : 1;
-    const retainedExposure = retained * exposureFactor;
+    const retainedExposure = dailyContract ? dailyExposure(rawText(row,'매장'),month) : retained * exposureFactor;
     const newSubs = rawNumber(row, '신규_2026');
     const cancels = rawNumber(row, '해지_2026');
     const netAdds = rawNumber(row, '순증감_2026');
@@ -280,13 +295,13 @@ async function main() {
       true
     );
     recordFormulaIssue(row, 'churn = cancels / subscriber-month exposure',
-      rawPercent(rawNumber(row, '이탈률_2026')),
-      retainedExposure > 0 ? cancels / retainedExposure * 100 : 0,
+      dailyContract && rawNullable(row,'이탈률_2026')==null ? null : rawPercent(rawNumber(row, '이탈률_2026')),
+      retainedExposure > 0 ? cancels / retainedExposure * 100 : dailyContract ? null : 0,
       true
     );
     recordFormulaIssue(row, 'store PASS ARPU = store PASS revenue / subscriber-month exposure',
-      rawNumber(row, '매장PASS_ARPU_2026'),
-      retainedExposure > 0 ? rawNumber(row, '단일구독매출_2026') / retainedExposure : 0
+      dailyContract ? rawNullable(row,'매장PASS_ARPU_2026') : rawNumber(row, '매장PASS_ARPU_2026'),
+      retainedExposure > 0 ? rawNumber(row, '단일구독매출_2026') / retainedExposure : dailyContract ? null : 0
     );
     recordFormulaIssue(row, 'net achievement = net / elapsed target',
       rawPercent(rawNumber(row, '달성률_2026')),
@@ -336,9 +351,15 @@ async function main() {
       mrrSubscribers: canonical?.mrrSubscribers || 0,
       mtdCapacity: sum('MTD_Capacity_2026')
     };
+    if (dailyContract) {
+      const exposure=dailyExposure('DIRECT',month.monthNum);
+      checks.retainedExposure=exposure;
+      checks.churn=exposure>0 ? checks.cancelSubs/exposure*100 : null;
+      checks.arpu=exposure>0 && canonical?.hasArpuData ? sum('단일구독매출_2026')/exposure : null;
+    }
     Object.entries(checks).forEach(([key, expected]) => {
       const actual = month[key];
-      if (!metricClose(actual, expected)) discrepancies.push({ month: month.month, key, actual, expected });
+      if (!metricClose(actual, expected,key==='churn')) discrepancies.push({ month: month.month, key, actual, expected });
     });
     if (missingUsageMonths.has(month.monthNum)) {
       const reference = api.usagePresentation(month).reference;
@@ -498,13 +519,34 @@ async function main() {
       observedUsage: portfolio.observedUsage ?? null,
       referenceUtilization: api.usagePresentation(portfolio).reference,
       usageMissingDays: portfolio.usageMissingDays ?? null,
-      churn: portfolio.churn || 0,
+      churn: portfolio.churn ?? null,
       mrr: portfolio.mrr || 0,
       retained: portfolio.retained || 0,
       allPassRetained: portfolio.allPassRetained || 0,
       mrrSubscribers: portfolio.mrrSubscribers || 0,
       arpu: portfolio.arpu ?? null
     };
+  }
+
+  const subscriptionPeriods=[];
+  if (dailyContract) for(const period of ['all','H1','H2','Q1','Q2','Q3','Q4']) {
+    const matches=n=>period==='all' || period==='H1'&&n<=6 || period==='H2'&&n>=7 || period===`Q${Math.ceil(n/3)}`;
+    api.setState({quarter:period,store:'all'});
+    for(const name of ['all',...storeNames]) {
+      const rows=rawRows.filter(row=>rawNumber(row,'월번호')<=Number(cfg.current_month) && matches(rawNumber(row,'월번호'))
+        && rawNumber(row,'Capacity')>0 && (name==='all'||rawText(row,'매장')===name));
+      const selectedMonths=[...new Set(rows.map(row=>rawNumber(row,'월번호')))];
+      const exposures=selectedMonths.map(n=>dailyExposure(name==='all'?'DIRECT':name,n));
+      const exposure=exposures.length && exposures.every(v=>v!=null) ? exposures.reduce((a,b)=>a+b,0) : null;
+      const sum=key=>rows.reduce((total,row)=>total+rawNumber(row,key),0);
+      const expected={retainedExposure:exposure,churn:exposure>0?sum('해지_2026')/exposure*100:null,
+        arpu:exposure>0?sum('단일구독매출_2026')/exposure:null};
+      const months=name==='all'?overall:stores.find(store=>store.name===name).months;
+      const actual=api.aggMonths(api.filterMonths(months)) || {};
+      for(const [key,value] of Object.entries(expected)) if(!metricClose(actual[key],value,key==='churn'))
+        discrepancies.push({period,store:name,key,actual:actual[key],expected:value});
+      subscriptionPeriods.push({period,store:name,months:selectedMonths,...expected});
+    }
   }
 
   // Reconcile chart inputs with raw sheet baselines, rather than the renderer's own totals.
@@ -658,6 +700,7 @@ async function main() {
     })),
     discrepancies,
     periods,
+    subscriptionPeriods,
     opportunityDiscrepancies,
     opportunityPeriods,
     analysisDiscrepancies,
