@@ -192,9 +192,20 @@ function subscriptionBasisLabel(summary) {
   return `${summary.subscriptionSourceDate || monthLabel} 구독 수신 기준${summary.subscriptionLagged ? ' / 매출 기준일과 다름' : ''}`;
 }
 function churnBasisLabel(summary) {
+  if (Number.isFinite(summary.churn) && summary.churnComplete === false)
+    return `확인 ${summary.churnMonths.length}/${summary.churnTotalMonths}개월 (${summary.churnMonths.join(', ')}) / 해지 ${fmtN(summary.churnCancelSubs)}건 / 노출량 ${fmtN(summary.churnExposure)} / 미확인월 제외`;
   if (summary.hasSubscriptionExposure === false)
     return '일별 구독 분모 미확인 / 유지, MRR, 신규와 해지는 수신값 표시';
   return `해지 ${fmtN(summary.cancelSubs)}건 / 구독자-월 노출량 ${fmtN(summary.retainedExposure)}`;
+}
+function churnLabel(summary) {
+  return summary.churnComplete === false && Number.isFinite(summary.churn) ? '이탈률 (확인월)' : '이탈률';
+}
+function fmtChurn(summary) {
+  return fmtP(summary.churn)+(summary.churnComplete===false && Number.isFinite(summary.churn) ? ' (확인월)' : '');
+}
+function churnHealth(value) {
+  return Number.isFinite(value) ? Math.max(0,Math.min(100,100-value*5)) : null;
 }
 const tx     = v => String(v??'').replace(/\s+/g,' ').trim();
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1235,6 +1246,13 @@ function aggMonths(months) {
   const salesComparable = months.every(m => m.salesComparable !== false);
   const hasUsageData = months.every(m => m.hasUsageData !== false);
   const hasSalesData = months.every(m => m.hasSalesData !== false);
+  // Use the same verified months for both sides of the reviewed churn ratio.
+  // Full-period exposure and ARPU remain unavailable when any month is incomplete.
+  const churnMonths = months.filter(m=>m.hasSubscriptionData!==false && m.hasSubscriptionExposure!==false
+    && Number.isFinite(m.retainedExposure ?? m.retained) && (m.retainedExposure ?? m.retained)>=0
+    && Number.isFinite(m.cancelSubs));
+  const churnExposure = churnMonths.reduce((sum,m)=>sum+(m.retainedExposure ?? m.retained),0);
+  const churnCancelSubs = churnMonths.reduce((sum,m)=>sum+m.cancelSubs,0);
   return {
     hasArpuData, hasArpwData, salesComparable, hasUsageData, hasSalesData,
     usageComparable:months.every(m=>m.usageComparable!==false),
@@ -1281,7 +1299,12 @@ function aggMonths(months) {
     mrrYoY:hasSubscriptionData && lastSubscription.mrrPrev
       ? (lastSubscription.mrr-lastSubscription.mrrPrev)/lastSubscription.mrrPrev*100
       : null,
-    churn:hasSubscriptionExposure && t.retainedExposure ? t.cancelSubs/t.retainedExposure*100 : null,
+    churn:churnExposure>0 ? churnCancelSubs/churnExposure*100 : null,
+    churnComplete:churnMonths.length===months.length,
+    churnMonths:churnMonths.map(m=>m.month),
+    churnTotalMonths:months.length,
+    churnExposure,
+    churnCancelSubs,
     utilization: hasUsageData && t.cap ? t.usage/t.cap*100 : null,
     refundRate: hasSalesData && t.gross ? t.refundVal/t.gross*100 : null,
     refundAmount:hasSalesData ? t.refundVal : null,
@@ -1854,12 +1877,12 @@ function getEntity() {
 }
 
 /* ── 10. GAUGE ──────────────────────────────────────────────── */
-function makeGauge(wrapId, valId, subId, score, valText, subText, reference = false) {
+function makeGauge(wrapId, valId, subId, score, valText, subText, reference = false, colorOverride = null) {
   const wrap = $(wrapId);
   if (!wrap) return;
   const r = 80, cx = 100, cy = 105, perim = Math.PI * r;
   const s = Math.max(0, Math.min(100, score));
-  const color = reference ? '#c07b48' : s >= 72 ? '#216552' : s >= 45 ? '#c07b48' : '#b24c58';
+  const color = colorOverride || (reference ? '#c07b48' : s >= 72 ? '#216552' : s >= 45 ? '#c07b48' : '#b24c58');
   const trackColor = '#f0ebe3';
   const theta = Math.PI * (1 - s/100);
   const nx = (cx + r * Math.cos(theta)).toFixed(1);
@@ -1920,7 +1943,7 @@ function renderGauges(ent) {
   const utilRaw = utilDisplay.value ?? 0;
   const ach  = Math.min(100, achRaw);
   const util = Math.min(100, utilRaw);
-  const churnH = Number.isFinite(c.churn) ? Math.max(0, 100 - (c.churn/12)*100) : 50;
+  const churnH = churnHealth(c.churn);
   const hasMrrYoY = Boolean(c.hasMrrYoY);
   const mrrM = hasMrrYoY ? Math.max(0, Math.min(100, 50 + (c.mrrYoY||0))) : 50;
 
@@ -1976,9 +1999,10 @@ function renderGauges(ent) {
       : `총사용 ${fmtN(c.usage||0)}회 / 기간 누적 유휴 Capacity ${fmtN(idleForGauge)}회${periodLabel}`, utilDisplay.partial);
   if (utilDisplay.value == null) $('gsvg-util').innerHTML = '';
   makeGauge('gsvg-churn','gval-churn','gsub-churn',
-    churnH, fmtP(c.churn), hasSubscriptionData
-      ? `${churnBasisLabel(c)} / ${subscriptionBasisLabel(c)}${periodLabel}`
-      : `${subscriptionBasisLabel(c)}${periodLabel}`);
+    churnH ?? 0, churnH == null ? '—' : `${Math.round(churnH)}점`, hasSubscriptionData
+      ? `${churnLabel(c)} ${fmtP(c.churn)} / 100점 − 이탈률(%) × 5<br>${churnBasisLabel(c)}${periodLabel}`
+      : `${subscriptionBasisLabel(c)}${periodLabel}`, false,
+    !Number.isFinite(c.churn) ? '#74695d' : c.churn>10 ? '#b24c58' : c.churn>5 ? '#c07b48' : '#216552');
   if (c.churn == null) $('gsvg-churn').innerHTML = '';
   makeGauge('gsvg-mrr',  'gval-mrr',  'gsub-mrr',
     mrrM, mrrValText, mrrSubText);
@@ -2087,7 +2111,7 @@ function renderKpis(ent) {
       color:'amber', spark:utilTrend, sparkColor:'#c07b48', sparkPartial:ms.map(m=>m.hasUsageData === false),
       projection: c.hasUsageData !== false && (c.achievement||0)>0 && (c.achievement||0)<100
         ? `목표 달성 필요 가동률: ${fmtP(Math.min(100,(usageValue(c)) / Math.max(0.01,(c.achievement||0)/100)))}` : null },
-    { label:'이탈률',  val:fmtP(c.churn),
+    { label:churnLabel(c), val:fmtP(c.churn),
       delta:null, deltaSuffix:'%p', invert:true,
       sub:hasSubscriptionData ? churnBasisLabel(c) : subscriptionBasisLabel(c),
       color:'rose', spark:churnTrend, sparkColor:'#b24c58' },
@@ -2146,9 +2170,9 @@ function renderSignals(ent) {
   // 이탈률
   const churn = c.churn||0;
   if (c.hasSubscriptionData === false || c.churn == null) signals.push({type:'neutral', title:'구독 확인 대기', text:'수신된 구독 지표를 확인한 후 판정합니다.'});
-  else if (churn <= 5) signals.push({type:'ok',title:'이탈 기준 이내',text:`이탈률 ${fmtP(churn)} / 점검 기준 5% 이하`});
-  else if (churn <= 10) signals.push({type:'warn',title:'이탈 점검',text:`이탈률 ${fmtP(churn)} / 원천 점검 기준 5% 초과`});
-  else                 signals.push({type:'bad',  title:'이탈 위험', text:`이탈률 ${fmtP(churn)} — 즉각 대응`});
+  else if (churn <= 5) signals.push({type:'ok',title:'이탈 기준 이내',text:`이탈률 ${fmtChurn(c)} / 점검 기준 5% 이하`});
+  else if (churn <= 10) signals.push({type:'warn',title:'이탈 점검',text:`이탈률 ${fmtChurn(c)} / 원천 점검 기준 5% 초과`});
+  else                 signals.push({type:'bad', title:'이탈 위험',text:`이탈률 ${fmtChurn(c)} / 즉각 대응`});
 
   // FIX 4 — 가동률 시그널 (100% 초과 과부하 케이스 추가)
   const util = usageValue(c);
@@ -2264,7 +2288,7 @@ function renderInsights(ent) {
     </div>
     <div class="summary-metric-grid">
       <div class="summary-metric"><span>가동률</span><strong>${usagePresentation(c).label}</strong></div>
-      <div class="summary-metric"><span>이탈률</span><strong>${fmtP(c.churn)}</strong></div>
+      <div class="summary-metric"><span>${churnLabel(c)}</span><strong>${fmtP(c.churn)}</strong></div>
       <div class="summary-metric"><span>MRR</span><strong>${c.hasSubscriptionData ? fmtS(c.mrr||0) : '—'}</strong><small>${mrrDir}</small></div>
     </div>
     <div class="summary-note-list">
@@ -2276,12 +2300,12 @@ function renderInsights(ent) {
   const risks = [];
   const gap = fmtS(Math.max(0,(c.target||0)-(c.net||0)));
   if ((c.churn||0) > 12)
-    risks.push({lv:'critical', text:`이탈률 심각 (${fmtP(c.churn||0)})`,
+    risks.push({lv:'critical', text:`이탈률 심각 (${fmtChurn(c)})`,
       impact:`MRR 직접 손실 · 구독 기반 잠식 위험`,
       owner:`사업운영팀 · 마케팅팀`,
       action:`해지 방어 캠페인 즉시 실행 + 해지 원인 인터뷰 착수`});
   else if ((c.churn||0) > 7)
-    risks.push({lv:'warning', text:`이탈률 경계 (${fmtP(c.churn||0)})`,
+    risks.push({lv:'warning', text:`이탈률 경계 (${fmtChurn(c)})`,
       impact:`구독자 감소 가속 위험`,
       owner:`사업운영팀`,
       action:`리텐션 캠페인 검토 · 혜택 재설계 우선`});
@@ -2403,7 +2427,7 @@ function utilizationDataset(months) {
 const SCORE_DIMENSIONS = [
   {key:'achievement',label:'순매출달성률',available:c=>c.hasSalesData!==false,score:v=>v},
   {key:'utilization',label:'가동률',available:c=>c.hasUsageData!==false,score:v=>v},
-  {key:'churn',label:'이탈건전성',available:c=>c.hasSubscriptionData!==false && c.subscriptionFlowComplete!==false,score:v=>100-v*5},
+  {key:'churn',label:'이탈건전성',available:c=>c.hasSubscriptionData!==false,score:churnHealth},
   {key:'refundRate',label:'환불건전성',available:c=>c.hasSalesData!==false,score:v=>100-v*3},
   {key:'mrrYoY',label:'MRR성장',available:c=>c.hasSubscriptionData!==false && c.hasMrrYoY===true,score:v=>50+v},
   {key:'grossYoY',label:'매출성장',available:c=>c.hasSalesData!==false && c.hasGrossYoY===true,score:v=>50+v}
@@ -2415,6 +2439,7 @@ function scoreComponents(current) {
   }));
 }
 function computeScore(current) {
+  if (current.churnComplete===false) return null;
   const values=scoreComponents(current).map(row=>row.value);
   return values.every(Number.isFinite) ? Math.round(values.reduce((sum,value)=>sum+value,0)/values.length) : null;
 }
@@ -2424,7 +2449,8 @@ function buildScoreReview(ent) {
   })).filter(row=>filterMonths((dashboard.stores.find(store=>store.name===row.name)||{}).months||[]).length);
   rows.forEach(row=>{row.components=scoreComponents(row.current);});
   const common=SCORE_DIMENSIONS.map((dimension,index)=>index)
-    .filter(index=>rows.length && rows.every(row=>row.components[index].value!=null));
+    .filter(index=>rows.length && rows.every(row=>row.components[index].value!=null
+      && (SCORE_DIMENSIONS[index].key!=='churn' || row.current.churnComplete!==false)));
   rows.forEach(row=>{row.score=common.length
     ? Math.round(common.reduce((sum,index)=>sum+row.components[index].value,0)/common.length) : null;});
   rows.sort((a,b)=>(b.score ?? -1)-(a.score ?? -1)||a.name.localeCompare(b.name,'ko'));
@@ -2981,9 +3007,10 @@ function renderHealthChart(ent) {
           ? `확인 ${axes[ctx.dataIndex].count}/${axes[ctx.dataIndex].total}개 매장` : ''}}},
       scales:{r:{min:0,max:100,grid:{color:'#f0ebe3'},ticks:{stepSize:25,backdropColor:'transparent'}}}}
   });
-  $('healthSub').textContent=`${ent.isAll?'포트폴리오 합산':ent.name} vs 지표별 확인 매장 평균 / 미수신 축은 연결하지 않음`;
+  $('healthSub').textContent=`${ent.isAll?'포트폴리오 합산':ent.name} vs 지표별 확인 매장 평균 / 미수신 축은 연결하지 않음${ent.current.churnComplete===false ? ' / 이탈건전성은 확인월 기준' : ''}`;
   if ($('healthNote')) $('healthNote').textContent=axes.map(axis=>
-    `${axis.label} 평균 ${axis.count}/${axis.total}개 매장${axis.value==null?' / 선택 값 미확인':''}`).join(' / ');
+    `${axis.label} 평균 ${axis.count}/${axis.total}개 매장${axis.value==null?' / 선택 값 미확인':''}`).join(' / ')
+      + ` / 이탈건전성: 100점 − 이탈률(%) × 5, 0~100점 / 매장별 확인월 범위가 다를 수 있음 / ${churnBasisLabel(ent.current)}`;
 }
 
 function renderQuarterChart(ent) {
@@ -3043,11 +3070,24 @@ function buildPositionReview() {
   };
   const candidates=getActiveStores().map(store=>({...store,positionMonths:selectedPeriodMonths(store.months)}))
     .filter(store=>store.positionMonths.length);
-  const sharedMonths=candidates.length ? candidates[0].positionMonths.map(m=>m.monthNum)
-    .filter(n=>candidates.every(store=>store.positionMonths.some(m=>m.monthNum===n))) : [];
+  let cohort=candidates;
+  let sharedMonths=cohort.length ? cohort[0].positionMonths.map(m=>m.monthNum)
+    .filter(n=>cohort.every(store=>store.positionMonths.some(m=>m.monthNum===n))) : [];
+  if (!sharedMonths.length) {
+    // An opening store must not erase the comparable established-store cohort.
+    const options=[...new Set(candidates.flatMap(s=>s.positionMonths.map(m=>m.monthNum)))].map(n=>{
+      const stores=candidates.filter(s=>s.positionMonths.some(m=>m.monthNum===n));
+      const months=stores[0].positionMonths.map(m=>m.monthNum)
+        .filter(k=>stores.every(s=>s.positionMonths.some(m=>m.monthNum===k)));
+      return {stores,months};
+    }).filter(option=>option.stores.length>=2);
+    options.sort((a,b)=>b.stores.length-a.stores.length || b.months.length-a.months.length
+      || Math.max(...b.months)-Math.max(...a.months));
+    if (options.length) { cohort=options[0].stores; sharedMonths=options[0].months; }
+  }
   const confirmedMonths=sharedMonths.filter(n=>monthStatus(n)==='confirmed');
   const commonMonths=confirmedMonths.length ? confirmedMonths : sharedMonths.filter(n=>monthStatus(n)==='mtd');
-  const stores = candidates.map(s => {
+  const stores = cohort.map(s => {
     const positionMonths = s.positionMonths.filter(m=>commonMonths.includes(m.monthNum));
     const agg = aggMonths(positionMonths) || {};
     return {
@@ -3059,7 +3099,9 @@ function buildPositionReview() {
       monthNums:positionMonths.map(m=>m.monthNum).filter(Boolean)
     };
   }).filter(s => s.monthCount > 0 && s.gross > 0 && Number.isFinite(s.churn));
-  return {rows:stores,months:commonMonths};
+  const excluded=getActiveStores().filter(s=>!stores.some(row=>row.name===s.name))
+    .filter(s=>s.months.some(m=>periodMatchesMonth(state.quarter,m) && m.gross>0)).map(s=>s.name);
+  return {rows:stores,months:commonMonths,excluded};
 }
 
 function renderScatterChart(ent) {
@@ -3099,7 +3141,7 @@ function renderScatterChart(ent) {
     : `${state.quarter === 'all' ? '선택 기간' : state.quarter} 매출/구독 공통 수신월 없음`;
   const positionSub = $('positionSub');
   if (positionSub) positionSub.textContent = stores.length
-    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (마감월)'} / 점선: 순매출 달성률 100%, 이탈률 5% / 버블: 실결제매출`
+    ? `${periodText}${positionUsesMtd ? ' (MTD)' : ' (마감월)'} / ${stores.length}개 매장 비교${review.excluded.length ? ` / 공통월 비교 제외: ${review.excluded.join(', ')}` : ''} / 점선: 순매출 달성률 100%, 이탈률 5% / 버블: 실결제매출`
     : `${periodText} / 포지션 산출 제외`;
 
   const maxAchievement = Math.max(...stores.map(s=>s.achievement), 100);
@@ -3331,7 +3373,7 @@ function renderHeroKpis(ent) {
     { label:'실결제매출', val: fmtS(c.gross), note: c.hasSalesData===false ? '매출 확인 대기' : `실결제매출 달성 ${fmtP(c.grossAchievement)}`, good: c.hasSalesData===false ? null : (c.grossAchievement||0)>=100 },
     { label:'MRR',   val: hasSubscriptionData ? fmtS(c.mrr||0) : '—', note: hasSubscriptionData ? `MRR YoY ${fmtYoY(c.mrrYoY, c.hasMrrYoY)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: c.hasMrrYoY ? (c.mrrYoY||0)>=0 : null },
     { label:'가동률', val:usagePresentation(c).label, note:usagePresentation(c).note, good:c.hasUsageData === false ? null : c.utilization>=70 },
-    { label:'이탈률', val:fmtP(c.churn), note:hasSubscriptionData ? churnBasisLabel(c) : subscriptionBasisLabel(c), good:Number.isFinite(c.churn) ? c.churn<=5 : null, invert:true },
+    { label:churnLabel(c), val:fmtP(c.churn), note:hasSubscriptionData ? churnBasisLabel(c) : subscriptionBasisLabel(c), good:Number.isFinite(c.churn) ? c.churn<=5 : null, invert:true },
     { label:'순증감', val: hasSubscriptionData ? `${(c.netAdds||0)>=0?'+':''}${fmtN(c.netAdds||0)}` : '—', note: hasSubscriptionData ? `신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c), good: hasSubscriptionData ? (c.netAdds||0)>=0 : null },
     { label:'순매출 달성률', val: c.hasSalesData===false?'—':fmtP(c.achievement), note: c.hasSalesData===false?'선택 기간 매출 확인 대기':`순매출 ${fmtS(c.net)} / 목표 ${fmtS(c.target)}`, good: c.hasSalesData===false?null:c.achievement>=100 }
   ];
@@ -3428,8 +3470,8 @@ function renderAlerts(ent) {
   else if ((c.achievement||0) >= 100) alerts.push({ lvl:'success', msg: `✓ 순매출 달성률 ${fmtP(c.achievement||0)} — 목표 초과 달성` });
   if ((usageValue(c)) > 110)  alerts.push({ lvl:'info',    msg: `ℹ 가동률 ${fmtP(usageValue(c))} — 100% 초과, 설비 과부하 모니터링 권장` });
   else if ((usageValue(c)) < 50) alerts.push({ lvl:'danger', msg: `⚠ 가동률 ${fmtP(usageValue(c))} — 50% 미달, 운영 효율화 필요` });
-  if ((c.churn||0) > 10)         alerts.push({ lvl:'danger',  msg: `⚠ 이탈률 ${fmtP(c.churn||0)} — 긴급 해지 방어 캠페인 검토` });
-  else if ((c.churn||0) > 6)     alerts.push({ lvl:'warn',    msg: `△ 이탈률 ${fmtP(c.churn||0)} — 경계 수준, 리텐션 점검 권장` });
+  if ((c.churn||0) > 10)         alerts.push({ lvl:'danger',  msg: `⚠ 이탈률 ${fmtChurn(c)} / 긴급 해지 방어 캠페인 검토` });
+  else if ((c.churn||0) > 6)     alerts.push({ lvl:'warn',    msg: `△ 이탈률 ${fmtChurn(c)} / 경계 수준, 리텐션 점검 권장` });
   if ((c.refundRate||0) > 15)    alerts.push({ lvl:'warn',    msg: `△ 환불율 ${fmtP(c.refundRate||0)} — CS 이슈 점검 필요` });
 
   // 상태 도트 업데이트
@@ -3946,6 +3988,8 @@ function renderHeatmap(ent) {
       utilization: usage.value,
       utilizationPartial: usage.partial,
       churn:       agg.hasSubscriptionData === false ? null : agg.churn ?? null,
+      churnPartial:agg.churnComplete===false,
+      churnBasis:churnBasisLabel(agg),
       refundRate:  agg.hasSalesData === false ? null : agg.refundRate ?? null,
       netAdds:     agg.netAdds ?? null,
       arpu:        agg.arpu ?? null,
@@ -4015,7 +4059,7 @@ function renderHeatmap(ent) {
       ${metrics.map((m,i)=>{
         const v = s[m.key];
         if (!Number.isFinite(v)) return '<div class="hm-cell" title="원천 자료 확인 후 표시">—</div>';
-        if (s[m.key+'Partial']) return `<div class="hm-cell hm-reference" title="${m.key==='lossEstimate'?s.lossCoverage:'관측 사용 ÷ 기간 전체 Capacity / 순위 제외'}"><span class="hm-cell-top">${m.key==='lossEstimate'?'부분':'잠정'} ${m.fmt(v)}</span></div>`;
+        if (s[m.key+'Partial']) return `<div class="hm-cell hm-reference" title="${esc(m.key==='churn'?s.churnBasis+' / 순위 제외':m.key==='lossEstimate'?s.lossCoverage:'관측 사용 ÷ 기간 전체 Capacity / 순위 제외')}"><span class="hm-cell-top">${m.key==='churn'?'확인월':m.key==='lossEstimate'?'부분':'잠정'} ${m.fmt(v)}</span></div>`;
         const {min,max} = cols[i];
         const norm = max>min?(v-min)/(max-min):0.5;
         const {bg,text} = cellColor(norm, m.inv);
@@ -4108,6 +4152,8 @@ function renderTable(ent) {
       utilizationRaw,
       refundRate:  agg.refundRate,
       churn:       agg.churn,
+      churnComplete:agg.churnComplete,
+      churnBasis:churnBasisLabel(agg),
       netAdds:     agg.netAdds,
       arpu:        agg.arpu,
       hasSalesData:agg.hasSalesData,
@@ -4156,7 +4202,7 @@ function renderTable(ent) {
       <td data-label="매장">${s.name}</td>
       <td data-label="순매출 달성률">${achCell}</td>
       <td data-label="가동률">${utilCell}</td>
-      <td data-label="이탈률">${s.churn == null ? '—' : fmtP(s.churn)}</td>
+      <td data-label="이탈률" title="${esc(s.churnBasis)}">${s.churn == null ? '—' : fmtP(s.churn)}${s.churnComplete===false && s.churn!=null ? '<small style="display:block;font-size:10px;color:var(--muted)">확인월 기준</small>' : ''}</td>
       <td data-label="순증감" class="${s.netAdds == null ? '' : s.netAdds>=0?'snapshot-positive':'snapshot-negative'}">${s.netAdds == null ? '—' : (s.netAdds>=0?'+':'')+fmtN(s.netAdds)}</td>
       <td data-label="상태"><span class="verdict-chip ${derivedSt.cls}" title="원천 상태 기준: 환불율 >5%, 이탈률 >5%, 순매출 달성률 <90%, 가동률 <70%. 미수신 지표는 제외">${derivedSt.text}</span></td>
     </tr>`;
@@ -4210,7 +4256,7 @@ function renderDetail(ent) {
           : (capAll[0]||{});
         return `총사용 ${fmtN(c.usage||0)}대 · 기간 누적 유휴 Capacity ${fmtN(cr.idleCount||0)}대`;
       })() },
-    { label:'이탈률', val:fmtP(c.churn), sub:hasSubscriptionData ? churnBasisLabel(c) : subscriptionBasisLabel(c) },
+    { label:churnLabel(c), val:fmtP(c.churn), sub:hasSubscriptionData ? churnBasisLabel(c) : subscriptionBasisLabel(c) },
     (()=>{
       const dRefund   = c.refundRate||0;
       return { label:'환불율', val:hasSalesData ? fmtP(dRefund) : '—', sub:hasSalesData ? '실결제매출 기준' : '매출 자료 확인 중' };
@@ -4275,9 +4321,9 @@ function renderDetail(ent) {
   else if (ach < 95) issues.push({ sev:'warning',  text:`순매출 달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 남음` });
 
   // 이탈 임계값: 15%+ 심각 / 10~15% 위험 / 6~10% 주의
-  if (churn > 15)     issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 긴급 대응 필요` });
-  else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건, 즉각 점검 필요` });
-  else if (churn > 6)  issues.push({ sev:'warning',  text:`이탈률 ${fmtP(churn)} — 유지 ${fmtN(c.retained||0)}명 중 이탈 경계 수준` });
+  if (churn > 15)     issues.push({ sev:'critical', text:`이탈률 심각 ${fmtChurn(c)} / 해지 ${fmtN(c.churnCancelSubs ?? c.cancelSubs)}건, 긴급 대응 필요` });
+  else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtChurn(c)} / 해지 ${fmtN(c.churnCancelSubs ?? c.cancelSubs)}건, 즉각 점검 필요` });
+  else if (churn > 6)  issues.push({ sev:'warning', text:`이탈률 ${fmtChurn(c)} / 구독 이탈 경계 수준` });
 
   if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 유휴 Capacity ${fmtN(capRow.idleCount||0)}대, 기회금액 상한 ${fmtS(capRow.lossEstimate||0)}` });
   else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 개선 여지 있음, 유휴 Capacity ${fmtN(capRow.idleCount||0)}대` });
@@ -4416,6 +4462,7 @@ const OPERATIONAL_RULES = [
 function operationalMetricAvailable(current,rule) {
   const flag = {sales:'hasSalesData',subscription:'hasSubscriptionData',usage:'hasUsageData'}[rule.source];
   return current[flag] !== false && (rule.source !== 'subscription' || current.subscriptionFlowComplete !== false)
+    && (rule.key !== 'churn' || current.churnComplete !== false)
     && Number.isFinite(current[rule.key]);
 }
 function operationalSignals(current,rules=OPERATIONAL_RULES) {
@@ -4517,7 +4564,7 @@ function renderInlineStoreDetail(ent) {
       {label:'실결제매출',value:c.hasSalesData===false?'—':fmtS(c.gross)},
       {label:'순매출 달성률',value:c.hasSalesData===false?'—':fmtP(c.achievement)},
       {label:'가동률 (관측 참고)',value:usage.label},
-      {label:'이탈률',value:hasSubscriptionData?fmtP(c.churn):'—'},
+      {label:churnLabel(c),value:hasSubscriptionData?fmtP(c.churn):'—'},
       {label:'매장PASS ARPU',value:fmtS(payment.arpu)},
       {label:'건당 순매출 (확인 구간)',value:fmtS(payment.netPerWash)}
     ];
@@ -4545,9 +4592,9 @@ function renderInlineStoreDetail(ent) {
 
   if (ach < 80)     issues.push({ sev:'critical', text:`순매출 달성률 부진 (${fmtP(ach)}) — 목표 대비 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 미달` });
   else if (ach < 95) issues.push({ sev:'warning',  text:`순매출 달성률 ${fmtP(ach)} — 목표까지 ${fmtS(Math.max(0,(c.target||0)-(c.net||0)))} 남음` });
-  if      (churn > 15) issues.push({ sev:'critical', text:`이탈률 심각 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 긴급 대응` });
-  else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtP(churn)} — 해지 ${fmtN(c.cancelSubs||0)}건 즉각 점검` });
-  else if (churn > 6) issues.push({ sev:'warning', text:`이탈률 ${fmtP(churn)} — 유지 구독자 이탈 경계` });
+  if      (churn > 15) issues.push({ sev:'critical', text:`이탈률 심각 ${fmtChurn(c)} / 해지 ${fmtN(c.churnCancelSubs ?? c.cancelSubs)}건 긴급 대응` });
+  else if (churn > 10) issues.push({ sev:'critical', text:`이탈률 ${fmtChurn(c)} / 해지 ${fmtN(c.churnCancelSubs ?? c.cancelSubs)}건 즉각 점검` });
+  else if (churn > 6) issues.push({ sev:'warning', text:`이탈률 ${fmtChurn(c)} / 구독 이탈 경계` });
   if (util < 50)    issues.push({ sev:'critical', text:`가동률 저조 (${fmtP(util)}) — 유휴 Capacity ${fmtN(capRow.idleCount||0)}대 · 기회금액 상한 ${fmtS(capRow.lossEstimate||0)}` });
   else if (util < 65) issues.push({ sev:'warning', text:`가동률 ${fmtP(util)} — 유휴 Capacity ${fmtN(capRow.idleCount||0)}대 개선 여지` });
   if (refund > 15)  issues.push({ sev:'critical', text:`환불율 ${fmtP(refund)} — CS 이슈 즉각 점검` });
@@ -4600,7 +4647,7 @@ function renderInlineStoreDetail(ent) {
         {l:'실결제매출',      v:fmtS(c.gross),        s:`실결제매출 달성 ${fmtP(c.grossAchievement||0)}`},
         {l:'순매출 달성률',      v:fmtP(ach),             s:`순매출 ${fmtS(c.net||0)} / 목표 ${fmtS(c.target||0)}`},
         {l:'운영 가동률', v:fmtP(util),            s:`기간 누적 유휴 Capacity ${fmtN(capRow.idleCount||0)}대`},
-        {l:'이탈률',      v:hasSubscriptionData ? fmtP(churn) : '—', s:hasSubscriptionData ? `해지 ${fmtN(c.cancelSubs||0)}건 / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c)},
+        {l:churnLabel(c), v:hasSubscriptionData ? fmtP(churn) : '—', s:hasSubscriptionData ? churnBasisLabel(c) : subscriptionBasisLabel(c)},
         {l:'순증감',   v:hasSubscriptionData ? `${netAdds>=0?'+':''}${fmtN(netAdds)}` : '—', s:hasSubscriptionData ? `신규 ${fmtN(c.newSubs||0)} / 해지 ${fmtN(c.cancelSubs||0)} / ${subscriptionBasisLabel(c)}` : subscriptionBasisLabel(c)},
       ].map(i=>`
         <div class="d-item">

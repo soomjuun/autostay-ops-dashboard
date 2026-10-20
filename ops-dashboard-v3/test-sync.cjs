@@ -69,14 +69,47 @@ test('missing, stale, duplicate, misaligned and invalid daily denominators never
   assert.equal(api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0].churn,null);
 });
 
-test('daily period rates use summed denominators and retain a gap when any selected denominator is unknown',()=>{
+test('daily period churn matches verified numerators and denominators without filling missing months',()=>{
   const {api}=dailyApi();
   const first=api.parseFactMonthly(fact({최신구독일_2026:day(9)})).get('일산')[0];
   const last={...first,retained:150,retainedExposure:80,cancelSubs:8,storePassRevenue:4000,mrr:9000};
   let total=api.aggMonths([first,last]);
   assert.equal(total.churn,15); assert.equal(total.arpu,100); assert.equal(total.retained,150); assert.equal(total.mrr,9000);
   total=api.aggMonths([first,{...last,hasSubscriptionExposure:false,retainedExposure:null,hasArpuData:false}]);
-  assert.equal(total.churn,null); assert.equal(total.arpu,null); assert.equal(total.retained,150);
+  assert.equal(total.churn,35); assert.equal(total.arpu,null); assert.equal(total.retained,150);
+  assert.equal(total.cancelSubs,15); assert.equal(total.churnCancelSubs,7);
+  assert.equal(total.churnExposure,20); assert.equal(total.retainedExposure,null);
+  assert.equal(total.churnComplete,false); assert.equal(total.churnMonths.length,1);
+  assert.match(api.churnBasisLabel(total),/확인 1\/2개월/);
+  total=api.aggMonths([first,{...last,hasSubscriptionData:false}]);
+  assert.equal(total.churn,35); assert.equal(total.churnComplete,false);
+});
+
+test('incomplete reviewed churn is visible but excluded from confirmed cross-store priorities and score ranks',()=>{
+  const api=createDashboardApi();api.setState({quarter:'all',store:'all'});
+  const first=opportunityFixture({month:'1월',monthNum:1,retainedExposure:100,cancelSubs:5});
+  const missing={...first,month:'2월',monthNum:2,hasSubscriptionExposure:false,retainedExposure:null};
+  api.setDashboard({stores:[{name:'일산',months:[first,missing]},{name:'하남',months:[first]}],opsStores:[]});
+  const review=api.buildPriorityReview({isAll:true});
+  assert.ok(!review.common.some(rule=>rule.key==='churn'));
+  const score=api.buildScoreReview({isAll:true});
+  assert.ok(!score.common.includes(2));
+  assert.equal(api.aggMonths([first,missing]).churn,5);
+  assert.equal(api.computeScore(api.aggMonths([first,missing])),null);
+});
+
+test('churn health uses the same bounded point score in gauges and radar, with source risk colors',()=>{
+  const elements=Object.fromEntries(['gsvg-churn','gval-churn','gsub-churn'].map(id=>[id,{innerHTML:'',textContent:'',style:{}}]));
+  const api=createDashboardApi(elements);
+  const current={hasSubscriptionData:true,churn:5.5,cancelSubs:11,retainedExposure:200,hasUsageData:true,utilization:80};
+  api.renderGauges({current,months:[],isAll:true});
+  assert.equal(elements['gval-churn'].textContent,'73점');
+  assert.match(elements['gsub-churn'].innerHTML,/이탈률 5.5%/);
+  assert.match(elements['gsvg-churn'].innerHTML,/#c07b48/);
+  assert.equal(api.scoreComponents(current).find(row=>row.key==='churn').value,72.5);
+  assert.equal(api.churnHealth(30),0); assert.equal(api.churnHealth(0),100);
+  current.churn=null;api.renderGauges({current,months:[],isAll:true});
+  assert.equal(elements['gval-churn'].textContent,'—');assert.equal(elements['gsvg-churn'].innerHTML,'');
 });
 
 test('daily DIRECT denominator drives portfolio rates while ALL PASS remains separate in MRR stocks',()=>{
@@ -129,6 +162,22 @@ test('position maps compare the same verified months rather than different store
     {name:'하남',months:[{...current,gross:200}]}],opsStores:[]});
   review=api.buildPositionReview();assert.deepEqual(Array.from(review.months),[month]);
   assert.deepEqual(Array.from(review.rows,r=>r.gross),[100,200]);
+});
+
+test('H1 and Q2 position maps keep a common established-store cohort when an opening store has no common month',()=>{
+  const api=createDashboardApi();
+  const row=n=>({monthNum:n,month:`${n}월`,quarter:`Q${Math.ceil(n/3)}`,gross:100,net:90,target:100,
+    retained:100,retainedExposure:100,cancelSubs:10,churn:10,hasSubscriptionData:true,hasSubscriptionExposure:true,hasArpuData:true});
+  const stores=['일산','하남','고양','자유로','광명','성수'].map(name=>({name,months:[1,2,3,4,5,6].map(n=>({
+    ...row(n),...(['자유로','성수'].includes(name) && n>=5 ? {hasSubscriptionExposure:false,churn:null,hasArpuData:false} : {})
+  }))}));
+  stores.push({name:'안성',months:[row(5),row(6)]});api.setDashboard({stores,opsStores:[]});
+  for(const period of ['H1','Q2']) {
+    api.setState({quarter:period,store:'all'});const review=api.buildPositionReview();
+    assert.equal(review.rows.length,6);assert.deepEqual(Array.from(review.excluded),['안성']);
+    assert.deepEqual(Array.from(review.months),period==='H1'?[1,2,3,4]:[4]);
+    assert.ok(review.rows.every(store=>JSON.stringify(store.monthNums)===JSON.stringify(review.months)));
+  }
 });
 
 test('churn above the source five-percent threshold is not shown as healthy',()=>{
@@ -377,7 +426,7 @@ test('store snapshots use source thresholds and preserve missing sales and subsc
   api.setDashboard({stores:[{name:'일산',months:rows}],opsStores:[]});api.setState({quarter:'all',store:'all'});
   api.renderTable({isAll:true});
   assert.match(panel.innerHTML,/<td data-label="순매출 달성률">—/);
-  assert.match(panel.innerHTML,/<td data-label="이탈률">—/);
+  assert.match(panel.innerHTML,/<td data-label="이탈률"[^>]*>—/);
   assert.match(panel.innerHTML,/일부 자료 확인 중/);assert.doesNotMatch(panel.innerHTML,/목표 미달/);
   rows[0]=opportunityFixture({net:850,gross:850,usage:75,cancelSubs:4,netAdds:0});
   api.renderTable({isAll:true});assert.match(panel.innerHTML,/목표 미달/);

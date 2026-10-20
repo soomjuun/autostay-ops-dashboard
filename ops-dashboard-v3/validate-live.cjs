@@ -42,7 +42,7 @@ function createDashboardApi(elements = {}, documentOverrides = {}) {
       renderOpsArpuChart, renderOpsArpuStats, renderSubscriptionPipeline, renderReviewed, renderSignals, renderDetail,
       renderPaymentPanel, renderHeatmap, renderTable,
       computeScore, scoreComponents, buildScoreReview, buildHealthReview,
-      buildPositionReview,
+      buildPositionReview, churnBasisLabel, churnHealth, renderGauges, renderHeroKpis,
       selectedStoreMonths, capacityScope, buildCapacityReview, seasonPoint, buildPaymentReview,
       renderScoreChart, renderHealthChart, renderCapacityPanel, renderSeasonChart, renderQuarterChart,
       renderInlineStoreDetail,
@@ -76,6 +76,7 @@ function createDashboardApi(elements = {}, documentOverrides = {}) {
     clearTimeout,
     setInterval: () => 0,
     clearInterval: () => {},
+    requestAnimationFrame: callback => callback(),
     Date,
     Math,
     Intl
@@ -539,13 +540,17 @@ async function main() {
       const exposures=selectedMonths.map(n=>dailyExposure(name==='all'?'DIRECT':name,n));
       const exposure=exposures.length && exposures.every(v=>v!=null) ? exposures.reduce((a,b)=>a+b,0) : null;
       const sum=key=>rows.reduce((total,row)=>total+rawNumber(row,key),0);
-      const expected={retainedExposure:exposure,churn:exposure>0?sum('해지_2026')/exposure*100:null,
+      const churnMonths=selectedMonths.filter((n,i)=>exposures[i]!=null);
+      const churnExposure=exposures.reduce((sum,value)=>sum+(value??0),0);
+      const churnCancels=rows.filter(row=>churnMonths.includes(rawNumber(row,'월번호')))
+        .reduce((sum,row)=>sum+rawNumber(row,'해지_2026'),0);
+      const expected={retainedExposure:exposure,churn:churnExposure>0?churnCancels/churnExposure*100:null,
         arpu:exposure>0?sum('단일구독매출_2026')/exposure:null};
       const months=name==='all'?overall:stores.find(store=>store.name===name).months;
       const actual=api.aggMonths(api.filterMonths(months)) || {};
       for(const [key,value] of Object.entries(expected)) if(!metricClose(actual[key],value,key==='churn'))
         discrepancies.push({period,store:name,key,actual:actual[key],expected:value});
-      subscriptionPeriods.push({period,store:name,months:selectedMonths,...expected});
+      subscriptionPeriods.push({period,store:name,months:selectedMonths,churnMonths,churnExposure,churnCancels,...expected});
     }
   }
 
